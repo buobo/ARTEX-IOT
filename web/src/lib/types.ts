@@ -354,12 +354,13 @@ export interface WorkspaceFile {
 export interface TaskScopeRow {
   id: number;
   task_id: number;
-  kind: "company" | "root_domain" | "subdomain" | "ip" | "cidr" | "icp" | "keyword";
+  kind: "company" | "root_domain" | "subdomain" | "ip" | "cidr" | "icp" | "keyword" | "firmware" | "device";
   company_id?: number;
   company_name?: string; // 后端 JOIN companies 解析，仅 kind=company 有值
   domain?: string;
   net?: string;
   value?: string;
+  sha256?: string; // 仅 kind=firmware
   source: "auto" | "agent" | "manual";
   reason?: string;
 }

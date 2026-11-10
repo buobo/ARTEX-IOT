@@ -56,6 +56,10 @@ function cacheHitRate(cacheRead: number, input: number): string {
 
 // 测试范围一条的显示值：域名 / 网段 / 公司。
 function scopeValue(row: TaskScopeRow): string {
+  // 固件行：文件名 + 摘要前 8 位，便于区分同名固件
+  if (row.kind === "firmware" && row.value) {
+    return row.sha256 ? `${row.value}（sha256 ${row.sha256.slice(0, 8)}）` : row.value;
+  }
   if (row.value) return row.value;
   if (row.domain) return row.domain;
   if (row.net) return row.net;
@@ -71,6 +75,8 @@ const SCOPE_KIND_LABELS: Record<TaskScopeRow["kind"], string> = {
   cidr: "网段",
   icp: "ICP",
   keyword: "关键词",
+  firmware: "固件",
+  device: "靶机",
 };
 
 const SCOPE_SOURCE_LABELS: Record<TaskScopeRow["source"], string> = {
@@ -830,6 +836,8 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               <NativeSelectOption value="icp">ICP</NativeSelectOption>
               <NativeSelectOption value="keyword">关键词</NativeSelectOption>
               <NativeSelectOption value="company">公司</NativeSelectOption>
+              <NativeSelectOption value="firmware">固件</NativeSelectOption>
+              <NativeSelectOption value="device">靶机</NativeSelectOption>
             </NativeSelect>
             <Input
               className="h-7 w-56 text-sm"
@@ -842,7 +850,11 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       ? "如 京ICP备12345678号-1"
                       : scopeKind === "keyword"
                         ? "如 企业名称关键词"
-                        : "如 example.com"
+                        : scopeKind === "firmware"
+                          ? "如 RP09_1.0.44.bin"
+                          : scopeKind === "device"
+                            ? "如 192.168.1.50 RP09"
+                            : "如 example.com"
               }
               value={scopeValueInput}
               onChange={(e) => setScopeValueInput(e.target.value)}

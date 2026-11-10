@@ -15,7 +15,7 @@ import (
 type TaskScope struct {
 	ID        int64  `json:"id"`
 	TaskID    int64  `json:"task_id"`
-	Kind      string `json:"kind"` // company|root_domain|subdomain|ip|cidr|icp|keyword
+	Kind      string `json:"kind"` // company|root_domain|subdomain|ip|cidr|icp|keyword|firmware|device
 	CompanyID *int64 `json:"company_id,omitempty"`
 	// CompanyName is resolved for kind=company so callers can label a scope row
 	// without a second lookup. Empty when the row is not a company reference.
@@ -23,6 +23,10 @@ type TaskScope struct {
 	Domain      string `json:"domain,omitempty"`
 	Net         string `json:"net,omitempty"`
 	Value       string `json:"value,omitempty"`
+	// Sha256 is set only for kind=firmware: lowercase 64-hex digest of the firmware
+	// image. value(filename) + sha256 are the firmware's identity, so two different
+	// images that share a filename stay distinct rows.
+	Sha256 string `json:"sha256,omitempty"`
 	Source      string `json:"source"`
 	Reason      string `json:"reason,omitempty"`
 }
@@ -72,22 +76,26 @@ func (s *AssetStore) upsertTaskScopeResult(ts TaskScope) (bool, error) {
 	if ts.Value != "" {
 		valueVal = ts.Value
 	}
+	var shaVal any
+	if ts.Sha256 != "" {
+		shaVal = ts.Sha256
+	}
 	src := ts.Source
 	if src == "" {
 		src = "auto"
 	}
 	query := `
-INSERT INTO task_scope(task_id, kind, company_id, domain, net, value, source, reason)
-VALUES ($1,$2,$3,$4,$5::cidr,$6,$7,NULLIF($8,''))
+INSERT INTO task_scope(task_id, kind, company_id, domain, net, value, sha256, source, reason)
+VALUES ($1,$2,$3,$4,$5::cidr,$6,$7,$8,NULLIF($9,''))
 ON CONFLICT DO NOTHING`
 	var (
 		result sql.Result
 		err    error
 	)
 	if s.tx != nil {
-		result, err = s.tx.Exec(query, ts.TaskID, ts.Kind, companyVal, domainVal, netVal, valueVal, src, ts.Reason)
+		result, err = s.tx.Exec(query, ts.TaskID, ts.Kind, companyVal, domainVal, netVal, valueVal, shaVal, src, ts.Reason)
 	} else {
-		result, err = s.db.Exec(query, ts.TaskID, ts.Kind, companyVal, domainVal, netVal, valueVal, src, ts.Reason)
+		result, err = s.db.Exec(query, ts.TaskID, ts.Kind, companyVal, domainVal, netVal, valueVal, shaVal, src, ts.Reason)
 	}
 	if err != nil {
 		return false, err
@@ -211,13 +219,85 @@ func (s *AssetStore) AddAgentScope(taskID int64, kind, value, reason, source str
 			return ts, err
 		}
 		ts.Value = parsed.Value
+	case "firmware":
+		// 固件文件名。sha256 单独走 AddFirmwareScope（工具层在拿到摘要时调用），
+		// 这里允许只登记文件名，保证"先登记固件、后算摘要"也能用。
+		if len(value) > 256 {
+			return ts, fmt.Errorf("firmware 文件名过长: %d 字符", len(value))
+		}
+		ts.Value = value
+	case "device":
+		// 靶机：value 形如 "192.168.1.50" 或 "192.168.1.50 RP09"（IP + 型号）。
+		host, model := splitDeviceValue(value)
+		netVal := ipToHostCIDR(host)
+		if netVal == "" {
+			return ts, fmt.Errorf("无效 device（需要一个 IP，可选跟型号）: %s", value)
+		}
+		if _, _, err := net.ParseCIDR(netVal); err != nil {
+			return ts, fmt.Errorf("无效 device IP: %s", host)
+		}
+		ts.Net = netVal
+		ts.Value = model
 	default:
-		return ts, fmt.Errorf("不支持的 kind: %s（company/root_domain/subdomain/ip/cidr/icp/keyword）", kind)
+		return ts, fmt.Errorf("不支持的 kind: %s（company/root_domain/subdomain/ip/cidr/icp/keyword/firmware/device）", kind)
 	}
 	if err := s.upsertTaskScope(ts); err != nil {
 		return ts, err
 	}
 	return ts, nil
+}
+
+// AddFirmwareScope records a firmware image as task scope (kind='firmware').
+// filename + sha256 are the image's identity: two different images that happen to
+// share a filename stay separate rows. sha256 may be empty (not hashed yet), but when
+// present it must be 64 lowercase hex — we reject anything else instead of storing it.
+func (s *AssetStore) AddFirmwareScope(taskID int64, filename, sha256, reason, source string) (TaskScope, error) {
+	if source == "" {
+		source = "agent"
+	}
+	ts := TaskScope{TaskID: taskID, Kind: "firmware", Source: source, Reason: reason}
+	if taskID <= 0 {
+		return ts, fmt.Errorf("需要 task_id")
+	}
+	filename = strings.TrimSpace(filename)
+	if filename == "" {
+		return ts, fmt.Errorf("firmware 文件名不能为空")
+	}
+	sha := strings.ToLower(strings.TrimSpace(sha256))
+	if sha != "" && !isHex64(sha) {
+		return ts, fmt.Errorf("sha256 需要 64 位十六进制（小写），收到 %d 字符", len(sha))
+	}
+	ts.Value = filename
+	ts.Sha256 = sha
+	if err := s.upsertTaskScope(ts); err != nil {
+		return ts, err
+	}
+	return ts, nil
+}
+
+// isHex64 reports whether s is exactly 64 lowercase hex chars (a sha256 digest).
+func isHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// splitDeviceValue splits a device scope value into host and model, accepting
+// "192.168.1.50", "192.168.1.50 RP09", "192.168.1.50|RP09" and "192.168.1.50,RP09".
+func splitDeviceValue(v string) (string, string) {
+	fields := strings.FieldsFunc(strings.TrimSpace(v), func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '|' || r == ','
+	})
+	if len(fields) == 0 {
+		return "", ""
+	}
+	return stripHostPort(fields[0]), strings.Join(fields[1:], " ")
 }
 
 // DeleteTaskScope removes a single scope row by id, scoped to the given task.
@@ -235,7 +315,7 @@ func (s *AssetStore) DeleteTaskScope(taskID, scopeID int64) (bool, error) {
 func (s *AssetStore) ListTaskScope(taskID int64) ([]TaskScope, error) {
 	rows, err := s.db.Query(`
 SELECT ts.id, ts.kind, COALESCE(ts.company_id,0), COALESCE(c.name,''), COALESCE(ts.domain,''),
-       COALESCE(ts.net::text,''), COALESCE(ts.value,''), ts.source, COALESCE(ts.reason,'')
+       COALESCE(ts.net::text,''), COALESCE(ts.value,''), COALESCE(ts.sha256,''), ts.source, COALESCE(ts.reason,'')
 FROM task_scope ts
 LEFT JOIN companies c ON c.id=ts.company_id
 WHERE ts.task_id=$1 ORDER BY ts.id`, taskID)
@@ -247,7 +327,7 @@ WHERE ts.task_id=$1 ORDER BY ts.id`, taskID)
 	for rows.Next() {
 		var t TaskScope
 		var cid int64
-		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.CompanyName, &t.Domain, &t.Net, &t.Value, &t.Source, &t.Reason); err != nil {
+		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.CompanyName, &t.Domain, &t.Net, &t.Value, &t.Sha256, &t.Source, &t.Reason); err != nil {
 			return nil, err
 		}
 		t.TaskID = taskID
@@ -300,6 +380,8 @@ func (s *AssetStore) CoverageEnabled(taskID int64) bool {
 }
 
 // task_scope→assets match predicate, reused by the count / by-type / untested queries. $1=taskID.
+// kind='firmware' / 'device' 有意不参与匹配：固件与靶机不是 assets 行，不进覆盖度分母
+// （靶机若同时登记了 kind='ip'，覆盖度只认 ip 那行）。
 const covTargetCTE = `
 target AS (
   SELECT DISTINCT a.id, a.type,

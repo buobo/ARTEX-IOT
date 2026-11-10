@@ -765,12 +765,13 @@ CREATE INDEX IF NOT EXISTS idx_collection_members_asset ON asset_collection_memb
 CREATE TABLE IF NOT EXISTS task_scope (
     id          BIGSERIAL PRIMARY KEY,
     task_id     BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    kind        TEXT NOT NULL CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword','collection')),
+    kind        TEXT NOT NULL CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword','collection','firmware','device')),
     company_id  BIGINT REFERENCES companies(id) ON DELETE CASCADE,  -- kind='company'
     collection_id BIGINT REFERENCES asset_collections(id) ON DELETE CASCADE,  -- kind='collection'
     domain      TEXT,          -- root_domain / subdomain
     net         CIDR,          -- ip / cidr
-    value       TEXT,          -- icp / keyword
+    value       TEXT,          -- icp / keyword / firmware(文件名) / device(型号)
+    sha256      TEXT,          -- kind='firmware'：固件内容 sha256（小写 64 hex），与 value 一起构成固件唯一键
     source      TEXT NOT NULL DEFAULT 'auto' CHECK (source IN ('auto','agent','manual')),
     reason      TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -779,14 +780,19 @@ CREATE TABLE IF NOT EXISTS task_scope (
 ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS value TEXT;
 -- 资产合集作为任务目标：补列 collection_id + 扩 kind 白名单。
 ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS collection_id BIGINT REFERENCES asset_collections(id) ON DELETE CASCADE;
+-- 固件/靶机作为任务目标：固件靠 value(文件名) + sha256 唯一标识；靶机用 net 存 IP、value 存型号。
+-- 两者都不与 assets 匹配，不进覆盖度分母（靶机若另登记 kind='ip'，覆盖度只认 ip 那行）。
+ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS sha256 TEXT;
 ALTER TABLE task_scope DROP CONSTRAINT IF EXISTS task_scope_kind_check;
 ALTER TABLE task_scope ADD CONSTRAINT task_scope_kind_check
-    CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword','collection'));
--- 去重：同一 task 的同一条范围只存一次（自动填批量插入靠它幂等）。纳入 collection_id。
+    CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword','collection','firmware','device'));
+-- 去重：同一 task 的同一条范围只存一次（自动填批量插入靠它幂等）。纳入 collection_id 与 sha256。
 DROP INDEX IF EXISTS uq_task_scope;
 DROP INDEX IF EXISTS uq_task_scope_v2;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope_v3 ON task_scope(
-    task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0), COALESCE(collection_id,0), COALESCE(value,''));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope_v4 ON task_scope(
+    task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0), COALESCE(collection_id,0), COALESCE(value,''), COALESCE(sha256,''));
+-- 先建 v4 再删 v3：反过来的话，万一 v4 建失败，表上就没有唯一索引了。
+DROP INDEX IF EXISTS uq_task_scope_v3;
 CREATE INDEX IF NOT EXISTS idx_ts_domain  ON task_scope(domain) WHERE kind IN ('root_domain','subdomain');
 CREATE INDEX IF NOT EXISTS idx_ts_net     ON task_scope USING GIST(net inet_ops) WHERE kind IN ('ip','cidr');
 CREATE INDEX IF NOT EXISTS idx_ts_company ON task_scope(company_id) WHERE kind = 'company';

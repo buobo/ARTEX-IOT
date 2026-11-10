@@ -1884,6 +1884,7 @@ func (s *Server) taskScopeAdd(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Kind   string `json:"kind"`
 		Value  string `json:"value"`
+		Sha256 string `json:"sha256"` // 仅 kind=firmware
 		Reason string `json:"reason"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1891,7 +1892,15 @@ func (s *Server) taskScopeAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
-	ts, err := as.AddAgentScope(taskID, body.Kind, body.Value, body.Reason, "manual")
+	var (
+		ts  db.TaskScope
+		err error
+	)
+	if strings.TrimSpace(body.Kind) == "firmware" {
+		ts, err = as.AddFirmwareScope(taskID, body.Value, body.Sha256, body.Reason, "manual")
+	} else {
+		ts, err = as.AddAgentScope(taskID, body.Kind, body.Value, body.Reason, "manual")
+	}
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return

@@ -432,14 +432,16 @@ func (t *ToolSet) addTaskScope() actool.CoreTool {
 	return writeTool(
 		"add_task_scope",
 		"把测试范围加入【本任务】——这是本任务的授权边界，也是资产测试覆盖度的分母。\n"+
-			"kind 支持：company(整个公司名下资产) / root_domain(整个根域，含所有子域) / subdomain(单个精确子域) / ip / cidr / icp / keyword。\n"+
-			"说明：worker 逐个碰到的主机会被系统【自动】加进范围(精确子域)；本工具用于【主动扩大】——把整个根域/整个公司纳入，或补充指定某子域/IP。\n"+
-			"value：company 传公司名或 id(公司须已存在)；root_domain/subdomain 传域名；ip/cidr 传 IP 或网段；icp/keyword 传备案号或企业关键词。\n"+
+			"kind 支持：company(整个公司名下资产) / root_domain(整个根域，含所有子域) / subdomain(单个精确子域) / ip / cidr / icp / keyword / firmware(本任务要审计的固件) / device(可选的靶机)。\n"+
+			"说明：worker 逐个碰到的主机会被系统【自动】加进范围(精确子域)；本工具用于【主动扩大】——把整个根域/整个公司纳入，或补充指定某子域/IP；固件类任务用 firmware 登记被审计的固件，有靶机时用 device 登记。\n"+
+			"value：company 传公司名或 id(公司须已存在)；root_domain/subdomain 传域名；ip/cidr 传 IP 或网段；icp/keyword 传备案号或企业关键词；firmware 传固件文件名；device 传「IP」或「IP 型号」。\n"+
+			"sha256：仅 firmware 用，传固件文件的 sha256(64 位十六进制)；算不出来就先不传，之后补。\n"+
 			"务必给 reason 说明依据(可审计)。多条用 entries 数组。",
 		obj(map[string]any{
-			"entries": map[string]any{"type": "array", "description": "批量：[{kind, value}]。kind∈company/root_domain/subdomain/ip/cidr/icp/keyword。", "items": map[string]any{"type": "object"}},
-			"kind":    str("[单条] company / root_domain / subdomain / ip / cidr / icp / keyword"),
-			"value":   str("[单条] 公司名或id / 域名 / IP / CIDR / ICP / 关键词"),
+			"entries": map[string]any{"type": "array", "description": "批量：[{kind, value, sha256?}]。kind∈company/root_domain/subdomain/ip/cidr/icp/keyword/firmware/device。", "items": map[string]any{"type": "object"}},
+			"kind":    str("[单条] company / root_domain / subdomain / ip / cidr / icp / keyword / firmware / device"),
+			"value":   str("[单条] 公司名或id / 域名 / IP / CIDR / ICP / 关键词 / 固件文件名 / 靶机 IP(可跟型号)"),
+			"sha256":  str("[单条] 仅 firmware：固件 sha256(64 位十六进制，可选)"),
 			"reason":  str("加入依据(用于审计)，务必填写"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
@@ -450,8 +452,9 @@ func (t *ToolSet) addTaskScope() actool.CoreTool {
 				return actool.Errorf("add_task_scope 需要任务上下文(当前无 task)"), nil
 			}
 			type scopeEntry struct {
-				Kind  string `json:"kind"`
-				Value string `json:"value"`
+				Kind   string `json:"kind"`
+				Value  string `json:"value"`
+				Sha256 string `json:"sha256"` // 仅 kind=firmware
 			}
 			var a struct {
 				Entries    []scopeEntry `json:"entries"`
@@ -466,12 +469,22 @@ func (t *ToolSet) addTaskScope() actool.CoreTool {
 			var added []map[string]any
 			errs := map[string]string{}
 			for i, e := range items {
-				ts, err := t.as.AddAgentScope(t.taskID, strings.TrimSpace(e.Kind), e.Value, a.Reason, "agent")
+				kind := strings.TrimSpace(e.Kind)
+				var (
+					ts  db.TaskScope
+					err error
+				)
+				if kind == "firmware" {
+					// 固件走专用入口：文件名 + sha256 一起构成唯一键。
+					ts, err = t.as.AddFirmwareScope(t.taskID, e.Value, e.Sha256, a.Reason, "agent")
+				} else {
+					ts, err = t.as.AddAgentScope(t.taskID, kind, e.Value, a.Reason, "agent")
+				}
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
 					continue
 				}
-				added = append(added, map[string]any{"kind": ts.Kind, "domain": ts.Domain, "net": ts.Net, "value": ts.Value, "company_id": ts.CompanyID})
+				added = append(added, map[string]any{"kind": ts.Kind, "domain": ts.Domain, "net": ts.Net, "value": ts.Value, "sha256": ts.Sha256, "company_id": ts.CompanyID})
 			}
 			out := map[string]any{"added": added}
 			if len(errs) > 0 {

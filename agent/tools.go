@@ -838,6 +838,9 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 					case row.CompanyID != nil:
 						entry["company_id"] = *row.CompanyID
 					}
+					if row.Sha256 != "" {
+						entry["sha256"] = budget.take(row.Sha256, 80)
+					}
 					scope = append(scope, entry)
 				}
 				item["asset_scope"] = scope
