@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -287,4 +288,106 @@ func sanitizeFilename(name string) string {
 	name = strings.ReplaceAll(name, "\n", "")
 	name = strings.ReplaceAll(name, "\r", "")
 	return name
+}
+
+// maxFirmwareSize caps one firmware upload.
+const maxFirmwareSize = 1 << 30 // 1 GiB
+
+// POST /api/tasks/{id}/firmware   multipart 表单字段 "file"（单文件）
+//
+// 固件走独立入口，不和建任务时那个"普通附件"按钮混用：文件直接落到
+// tasks/<taskID>/firmware/（任务归档只打包 tasks/ 树，见 task_archive_package.go），
+// 落盘时算 sha256，并登记一条 kind=firmware 的任务范围——scope 的唯一键是
+// (文件名, sha256)，所以两份同名但内容不同的固件各自占一行，不会被唯一索引静默丢掉。
+func (s *Server) taskFirmwareUpload(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	as := s.m.Assets()
+	if as == nil {
+		writeErr(w, 503, "asset store 未启用")
+		return
+	}
+	taskID, err := strconv.ParseInt(t.ID, 10, 64)
+	if err != nil || taskID <= 0 {
+		writeErr(w, 400, "任务 id 无效")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxFirmwareSize)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		writeErr(w, 400, "解析上传失败或超过 1GB 上限: "+err.Error())
+		return
+	}
+	files := r.MultipartForm.File["file"]
+	if len(files) == 0 {
+		writeErr(w, 400, "缺少上传文件（表单字段 file）")
+		return
+	}
+	hdr := files[0]
+
+	dir := filepath.Join(filepath.Clean(s.m.dir), "tasks", t.ID, "firmware")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		writeErr(w, 500, "创建固件目录失败: "+err.Error())
+		return
+	}
+	name := sanitizeFilename(filepath.Base(hdr.Filename))
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		writeErr(w, 400, "非法文件名")
+		return
+	}
+
+	// 先落临时文件再判重：同名且内容一致 → 复用（删临时）；内容不同 → 文件名插摘要前缀，绝不覆盖。
+	tmp := filepath.Join(dir, ".uploading-"+name)
+	if err := saveUpload(hdr, tmp); err != nil {
+		writeErr(w, 500, "保存固件失败: "+err.Error())
+		return
+	}
+	sum, err := fileSHA256(tmp)
+	if err != nil {
+		_ = os.Remove(tmp)
+		writeErr(w, 500, "计算 sha256 失败: "+err.Error())
+		return
+	}
+	size := hdr.Size
+
+	dest := filepath.Join(dir, name)
+	reused := false
+	if _, statErr := os.Stat(dest); statErr == nil {
+		if existSum, hErr := fileSHA256(dest); hErr == nil && existSum == sum {
+			_ = os.Remove(tmp)
+			reused = true
+		} else {
+			name = digestSuffixName(name, sum)
+			dest = filepath.Join(dir, name)
+		}
+	}
+	if !reused {
+		if err := os.Rename(tmp, dest); err != nil {
+			_ = os.Remove(tmp)
+			writeErr(w, 500, "保存固件失败: "+err.Error())
+			return
+		}
+	}
+	ts, err := as.AddFirmwareScope(taskID, name, sum, "上传固件", "manual")
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"name": name, "sha256": sum, "size": size, "path": s.wsRel(dest),
+		"scope_id": ts.ID, "reused": reused,
+	})
+}
+
+// digestSuffixName inserts the first 8 hex chars of the digest before the extension:
+// RP09.bin → RP09_3f9a1c2d.bin，让同名不同内容的固件并存在同一任务里。
+func digestSuffixName(name, sum string) string {
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	if len(sum) >= 8 {
+		return stem + "_" + sum[:8] + ext
+	}
+	return stem + "_" + sum + ext
 }

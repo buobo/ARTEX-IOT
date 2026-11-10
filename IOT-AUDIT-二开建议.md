@@ -27,7 +27,7 @@
 | 8 | `ros-component-hunt` 技能 | A2 | `skills/ros-component-hunt/` | ⏭ 已跳过 2026-11-10 |
 | 9 | `credential-hunt` 技能 | A2 | `skills/credential-hunt/` | ⏭ 已跳过 2026-11-10 |
 | 10 | `task_scope` 加 `firmware` / `device` | B1 | `db/schema.sql`(768/774/785/788/792-795)、`db/task_scope.go`(26-29/79-100/222-241/244/250-300/318/330/382-384)、`db/task_assets_context.go`(98/111)、`server/server.go`(1887/1895-1901)、`agent/tools_insert.go`(435-444/454-459/471-487)、`agent/tools.go`(841-843)、`agent/goals.go`(62-63)、`web/src/lib/types.ts`(357/363)、`overview-tab.tsx`(59-63/78-79/839-840/852-856) | ✅ 已改完 2026-11-10 |
-| 10b | 固件上传 + 详情页固件行 | B1 | 新建任务对话框支持拖文件 → `server/workspace.go` 落盘算 sha256 并写一条 `kind=firmware` scope；`overview-tab.tsx` 顶部显示「固件 / sha256 前 12 位 / 已解包」 | ⬜ 待做 |
+| 10b | 固件上传 + 详情页固件行 | B1 | 独立「上传固件」按钮（不按后缀猜）→ `server/workspace.go`(293-294/302-383/386) 直传 `tasks/<id>/firmware/` + 算 sha256 + 写 `kind=firmware` scope；路由 `server/server.go`(687)；`api.ts`(446) `uploadFirmware`；`tasks/page.tsx`(3259) 建完任务即上传；`overview-tab.tsx`(135/176-196/483-498) 固件行 + 解包状态 | ✅ 已改完 2026-11-10 |
 | 11 | 组件 `extra` 规范 + DSL 维度 | C1/C2 | 文档 + `db/asset_dsl.go` | ⬜ 待做 |
 | 12 | 仿真 + 抓包（pcap 进 evidence） | E2 | 技能脚本 + `evidence` 的 pcap 入口 | ⬜ 待做 |
 | 13 | 组件指纹 / 版本库 | E3 | `skills/component-inventory/references/` | ⬜ 待做 |

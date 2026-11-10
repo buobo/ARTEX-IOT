@@ -442,6 +442,39 @@ export const api = {
     post<{ ok: boolean; path: string }>(`/workspace/write`, { path, content }),
   workspaceMkdir: (path: string) => post<{ ok: boolean; path: string }>(`/workspace/mkdir`, { path }),
   workspaceDelete: (path: string) => del<{ ok: boolean }>(`/workspace/delete?path=${encodeURIComponent(path)}`),
+  // 固件走独立上传入口：直接落到 tasks/<id>/firmware/，后端算 sha256 并登记 kind=firmware 范围。
+  uploadFirmware: async (id: string, file: File) => {
+    if (MOCK) {
+      return {
+        name: file.name,
+        sha256: "0".repeat(64),
+        size: file.size,
+        path: `tasks/${id}/firmware/${file.name}`,
+        scope_id: 0,
+        reused: false,
+      };
+    }
+    const fd = new FormData();
+    fd.append("file", file);
+    const token = getToken();
+    const r = await fetch(`/api/tasks/${id}/firmware`, {
+      method: "POST",
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: fd,
+    });
+    if (!r.ok) {
+      const msg = await r.text().catch(() => "");
+      throw new Error(msg || `固件上传失败: ${r.status}`);
+    }
+    return r.json() as Promise<{
+      name: string;
+      sha256: string;
+      size: number;
+      path: string;
+      scope_id: number;
+      reused?: boolean;
+    }>;
+  },
   workspaceUpload: async (dir: string, files: File[]) => {
     if (MOCK) return { uploaded: files.length };
     const fd = new FormData();

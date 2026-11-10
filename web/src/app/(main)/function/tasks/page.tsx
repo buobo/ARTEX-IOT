@@ -27,6 +27,7 @@ import {
   GripVerticalIcon,
   Loader2Icon,
   PaperclipIcon,
+  PackageIcon,
   PauseIcon,
   PencilIcon,
   PinIcon,
@@ -3174,6 +3175,9 @@ function CreateTaskSheet({
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
   const [uploading, setUploading] = React.useState(false);
   const [uploadCount, setUploadCount] = React.useState(0);
+  // 固件：独立按钮选择（不按后缀猜），建任务后直接上传到 tasks/<id>/firmware/ 并登记 scope。
+  const [firmwareFile, setFirmwareFile] = React.useState<File | null>(null);
+  const firmwareInputRef = React.useRef<HTMLInputElement>(null);
   const draftIdRef = React.useRef<string>("");
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const sheetContentRef = React.useRef<HTMLDivElement>(null);
@@ -3231,7 +3235,7 @@ function CreateTaskSheet({
       const heartbeatSec = Math.max(10, Math.floor(Number(heartbeatMin) || 10)) * 60; // 下限 10min，与后端归一一致
       // 可选凭证合并进描述末尾后一起提交；createTask 的字段与后端逻辑保持不变。
       const finalDescription = mergeCredentials(description.trim(), credentials);
-      await api.createTask({
+      const created = await api.createTask({
         name: name.trim(),
         categoryId: categoryID,
         description: finalDescription,
@@ -3248,6 +3252,15 @@ function CreateTaskSheet({
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
           .filter((r) => r.pattern !== ""),
       });
+      // 固件：任务已建好，再把独立选中的固件直接传到 tasks/<id>/firmware/（后端算 sha256 并登记范围）。
+      // 失败不删任务——任务本身有效，固件之后可以在范围卡片里手动补。
+      if (firmwareFile) {
+        try {
+          await api.uploadFirmware(created.id, firmwareFile);
+        } catch (e) {
+          toast.error(`固件上传失败（${firmwareFile.name}）：${(e as Error).message}`);
+        }
+      }
       toast.success("任务已创建");
       setName("");
       setCategoryID(undefined);
@@ -3265,6 +3278,7 @@ function CreateTaskSheet({
       setCoverageEnabled(true);
       setInterceptRules([]);
       setUploadCount(0);
+      setFirmwareFile(null);
       draftIdRef.current = "";
       setOpen(false);
       onCreated();
@@ -3365,6 +3379,48 @@ function CreateTaskSheet({
                     ? `已上传 ${uploadCount} 个文件，绝对路径已追加到描述末尾（可编辑）`
                     : "可多选；上传后把文件的绝对路径追加到描述，供 worker 用 Read/Bash 打开"}
                 </span>
+              </div>
+              {/* 固件：独立按钮（不按后缀猜），建任务后直接落到 tasks/<id>/firmware/，
+                  同时算 sha256 并登记一条 kind=firmware 的任务范围。 */}
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={firmwareInputRef}
+                  type="file"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0] ?? null;
+                    setFirmwareFile(f);
+                    if (f) {
+                      setGoal((prev) =>
+                        prev.trim()
+                          ? prev
+                          : `只审计 ${f.name} 固件（位于任务工作目录 firmware/ 下），如有靶机，允许进行无害化测试`,
+                      );
+                    }
+                    if (firmwareInputRef.current) firmwareInputRef.current.value = "";
+                  }}
+                />
+                <Button type="button" variant="outline" size="sm" onClick={() => firmwareInputRef.current?.click()}>
+                  <PackageIcon />
+                  上传固件
+                </Button>
+                {firmwareFile ? (
+                  <span className="text-xs">
+                    <span className="font-mono">{firmwareFile.name}</span>
+                    <span className="text-muted-foreground">（{fmtBytes(firmwareFile.size)}）</span>
+                    <button
+                      type="button"
+                      className="text-muted-foreground ml-2 underline"
+                      onClick={() => setFirmwareFile(null)}
+                    >
+                      移除
+                    </button>
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground text-xs">
+                    固件单独上传：落到任务目录 firmware/ 下，自动算 sha256 并登记为任务范围
+                  </span>
+                )}
               </div>
             </div>
             <div className="grid gap-2">

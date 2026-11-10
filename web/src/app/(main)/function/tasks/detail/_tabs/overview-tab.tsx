@@ -130,6 +130,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const [scopeValueInput, setScopeValueInput] = React.useState("");
   const [scopeBusy, setScopeBusy] = React.useState(false);
   const [scopeErr, setScopeErr] = React.useState("");
+  // 解包状态：探测 tasks/<id>/ 下有没有 extract / _extracted / squashfs-root 之类的目录。
+  // null = 还没查到或查询失败，只影响显示，不阻塞页面。
+  const [firmwareUnpacked, setFirmwareUnpacked] = React.useState<boolean | null>(null);
   // 按模型的 token 用量（来自常开的 llm_usage 计量账本，逐次精确）。
   const [modelTokens, setModelTokens] = React.useState<ModelTokenStat[]>([]);
   // 目标管理：目标列表 + 新增表单 + 行内编辑状态。
@@ -168,6 +171,29 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       // 忽略：无 asset store 时接口 503，范围卡片自然为空
     }
   }, [taskId]);
+
+  // 固件行（来自 scope）+ 解包状态（看 tasks/<id>/ 里有没有解包产物目录）。
+  const firmwareRow = scope.find((s) => s.kind === "firmware");
+  React.useEffect(() => {
+    if (!firmwareRow) {
+      setFirmwareUnpacked(null);
+      return;
+    }
+    let alive = true;
+    api
+      .workspaceList(`tasks/${taskId}`)
+      .then((r) => {
+        if (!alive) return;
+        const hit = (r.entries ?? []).some((e) => e.dir && /(extract|_extracted|squashfs-root)/i.test(e.name));
+        setFirmwareUnpacked(hit);
+      })
+      .catch(() => {
+        if (alive) setFirmwareUnpacked(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [taskId, firmwareRow?.value, firmwareRow?.sha256]);
 
   const loadGoals = React.useCallback(async () => {
     try {
@@ -454,6 +480,22 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             <div className="text-xs font-medium text-muted-foreground">目标</div>
             <p className="text-sm whitespace-pre-wrap break-words">{task?.goal?.trim() || "—"}</p>
           </div>
+          {firmwareRow && (
+            <div className="flex flex-col gap-1.5 sm:col-span-2">
+              <div className="text-xs font-medium text-muted-foreground">固件</div>
+              <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                <span className="font-mono break-all">{firmwareRow.value || "—"}</span>
+                {firmwareRow.sha256 && (
+                  <span className="font-mono text-xs text-muted-foreground" title={firmwareRow.sha256}>
+                    sha256 {firmwareRow.sha256.slice(0, 12)}
+                  </span>
+                )}
+                <span className="text-xs text-muted-foreground">
+                  {firmwareUnpacked === null ? "解包状态 —" : firmwareUnpacked ? "已解包" : "未解包"}
+                </span>
+              </p>
+            </div>
+          )}
         </CardContent>
       </Card>
       {/* 目标管理：查看/新增/修改/删除本任务的探索目标。新增与修改会通知规划者并复活任务，
