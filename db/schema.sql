@@ -1172,6 +1172,38 @@ DROP TRIGGER IF EXISTS trg_conversation_retest_delete ON conversations;
 CREATE TRIGGER trg_conversation_retest_delete BEFORE DELETE ON conversations
     FOR EACH ROW EXECUTE FUNCTION stop_deleted_conversation_retest();
 
+-- 复测录屏：文件落在 data/tasks/<task_id>/recordings/<retest_id>/ 下，
+-- 这样任务归档（只搬 tasks/ 目录 + transcripts/expN-*）会把它一起打包，
+-- 恢复后相对路径不变。放在 data/sessions/ 会变成孤儿文件。
+-- path 存任务相对路径，不存绝对路径：归档/恢复/迁移后仍然有效。
+CREATE TABLE IF NOT EXISTS finding_retest_recordings (
+    id BIGSERIAL PRIMARY KEY,
+    retest_id BIGINT NOT NULL REFERENCES finding_retests(id) ON DELETE CASCADE,
+    task_id BIGINT NOT NULL,
+    app TEXT NOT NULL CHECK (app IN ('terminal','chrome')),
+    backend TEXT NOT NULL DEFAULT 'virtual',
+    display TEXT NOT NULL DEFAULT '',
+    tmux_session TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'starting'
+        CHECK (status IN ('starting','recording','stopping','completed','failed','interrupted')),
+    width INT NOT NULL DEFAULT 0,
+    height INT NOT NULL DEFAULT 0,
+    fps INT NOT NULL DEFAULT 15,
+    exec_count INT NOT NULL DEFAULT 0,
+    marks JSONB NOT NULL DEFAULT '[]'::jsonb,
+    sha256 TEXT NOT NULL DEFAULT '',
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at TIMESTAMPTZ,
+    duration_ms BIGINT NOT NULL DEFAULT 0,
+    size_bytes BIGINT NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_retest_recordings_retest ON finding_retest_recordings(retest_id, id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_retest_recordings_active ON finding_retest_recordings(retest_id)
+    WHERE status IN ('starting','recording','stopping');
+
+
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS evidence_version BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_evidence_version BIGINT NOT NULL DEFAULT 0;
 

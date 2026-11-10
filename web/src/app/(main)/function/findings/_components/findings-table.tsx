@@ -12,9 +12,11 @@ import {
   RotateCcwIcon,
   ShieldAlertIcon,
   Trash2Icon,
+  VideoIcon,
 } from "lucide-react";
 
 import { CopyButton } from "@/components/copy-button";
+import { RecordingVideo } from "@/components/finding-retest-panel";
 import { Markdown } from "@/components/markdown";
 import { StatusBadge } from "@/components/status-badge";
 import {
@@ -36,8 +38,9 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { api } from "@/lib/api";
 import { statusMeta } from "@/lib/status";
-import type { ActiveFindingRetest, Finding, FindingStatus, Severity } from "@/lib/types";
+import type { ActiveFindingRetest, Finding, FindingRetestRecording, FindingStatus, Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
@@ -398,6 +401,9 @@ export function FindingsTable({
                         {f.evidence}
                       </pre>
 
+                      {/* 复现视频：该漏洞最近一次复测的可播放录屏，放在详细报告上方。 */}
+                      {f.finding_id && <FindingReproVideo findingId={f.finding_id} />}
+
                       {/* 详细报告(Markdown):展开时按 finding_id 懒加载,免进详情页即可查看。 */}
                       {f.finding_id && (
                         <div className="flex flex-col gap-1.5">
@@ -450,5 +456,48 @@ export function FindingsTable({
         )}
       </TableBody>
     </Table>
+  );
+}
+
+// FindingReproVideo 在展开行里内嵌"复现视频"：取该漏洞最近一次复测的可播放录屏。
+// 只在展开时挂载，天然是懒加载；没有录屏就显示一句提示，不留空白播放器。
+function FindingReproVideo({ findingId }: { findingId: string }) {
+  const [rec, setRec] = React.useState<FindingRetestRecording | null>(null);
+  const [state, setState] = React.useState<"loading" | "done" | "none" | "error">("loading");
+
+  React.useEffect(() => {
+    let alive = true;
+    setState("loading");
+    api
+      .findingRetests(findingId)
+      .then((items) => {
+        if (!alive) return;
+        const recs = items
+          .flatMap((it) => it.recordings ?? [])
+          .filter((r) => r.status === "completed" || r.status === "interrupted")
+          .sort((a, b) => b.id - a.id);
+        setRec(recs[0] ?? null);
+        setState(recs.length > 0 ? "done" : "none");
+      })
+      .catch(() => {
+        if (alive) setState("error");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [findingId]);
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <VideoIcon className="size-3.5" />
+        复现视频
+        {rec && <span>· 复测 #{rec.retest_id}</span>}
+      </div>
+      {state === "loading" && <p className="text-xs text-muted-foreground">加载中…</p>}
+      {state === "error" && <p className="text-xs text-muted-foreground">复现视频加载失败。</p>}
+      {state === "none" && <p className="text-xs text-muted-foreground">暂无复现视频，复测并录屏后显示。</p>}
+      {state === "done" && rec && <RecordingVideo rec={rec} />}
+    </div>
   );
 }

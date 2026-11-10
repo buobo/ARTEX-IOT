@@ -8,6 +8,9 @@ import (
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -327,4 +330,230 @@ func TestRetestValidationSeedingAndScope(t *testing.T) {
 		t.Fatal("seed overwrote prompt", prompt, err)
 	}
 	_, _ = s.m.pg.SavePrompt(a.ID, agent.RetesterDefaultPrompt, "restore", "test")
+}
+
+func TestSlicePaneExtractsCommandOutput(t *testing.T) {
+	pane := strings.Join([]string{
+		"david@host:~$ bash .cmd-7.sh; printf '\\n__ARTEX_END_7_%d__\\n' $?",
+		"line1",
+		"colored: \x1b[32mGREEN\x1b[0m",
+		"",
+		"__ARTEX_END_7_3__",
+		"david@host:~$ ",
+	}, "\n")
+	out, code, ok := slicePane(pane, 7)
+	if !ok {
+		t.Fatal("sentinel not detected")
+	}
+	if code != 3 {
+		t.Fatalf("exit code = %d, want 3", code)
+	}
+	if !strings.Contains(out, "line1") || strings.Contains(out, "\x1b[") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+	if strings.Contains(out, "__ARTEX_END_") || strings.Contains(out, "printf") {
+		t.Fatalf("echoed command or sentinel leaked into output: %q", out)
+	}
+}
+
+func TestSlicePaneIgnoresOtherSeq(t *testing.T) {
+	pane := "bash .cmd-2.sh; ...\nold\n__ARTEX_END_2_0__\n"
+	if _, _, ok := slicePane(pane, 3); ok {
+		t.Fatal("matched a sentinel from another sequence")
+	}
+}
+
+// TestRetestRecorderEndToEnd 真起 Xvfb+tmux+xterm+ffmpeg，验证命令执行结果、
+// 退出码、mp4 落盘、画面非黑、进程清理。缺任一依赖则跳过（CI 通常没有 xterm）。
+func TestRetestRecorderEndToEnd(t *testing.T) {
+	for _, b := range []string{"Xvfb", "tmux", "xterm", "ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(b); err != nil {
+			t.Skipf("missing %s", b)
+		}
+	}
+	dir := t.TempDir()
+	rec := &retestRecorder{convID: 9001, retestID: 1, taskID: 1, recID: 1, app: "terminal", fps: recFPS}
+	if err := rec.start(dir); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	stopped := false
+	defer func() {
+		if !stopped {
+			rec.stop()
+		}
+	}()
+
+	out, code, running, err := rec.run(context.Background(), "echo first; echo second; exit 7", "", 30*time.Second)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if running {
+		t.Fatal("command reported as still running")
+	}
+	if code != 7 {
+		t.Fatalf("exit code = %d, want 7", code)
+	}
+	for _, want := range []string{"first", "second"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output %q missing %q", out, want)
+		}
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+	durMS, size, sha := rec.stop()
+	stopped = true
+	if size <= 0 {
+		t.Fatalf("empty recording at %s", rec.absPath)
+	}
+	if durMS < 500 {
+		t.Fatalf("duration too short: %dms", durMS)
+	}
+	if len(sha) != 64 {
+		t.Fatalf("sha256 = %q", sha)
+	}
+	if fi, err := os.Stat(rec.absPath); err != nil || fi.Size() != size {
+		t.Fatalf("recording file mismatch: %v", err)
+	}
+	if peak := testFramePeak(t, rec.absPath); peak < 100 {
+		t.Fatalf("video has no bright content (YMAX=%.1f)", peak)
+	}
+	if exec.Command("tmux", "has-session", "-t", rec.session).Run() == nil {
+		t.Fatalf("tmux session %s still alive", rec.session)
+	}
+	if _, err := os.Stat(filepath.Join("/tmp", ".X"+strings.TrimPrefix(rec.display, ":")+"-lock")); err == nil {
+		t.Fatalf("Xvfb %s lock still present", rec.display)
+	}
+}
+
+func testFramePeak(t *testing.T, path string) float64 {
+	t.Helper()
+	out, err := exec.Command("ffmpeg", "-hide_banner", "-i", path,
+		"-vf", "signalstats,metadata=print:key=lavfi.signalstats.YMAX", "-an", "-f", "null", "-").CombinedOutput()
+	if err != nil {
+		t.Fatalf("ffmpeg signalstats: %v", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if i := strings.Index(line, "YMAX="); i >= 0 {
+			if v, err := strconv.ParseFloat(strings.TrimSpace(line[i+5:]), 64); err == nil {
+				return v
+			}
+		}
+	}
+	t.Fatal("no YMAX in ffmpeg output")
+	return 0
+}
+
+// TestStopTaskRecordingsSealsOrphans 覆盖归档前收尾的兜底路径：
+// 进程句柄已丢（服务重启/崩溃），但 tmux 会话还在、DB 行仍是 recording。
+func TestStopTaskRecordingsSealsOrphans(t *testing.T) {
+	s, fid := newRetestServer(t)
+	pg := s.m.pg
+	const taskID = int64(0)
+
+	var retestID, recID int64
+	if err := pg.QueryRow(`INSERT INTO finding_retests(finding_id,status,snapshot)
+VALUES($1,'running','{}'::jsonb) RETURNING id`, fid).Scan(&retestID); err != nil {
+		t.Fatal(err)
+	}
+	const sess = "artex-retest-arch-1"
+	if err := pg.QueryRow(`INSERT INTO finding_retest_recordings(retest_id,task_id,app,display,tmux_session,path,status)
+VALUES($1,$2,'terminal',':107',$3,'recordings/test/1.mp4','recording') RETURNING id`, retestID, taskID, sess).Scan(&recID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "kill-session", "-t", sess).Run()
+		_, _ = pg.Exec(`DELETE FROM finding_retest_recordings WHERE id=$1`, recID)
+		_, _ = pg.Exec(`DELETE FROM finding_retests WHERE id=$1`, retestID)
+	})
+	if out, err := exec.Command("tmux", "-f", "/dev/null", "new-session", "-d", "-s", sess, "sleep", "300").CombinedOutput(); err != nil {
+		t.Skipf("tmux unavailable: %v %s", err, out)
+	}
+
+	if err := s.stopTaskRecordings(context.Background(), taskID); err != nil {
+		t.Fatalf("stopTaskRecordings: %v", err)
+	}
+	var status, errNote string
+	if err := pg.QueryRow(`SELECT status,error FROM finding_retest_recordings WHERE id=$1`, recID).Scan(&status, &errNote); err != nil {
+		t.Fatal(err)
+	}
+	if status != "interrupted" || errNote == "" {
+		t.Fatalf("want interrupted with reason, got %q / %q", status, errNote)
+	}
+	if exec.Command("tmux", "has-session", "-t", sess).Run() == nil {
+		t.Fatal("tmux session survived archive seal")
+	}
+	if err := s.stopTaskRecordings(context.Background(), 999999); err != nil {
+		t.Fatalf("task without recordings should be a no-op: %v", err)
+	}
+}
+
+// TestStopTaskRecordingsStopsLiveRecorder 覆盖归档前收尾的主路径：
+// 进程内还有句柄，归档必须让 ffmpeg 写完 moov、DB 封口、进程清理。
+func TestStopTaskRecordingsStopsLiveRecorder(t *testing.T) {
+	for _, b := range []string{"Xvfb", "tmux", "xterm", "ffmpeg"} {
+		if _, err := exec.LookPath(b); err != nil {
+			t.Skipf("missing %s", b)
+		}
+	}
+	s, fid := newRetestServer(t)
+	pg := s.m.pg
+	dataDir := t.TempDir()
+	s.m.dir = dataDir
+
+	var retestID, recID int64
+	if err := pg.QueryRow(`INSERT INTO finding_retests(finding_id,status,snapshot)
+VALUES($1,'running','{}'::jsonb) RETURNING id`, fid).Scan(&retestID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.QueryRow(`INSERT INTO finding_retest_recordings(retest_id,task_id,app,path,status)
+VALUES($1,0,'terminal','pending','recording') RETURNING id`, retestID).Scan(&recID); err != nil {
+		t.Fatal(err)
+	}
+	rec := &retestRecorder{convID: 0, retestID: retestID, taskID: 0, recID: recID, app: "terminal", fps: recFPS}
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			rec.stop()
+		}
+		_, _ = pg.Exec(`DELETE FROM finding_retest_recordings WHERE id=$1`, recID)
+		_, _ = pg.Exec(`DELETE FROM finding_retests WHERE id=$1`, retestID)
+	})
+	if err := rec.start(dataDir); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if _, err := pg.Exec(`UPDATE finding_retest_recordings SET path=$2, tmux_session=$3, display=$4 WHERE id=$1`,
+		recID, rec.relPath, rec.session, rec.display); err != nil {
+		t.Fatal(err)
+	}
+	s.putRecorder(rec)
+
+	if _, _, _, err := rec.run(context.Background(), "echo archive-stop; sleep 1", "", 30*time.Second); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if err := s.stopTaskRecordings(context.Background(), 0); err != nil {
+		t.Fatalf("stopTaskRecordings: %v", err)
+	}
+	stopped = true
+
+	var status string
+	var size int64
+	if err := pg.QueryRow(`SELECT status,size_bytes FROM finding_retest_recordings WHERE id=$1`, recID).
+		Scan(&status, &size); err != nil {
+		t.Fatal(err)
+	}
+	if status != "interrupted" {
+		t.Fatalf("status = %q, want interrupted", status)
+	}
+	if size <= 0 {
+		t.Fatal("recording produced no bytes")
+	}
+	if fi, err := os.Stat(rec.absPath); err != nil || fi.Size() != size {
+		t.Fatalf("file/DB size mismatch: %v", err)
+	}
+	if s.recorderFor(0) != nil {
+		t.Fatal("recorder still registered after archive seal")
+	}
+	if exec.Command("tmux", "has-session", "-t", rec.session).Run() == nil {
+		t.Fatal("tmux session survived archive seal")
+	}
 }

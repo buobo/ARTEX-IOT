@@ -718,6 +718,30 @@ export interface ActiveFindingRetest {
   finding_id: string;
   conversation_id: number;
   status: "pending" | "running";
+  recordings?: FindingRetestRecording[];
+}
+
+export interface FindingRetestRecording {
+  id: number;
+  retest_id: number;
+  task_id: number;
+  app: "terminal" | "chrome";
+  backend: string;
+  display?: string;
+  path: string;
+  status: "starting" | "recording" | "stopping" | "completed" | "failed" | "interrupted";
+  width: number;
+  height: number;
+  fps: number;
+  exec_count: number;
+  marks: { offset_s: number; note: string }[];
+  sha256?: string;
+  started_at: string;
+  finished_at?: string | null;
+  duration_ms: number;
+  size_bytes: number;
+  error: string;
+  url?: string;
 }
 
 export interface FindingRetest {
@@ -733,6 +757,7 @@ export interface FindingRetest {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  recordings?: FindingRetestRecording[];
 }
 
 export interface Conversation {

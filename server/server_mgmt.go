@@ -84,6 +84,10 @@ func decode(r *http.Request, v any) error { return json.NewDecoder(r.Body).Decod
 
 const taskDeleteDrainTimeout = 10 * time.Second
 
+// 归档前收尾录制：ffmpeg 收到 SIGINT 后要写完 moov 才退出，
+// 30s 足够 30 分钟量级的文件（实测 12KB/s，收尾在 1s 内）。
+const taskArchiveStopRecordingsTimeout = 30 * time.Second
+
 func canonicalTaskID(raw string) (string, bool) {
 	n, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || n <= 0 {

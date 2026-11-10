@@ -496,6 +496,10 @@ func (s *Server) conversationRunContext(id int64, busyKey string) (context.Conte
 func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) {
 	defer func() {
 		cancel(agent.AbortChatTurnFinished)
+		// 复测会话被停止/服务关闭时，录制也必须收尾，否则 ffmpeg/Xvfb 会残留到 30 分钟上限。
+		if c.AgentKey == db.FindingRetestAgentKey && ctx.Err() != nil {
+			s.stopRecordingForConversation(c.ID, false)
+		}
 		s.chatMu.Lock()
 		delete(s.chatBusy, busyKey)
 		delete(s.chatCancel, busyKey)
@@ -518,9 +522,12 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 		}
 		if r != nil && r.Status == "pending" {
 			defer func() {
-				if ctx.Err() != nil {
+				aborted := ctx.Err() != nil
+				if aborted {
 					finishStatus, finishReason = "stopped", "复测已停止或服务已关闭"
 				}
+				// 先收尾录制再封口结论：视频是旁路证据，不能因为结论先落库而漏掉收尾。
+				s.stopRecordingForConversation(c.ID, !aborted)
 				s.finishRetest(r.ID, finishStatus, finishReason)
 			}()
 			if ctx.Err() != nil {

@@ -16,7 +16,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/u
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api";
-import type { FindingRetest } from "@/lib/types";
+import type { FindingRetest, FindingRetestRecording } from "@/lib/types";
 
 const statusLabels = {
   pending: "等待启动",
@@ -163,6 +163,14 @@ export function FindingRetestPanel({
                     </div>
                   </details>
                 ) : null}
+                {item.recordings?.length ? (
+                  <div className="flex flex-col gap-2">
+                    <span className="text-muted-foreground text-xs">复测录屏</span>
+                    {item.recordings.map((rec) => (
+                      <RecordingVideo key={rec.id} rec={rec} />
+                    ))}
+                  </div>
+                ) : null}
               </div>
             ))
           : null}
@@ -184,4 +192,90 @@ export function FindingRetestPanel({
       ) : null}
     </Card>
   );
+}
+
+// RecordingVideo 播放复测录屏。文件随任务归档后会消失：
+// 后端返回 409（archived=true），这里显示"恢复后可播放"而不是让 <video> 静默失败。
+export function RecordingVideo({ rec }: { rec: FindingRetestRecording }) {
+  const ref = React.useRef<HTMLVideoElement>(null);
+  const [archived, setArchived] = React.useState(false);
+  const [broken, setBroken] = React.useState(false);
+  const [playing, setPlaying] = React.useState(false);
+
+  const url = rec.url ?? `/api/finding-retest-recordings/${rec.id}/stream`;
+  const usable = rec.status === "completed" || rec.status === "interrupted";
+
+  if (!usable) {
+    return (
+      <p className="text-muted-foreground text-xs">
+        {rec.app === "terminal" ? "终端录屏" : "浏览器录屏"} ·{" "}
+        {rec.status === "failed" ? rec.error || "录制失败" : "录制中…"}
+      </p>
+    );
+  }
+  if (archived) {
+    return <p className="text-muted-foreground text-xs">任务已归档，恢复后可播放录屏。</p>;
+  }
+  if (broken) {
+    return <p className="text-muted-foreground text-xs">录屏文件不可用（可能已被清理）。</p>;
+  }
+
+  const marks = Array.isArray(rec.marks) ? rec.marks : [];
+  return (
+    <div className="flex min-w-0 flex-col gap-1">
+      {/* 录屏没有音轨，无法也不需要字幕轨道。 */}
+      {/* biome-ignore lint/a11y/useMediaCaption: 录屏无音轨 */}
+      <video
+        ref={ref}
+        controls
+        preload="metadata"
+        playsInline
+        className="w-full max-w-2xl rounded-md border bg-black"
+        src={url}
+        onPlay={() => setPlaying(true)}
+        onError={() => {
+          void (async () => {
+            try {
+              const res = await fetch(url, { headers: { Accept: "application/json" } });
+              if (res.status === 409) {
+                setArchived(true);
+                return;
+              }
+            } catch {
+              /* 网络错误归为不可用 */
+            }
+            setBroken(true);
+          })();
+        }}
+      />
+      <span className="text-muted-foreground text-xs">
+        {rec.app === "terminal" ? "终端" : "浏览器"} · {(rec.duration_ms / 1000).toFixed(1)}s · {rec.width}×{rec.height}{" "}
+        · {(rec.size_bytes / 1048576).toFixed(1)}MB
+        {rec.exec_count > 0 ? ` · ${rec.exec_count} 条命令` : ""}
+      </span>
+      {playing && marks.length ? (
+        <div className="flex flex-wrap gap-1">
+          {marks.map((m) => (
+            <Button
+              key={`${m.offset_s}-${m.note}`}
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-xs"
+              onClick={() => {
+                if (ref.current) ref.current.currentTime = m.offset_s;
+              }}
+              title={m.note}
+            >
+              {formatOffset(m.offset_s)} {m.note}
+            </Button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function formatOffset(sec: number) {
+  const s = Math.max(0, Math.floor(sec));
+  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }

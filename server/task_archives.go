@@ -141,6 +141,15 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 	if task == nil {
 		return pgdb.ErrTaskArchiveNotFound
 	}
+	// 归档前强制收尾录制：ffmpeg 必须先把 moov 写完并退出，
+	// 否则被打进归档的是半截 mp4，恢复后无法播放。
+	recCtx, recCancel := context.WithTimeout(s.ctx, taskArchiveStopRecordingsTimeout)
+	_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "stop_recordings", 5)
+	err = s.stopTaskRecordings(recCtx, job.TaskID)
+	recCancel()
+	if err != nil {
+		return err
+	}
 	_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "stage_files", 10)
 	fileStage, err := stageTaskArchiveFiles(s.m.dir, job.ID, taskID, task.ExplorationID)
 	if err != nil {

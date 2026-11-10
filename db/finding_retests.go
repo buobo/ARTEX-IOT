@@ -30,6 +30,8 @@ type FindingRetest struct {
 	CreatedAt      time.Time       `json:"created_at"`
 	StartedAt      *time.Time      `json:"started_at"`
 	FinishedAt     *time.Time      `json:"finished_at"`
+	// 列表接口按需填充，不参与 retestCols 扫描。
+	Recordings []*FindingRetestRecording `json:"recordings,omitempty"`
 }
 
 const retestCols = `id, finding_id, conversation_id, status, verdict, notes, summary, evidence, error, created_at, started_at, finished_at`
@@ -37,10 +39,11 @@ const retestCols = `id, finding_id, conversation_id, status, verdict, notes, sum
 // ActiveFindingRetest is the small status payload polled by the findings list.
 // Finding IDs use the same string representation as the findings API.
 type ActiveFindingRetest struct {
-	ID             int64  `json:"id"`
-	FindingID      int64  `json:"finding_id,string"`
-	ConversationID int64  `json:"conversation_id"`
-	Status         string `json:"status"`
+	ID             int64                     `json:"id"`
+	FindingID      int64                     `json:"finding_id,string"`
+	ConversationID int64                     `json:"conversation_id"`
+	Status         string                    `json:"status"`
+	Recordings     []*FindingRetestRecording `json:"recordings,omitempty"`
 }
 
 func (d *DB) ListActiveFindingRetests(ctx context.Context) ([]ActiveFindingRetest, error) {
@@ -123,12 +126,23 @@ func (d *DB) CreateFindingRetest(ctx context.Context, findingID int64, notes str
 	return r, &c, true, nil
 }
 
+// InitialMessage 是复测会话的首条用户消息：只给结论目标 + 录屏纪律，
+// 漏洞证据由 get_finding_retest_context 按需拉取（避免把目标响应当指令灌进来）。
 func (r *FindingRetest) InitialMessage() string {
-	msg := fmt.Sprintf("请复测漏洞 #%d。先调用 get_finding_retest_context 读取本会话关联的原始证据与约束，再执行针对性验证，最后调用 record_finding_retest_result 保存结论。", r.FindingID)
+	var b strings.Builder
+	fmt.Fprintf(&b, "请复测漏洞 #%d。先调用 get_finding_retest_context 读取本会话关联的原始证据与约束，再执行针对性验证，验证没问题之后，再把验证步骤精简化进行录屏，最后调用 record_finding_retest_result 保存结论。", r.FindingID)
+	b.WriteString(`
+
+录屏要求（本次复测必须遵守）：
+1. 验证通过后再开始录屏：调用 retest_recording(action=capabilities) 确认后端，再 action=start。证据是命令行就选 app=terminal，证据是界面状态就选 app=chrome。
+2. 录屏内容按最小可复现原则：只保留复现该漏洞必需的关键步骤，不做冗余操作（不要全量扫描、不要重复试错、不要跑与结论无关的侦察）。
+3. 复现命令尽量与漏洞报告中的操作相同或相近（同一条请求、同一条命令、同一组参数），只复现关键点；确有必要偏离时，在 evidence 里写明原因。
+4. 开始复现前，先在同一录屏终端里做一次环境可达性检查（例如 ping、curl -I 或连接目标端口），让视频开头能看出目标环境可达、走的是同一条路径。
+5. 关键节点用 retest_recording(action=mark, note=...) 标记（如"可达性确认""触发溢出""命令回显"），结束时 action=stop，并把返回的 path 与时间点写进 evidence 的「复测录屏」小节。`)
 	if r.Notes != "" {
-		msg += "\n\n本次复测补充说明：\n" + r.Notes
+		b.WriteString("\n\n本次复测补充说明：\n" + r.Notes)
 	}
-	return msg
+	return b.String()
 }
 
 func (d *DB) ListFindingRetests(findingID int64) ([]*FindingRetest, error) {
@@ -256,4 +270,270 @@ func (d *DB) FinishFindingRetest(id int64, status, reason string) error {
 func (d *DB) RecoverFindingRetests() error {
 	_, err := d.Exec(`UPDATE finding_retests SET status='stopped', error='服务重启，复测已中断，请重新发起', finished_at=now() WHERE status IN ('pending','running')`)
 	return err
+}
+
+// ---------------------------------------------------------------------------
+// 复测录屏
+// ---------------------------------------------------------------------------
+
+// FindingRetestRecording 是一次复测的可视化证据。
+// Path 是「任务相对路径」（recordings/<retest_id>/<id>.mp4），
+// 不存绝对路径：任务归档/恢复/迁移后同一相对位置仍然有效。
+type FindingRetestRecording struct {
+	ID          int64           `json:"id"`
+	RetestID    int64           `json:"retest_id"`
+	TaskID      int64           `json:"task_id"`
+	App         string          `json:"app"`
+	Backend     string          `json:"backend"`
+	Display     string          `json:"display,omitempty"`
+	TmuxSession string          `json:"-"`
+	Path        string          `json:"path"`
+	Status      string          `json:"status"`
+	Width       int             `json:"width"`
+	Height      int             `json:"height"`
+	FPS         int             `json:"fps"`
+	ExecCount   int             `json:"exec_count"`
+	Marks       json.RawMessage `json:"marks"`
+	SHA256      string          `json:"sha256,omitempty"`
+	StartedAt   time.Time       `json:"started_at"`
+	FinishedAt  *time.Time      `json:"finished_at,omitempty"`
+	DurationMS  int64           `json:"duration_ms"`
+	SizeBytes   int64           `json:"size_bytes"`
+	Error       string          `json:"error"`
+	// URL 由 server 填充（/api/finding-retest-recordings/<id>/stream），不落库。
+	URL string `json:"url,omitempty"`
+}
+
+// recordingColsQualified 用于 JOIN 查询（与 recordingCols 顺序一致，避免 id 歧义）。
+const recordingColsQualified = `r.id, r.retest_id, r.task_id, r.app, r.backend, r.display, r.tmux_session, r.path, r.status,
+	r.width, r.height, r.fps, r.exec_count, r.marks, r.sha256, r.started_at, r.finished_at, r.duration_ms, r.size_bytes, r.error`
+
+// recordingCols 只用于**单表**查询。任何 JOIN 都必须用 recordingColsQualified：
+// 两张表都有 id/retest_id，裸列名会让 Postgres 报 42702 ambiguous。
+const recordingCols = `id, retest_id, task_id, app, backend, display, tmux_session, path, status,
+	width, height, fps, exec_count, marks, sha256, started_at, finished_at, duration_ms, size_bytes, error`
+
+func scanRecording(row interface{ Scan(...any) error }) (*FindingRetestRecording, error) {
+	r := &FindingRetestRecording{}
+	var marks []byte
+	err := row.Scan(&r.ID, &r.RetestID, &r.TaskID, &r.App, &r.Backend, &r.Display, &r.TmuxSession, &r.Path,
+		&r.Status, &r.Width, &r.Height, &r.FPS, &r.ExecCount, &marks, &r.SHA256,
+		&r.StartedAt, &r.FinishedAt, &r.DurationMS, &r.SizeBytes, &r.Error)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(marks) == 0 {
+		marks = []byte("[]")
+	}
+	r.Marks = marks
+	return r, nil
+}
+
+// CreateRetestRecording 先落 DB 行再起进程：进程失败时也有 id 可标记 failed，
+// 唯一索引保证同一复测同时只有一条活跃录制。
+func (d *DB) CreateRetestRecording(ctx context.Context, retestID, taskID int64, app string) (*FindingRetestRecording, error) {
+	r, err := scanRecording(d.QueryRowContext(ctx, `INSERT INTO finding_retest_recordings(retest_id,task_id,app)
+VALUES ($1,$2,$3) RETURNING `+recordingCols, retestID, taskID, app))
+	if err != nil && strings.Contains(err.Error(), "idx_retest_recordings_active") {
+		return nil, errors.New("本次复测已有录制进行中")
+	}
+	return r, err
+}
+
+func (d *DB) SetRetestRecordingLive(ctx context.Context, id int64, display, session, path string, width, height, fps int) error {
+	res, err := d.ExecContext(ctx, `UPDATE finding_retest_recordings
+SET status='recording', display=$2, tmux_session=$3, path=$4, width=$5, height=$6, fps=$7
+WHERE id=$1 AND status='starting'`, id, display, session, path, width, height, fps)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("录制启动状态已变化，请重试")
+	}
+	return nil
+}
+
+func (d *DB) SetRetestRecordingStopping(ctx context.Context, id int64) error {
+	_, err := d.ExecContext(ctx, `UPDATE finding_retest_recordings SET status='stopping' WHERE id=$1 AND status='recording'`, id)
+	return err
+}
+
+func (d *DB) FailRetestRecording(ctx context.Context, id int64, reason string) error {
+	_, err := d.ExecContext(ctx, `UPDATE finding_retest_recordings
+SET status='failed', error=$2, finished_at=now() WHERE id=$1 AND status IN ('starting','recording','stopping')`, id, reason)
+	return err
+}
+
+func (d *DB) FinishRetestRecording(ctx context.Context, id int64, status string, durationMS, sizeBytes int64, sha, errNote string) error {
+	if status != "completed" && status != "interrupted" && status != "failed" {
+		return errors.New("invalid terminal recording status")
+	}
+	_, err := d.ExecContext(ctx, `UPDATE finding_retest_recordings
+SET status=$2, duration_ms=$3, size_bytes=$4, sha256=$5,
+    error=CASE WHEN $6 <> '' THEN $6 ELSE error END, finished_at=now()
+WHERE id=$1 AND status IN ('starting','recording','stopping')`, id, status, durationMS, sizeBytes, sha, errNote)
+	return err
+}
+
+func (d *DB) IncRetestRecordingExec(ctx context.Context, id int64) error {
+	_, err := d.ExecContext(ctx, `UPDATE finding_retest_recordings SET exec_count=exec_count+1 WHERE id=$1`, id)
+	return err
+}
+
+func (d *DB) AddRetestRecordingMark(ctx context.Context, id int64, offsetS float64, note string) error {
+	if note == "" {
+		return errors.New("mark 需要 note")
+	}
+	if len([]rune(note)) > 500 {
+		return errors.New("mark note 最多 500 个字符")
+	}
+	// jsonb_build_object 的参数类型是 any，不给 $n 显式类型时 Postgres
+	// 无法推断（SQLSTATE 42P18），语句会在解析阶段失败——marks 就一直为空。
+	_, err := d.ExecContext(ctx, `UPDATE finding_retest_recordings
+SET marks = marks || jsonb_build_array(jsonb_build_object('offset_s',$2::float8,'note',$3::text))
+WHERE id=$1`, id, offsetS, note)
+	return err
+}
+
+func (d *DB) ActiveRetestRecording(ctx context.Context, retestID int64) (*FindingRetestRecording, error) {
+	return scanRecording(d.QueryRowContext(ctx, `SELECT `+recordingCols+` FROM finding_retest_recordings
+WHERE retest_id=$1 AND status IN ('starting','recording','stopping') ORDER BY id DESC LIMIT 1`, retestID))
+}
+
+func (d *DB) ActiveRetestRecordingForConversation(ctx context.Context, conversationID int64) (*FindingRetestRecording, error) {
+	return scanRecording(d.QueryRowContext(ctx, `SELECT `+recordingCols+` FROM finding_retest_recordings r
+JOIN finding_retests t ON t.id=r.retest_id
+WHERE t.conversation_id=$1 AND r.status IN ('starting','recording','stopping') ORDER BY r.id DESC LIMIT 1`, conversationID))
+}
+
+func (d *DB) RetestRecordingByID(ctx context.Context, id int64) (*FindingRetestRecording, error) {
+	return scanRecording(d.QueryRowContext(ctx, `SELECT `+recordingCols+` FROM finding_retest_recordings WHERE id=$1`, id))
+}
+
+// RetestRecordingsForFinding 供复测列表一次性带出历史录屏，避免 N+1。
+func (d *DB) RetestRecordingsForFinding(ctx context.Context, findingID int64) (map[int64][]*FindingRetestRecording, error) {
+	rows, err := d.QueryContext(ctx, `SELECT `+recordingColsQualified+` FROM finding_retest_recordings r
+JOIN finding_retests t ON t.id=r.retest_id
+WHERE t.finding_id=$1 ORDER BY r.id DESC`, findingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectRecordings(rows)
+}
+
+// RetestRecordingsForRetests 按复测 id 批量取录屏（活跃列表用，避免 N+1）。
+func (d *DB) RetestRecordingsForRetests(ctx context.Context, retestIDs []int64) (map[int64][]*FindingRetestRecording, error) {
+	if len(retestIDs) == 0 {
+		return map[int64][]*FindingRetestRecording{}, nil
+	}
+	rows, err := d.QueryContext(ctx, `SELECT `+recordingColsQualified+` FROM finding_retest_recordings r
+WHERE r.retest_id = ANY($1::bigint[]) ORDER BY r.id DESC`, retestIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return collectRecordings(rows)
+}
+
+func collectRecordings(rows *sql.Rows) (map[int64][]*FindingRetestRecording, error) {
+	out := map[int64][]*FindingRetestRecording{}
+	for rows.Next() {
+		r, err := scanRecording(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[r.RetestID] = append(out[r.RetestID], r)
+	}
+	return out, rows.Err()
+}
+
+// RecoverRetestRecordings 在服务启动时封口上一进程遗留的录制。
+// 返回这些行供调用方清理残留进程（tmux 会话 / Xvfb）。
+func (d *DB) RecoverRetestRecordings() ([]*FindingRetestRecording, error) {
+	rows, err := d.Query(`SELECT ` + recordingCols + ` FROM finding_retest_recordings
+WHERE status IN ('starting','recording','stopping') ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	var out []*FindingRetestRecording
+	for rows.Next() {
+		r, err := scanRecording(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	if _, err := d.Exec(`UPDATE finding_retest_recordings
+SET status='interrupted', error='服务重启，录制已中断', finished_at=now()
+WHERE status IN ('starting','recording','stopping')`); err != nil {
+		return nil, err
+	}
+	// 已落盘的半截 mp4 仍算证据，尽量保留并回报大小。
+	for _, r := range out {
+		r.Status = "interrupted"
+		r.Error = "服务重启，录制已中断"
+	}
+	return out, nil
+}
+
+// InterruptRetestRecording 封口一条进程已不在的录制（崩溃/重启/归档前收尾）。
+func (d *DB) InterruptRetestRecording(ctx context.Context, id int64, reason string) error {
+	_, err := d.ExecContext(ctx, `UPDATE finding_retest_recordings
+SET status='interrupted', error=$2, finished_at=now()
+WHERE id=$1 AND status IN ('starting','recording','stopping')`, id, reason)
+	return err
+}
+
+// ActiveRecordingsForTask 返回某任务下所有仍在进行的录制，
+// 附带所属复测会话 id（用于命中进程内句柄）。归档前用它做强制收尾。
+func (d *DB) ActiveRecordingsForTask(ctx context.Context, taskID int64) ([]*FindingRetestRecording, []int64, error) {
+	rows, err := d.QueryContext(ctx, `SELECT `+recordingColsQualified+`, COALESCE(t.conversation_id,0)
+FROM finding_retest_recordings r JOIN finding_retests t ON t.id=r.retest_id
+WHERE r.task_id=$1 AND r.status IN ('starting','recording','stopping') ORDER BY r.id`, taskID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var recs []*FindingRetestRecording
+	var convs []int64
+	for rows.Next() {
+		r := &FindingRetestRecording{}
+		var marks []byte
+		var convID int64
+		if err := rows.Scan(&r.ID, &r.RetestID, &r.TaskID, &r.App, &r.Backend, &r.Display, &r.TmuxSession, &r.Path,
+			&r.Status, &r.Width, &r.Height, &r.FPS, &r.ExecCount, &marks, &r.SHA256,
+			&r.StartedAt, &r.FinishedAt, &r.DurationMS, &r.SizeBytes, &r.Error, &convID); err != nil {
+			return nil, nil, err
+		}
+		if len(marks) == 0 {
+			marks = []byte("[]")
+		}
+		r.Marks = marks
+		recs = append(recs, r)
+		convs = append(convs, convID)
+	}
+	return recs, convs, rows.Err()
+}
+
+// TaskArchiveState 返回任务最新归档状态（无记录则为空），
+// 供录屏播放接口在文件已随任务归档时给出明确提示而不是 404。
+func (d *DB) TaskArchiveState(taskID int64) (string, error) {
+	var state string
+	err := d.QueryRow(`SELECT state FROM task_archives WHERE task_id=$1 ORDER BY id DESC LIMIT 1`, taskID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return state, err
 }
