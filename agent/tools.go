@@ -56,7 +56,8 @@ type ToolSet struct {
 	cs              *db.CompanyStore   // company store (optional)
 	ts              *db.ExplorationStore
 	worker          string
-	taskID          int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	taskID          int64  // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	dataDir         string // 数据根目录（tasks/<id>/poc 的父级）；空 = 文件类工具不可用
 	// coverageDisabled mirrors tasks.coverage_enabled=false. Stored inverted so the
 	// zero value (all existing ToolSet constructions) means ENABLED — matching the
 	// DB default (true). When true: graphOverviewData drops the coverage block, the
@@ -157,6 +158,10 @@ func NewToolSet(ts *db.ExplorationStore, worker string) *ToolSet {
 // SetTaskID sets the PG task id on this ToolSet so that report_finding can
 // dual-write to the standalone findings table (which survives task deletion).
 func (t *ToolSet) SetTaskID(id int64) { t.taskID = id }
+
+// SetDataDir 告诉工具集数据根目录，save_poc 与 report_finding 的 PoC 校验靠它定位
+// <dataDir>/tasks/<taskID>/poc。空值表示无此能力（工具会报错而不是猜路径）。
+func (t *ToolSet) SetDataDir(dir string) { t.dataDir = dir }
 
 // SetCoverageEnabled records whether this task has the component-coverage feature on
 // (default enabled). Passing false makes graphOverviewData omit the coverage block
@@ -1192,10 +1197,11 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 // --- worker write tools ---
 
 func (t *ToolSet) addFinding() actool.CoreTool {
-	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
+	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。PoC 文件用 poc_files 参数传（值取 save_poc 返回的 path），工具会逐个校验文件存在，缺一个就登记失败。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
 		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要"),
 		"intent_id": idp("当前任务的意图 id"), "component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响组件 id"},
-		"evidence":         str("证据/PoC 文本"),
+		"evidence":         str("证据/PoC 文本（人类可读）；PoC 文件请在 poc_files 里给文件名"),
+		"poc_files":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "PoC 文件名数组，取自 save_poc 返回的 path（如 [\"cgi_inject.py\"] 或 [\"poc/cgi_inject.py\"]）；文件必须已存在，否则登记失败"},
 		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
 		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。",
 			"items": obj(map[string]any{"traffic_id": str("traffic_search 返回的真实流量 ID"), "role": map[string]any{"type": "string", "enum": []string{"baseline", "proof", "verification", "supporting"}}, "note": str("该流量如何支持漏洞结论")}, "traffic_id")},
@@ -1206,6 +1212,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			ComponentIDs                                 []json.RawMessage `json:"component_ids"`
 			TrafficRefs                                  []db.TrafficRef   `json:"traffic_refs"`
 			EvidenceHintID                               json.RawMessage   `json:"evidence_hint_id"`
+			PocFiles                                     []string          `json:"poc_files"`
 		}
 		if err := json.Unmarshal(in, &a); err != nil {
 			return actool.Errorf(err.Error()), nil
@@ -1228,7 +1235,13 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
 		}
-		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, ComponentIDs: pidList(a.ComponentIDs)}
+		// PoC 是一等产物：poc_files 里的每个文件都必须已用 save_poc 落盘。
+		// 结构化参数（不是解析 evidence 文本），写错立刻报错。
+		pocFiles, err := t.validatePocFiles(a.PocFiles)
+		if err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
+		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, ComponentIDs: pidList(a.ComponentIDs), PocFiles: pocFiles}
 		var recorded *db.RecordedFinding
 		if t.findingRecorder != nil {
 			recorded, err = t.findingRecorder.Record(ctx, input, refs)
@@ -1239,6 +1252,10 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		}
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
+		}
+		// PoC 索引回填：save_poc 发生在登记之前，那时没有 finding id，这里补上。
+		if recorded != nil {
+			t.backfillPocRefs(pocFiles, recorded.FindingID)
 		}
 		if t.notifyFinding != nil {
 			iid := input.IntentID

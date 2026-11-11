@@ -328,7 +328,10 @@ func (d *DB) EditFindingTraffic(ctx context.Context, findingID, bindingID, versi
 type RecordFindingInput struct {
 	TaskID, ExplorationID, IntentID                      int64
 	VulnClass, Name, Severity, Summary, Evidence, Worker string
-	ComponentIDs                                             []int64
+	ComponentIDs                                         []int64
+	// PocFiles 是本漏洞用到的 PoC 文件名（相对 poc/ 目录的单层名），由
+	// report_finding 结构化传入；不再从 evidence 文本里解析。
+	PocFiles []string
 }
 
 type RecordedFinding struct {
@@ -382,22 +385,26 @@ VALUES($1,'finding',$2,9,'confirmed',$3) RETURNING id`, in.ExplorationID, string
 		components = []int64{}
 	}
 	raw, _ := json.Marshal(components)
-	if err := tx.QueryRow(`INSERT INTO findings(task_id,node_id,vulnclass,name,severity,summary,evidence,worker,component_ids)
-VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, in.TaskID, out.NodeID, in.VulnClass, in.Name, in.Severity, in.Summary, in.Evidence, in.Worker, string(raw)).Scan(&out.FindingID); err != nil {
+	pocJSON, _ := json.Marshal(in.PocFiles)
+	if in.PocFiles == nil {
+		pocJSON = []byte("[]")
+	}
+	if err := tx.QueryRow(`INSERT INTO findings(task_id,node_id,vulnclass,name,severity,summary,evidence,worker,component_ids,poc_files)
+VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, in.TaskID, out.NodeID, in.VulnClass, in.Name, in.Severity, in.Summary, in.Evidence, in.Worker, string(raw), string(pocJSON)).Scan(&out.FindingID); err != nil {
 		return nil, err
 	}
 	// 在**同一事务**里登记一条推送事件：提交即保证「漏洞落库」与「推送任务存在」
 	// 原子一致，不存在提交成功却没入队、消息永久丢失的窗口。
 	// 这里的失败被隔离在保存点上、不影响漏洞写入（见函数注释），因此忽略返回值。
 	RecordNotificationEventTx(ctx, tx, notify.EventFindingCreated, out.FindingID, notify.Snapshot{
-		Kind:      notify.EventFindingCreated,
-		FindingID: out.FindingID,
-		TaskID:    in.TaskID,
-		VulnClass: in.VulnClass,
-		Name:      in.Name,
-		Severity:  in.Severity,
-		Summary:   in.Summary,
-		ComponentIDs:  components,
+		Kind:         notify.EventFindingCreated,
+		FindingID:    out.FindingID,
+		TaskID:       in.TaskID,
+		VulnClass:    in.VulnClass,
+		Name:         in.Name,
+		Severity:     in.Severity,
+		Summary:      in.Summary,
+		ComponentIDs: components,
 	})
 	if err := AddFindingTrafficTx(tx, out.FindingID, prepared); err != nil {
 		return nil, err

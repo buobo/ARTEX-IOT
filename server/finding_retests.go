@@ -184,6 +184,22 @@ func (s *Server) startFindingRetest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, code, map[string]any{"retest": retest, "created": created})
 }
 
+// retestPocFiles 把漏洞登记的 poc_files 拼成绝对路径，并标出文件是否还在。
+// 复测会话的工作目录不是任务目录，相对路径跑不通，所以这里直接给出绝对路径。
+func (s *Server) retestPocFiles(f *db.DBFinding) []map[string]any {
+	out := []map[string]any{}
+	if f == nil || f.TaskID == nil {
+		return out
+	}
+	dir := filepath.Join(s.m.dir, "tasks", strconv.FormatInt(*f.TaskID, 10), "poc")
+	for _, name := range f.PocFiles {
+		abs := filepath.Join(dir, name)
+		_, err := os.Stat(abs)
+		out = append(out, map[string]any{"name": name, "absolute_path": abs, "exists": err == nil})
+	}
+	return out
+}
+
 // Both tools derive the finding from server-owned conversation context. Tool
 // arguments cannot redirect a result into a different finding or conversation.
 func (s *Server) findingRetestTools() []actool.CoreTool {
@@ -210,7 +226,7 @@ func (s *Server) findingRetestTools() []actool.CoreTool {
 						}
 					}
 				}
-				return jsonResult(map[string]any{"retest": r, "current_constraints": constraints})
+				return jsonResult(map[string]any{"retest": r, "current_constraints": constraints, "poc_files": s.retestPocFiles(f)})
 			}),
 		wrTool("record_finding_retest_result", "为当前复测会话保存唯一结论；原漏洞证据与报告保持不变。会话成功结束且结论为 fixed 时，系统自动将漏洞状态改为已修复；其他结论保留原状态。必须提供本次实际检查的证据，无法确认时写明阻塞原因。",
 			objSchema(map[string]any{

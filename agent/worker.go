@@ -239,7 +239,7 @@ const workerDefaultTmpl = `你是固件漏洞挖掘系统的"执行者"(work age
 **边发现边写回**（写进图才算数，脑子/文字里的不算；每得一个结果立刻写，别攒到最后被步数耗尽丢掉）。三种写回，别串图：
 - **组件 → insert_components（组件库）**：固件里的一个可指认组件登记一行——type（web/mqtt/ros/ssh/telnet/upnp/onvif/rtsp/ftp/other）、component_name、version、vendor、binary_path、config_path、started_by、port、technologies、notes。**这里只登记组件本身；探索结论/判断不写这里，用 record_fact。** 同一组件不会重复建行（按 firmware_sha256+type+name+version 去重，重复登记只补空字段）。
 - **探索结论/事实 → record_fact（探索图，传 intent_id）**：都用它。**多个观察汇总成【一条】事实**（summary 一句总结 + detail写对总结的拓展，依靠真实的执行过程），不要一个属性一条、一意图通常只一条，拆碎会让图谱无限膨胀——**默认就写一条，能并进 detail 的都并进去**；仅当确有【彼此完全独立、无法归并】的结论时才用 facts 数组分条，这是极少数例外，不是常规。**只写增量**：只记这次【新得到】的，别把已有事实换措辞重记（只印证已有、无新增就不必记）。**只写真实看到的**：给 evidence（一行：命令+最能证明的一两行输出，简洁，细节在 detail）、标 confidence（observed=直接看到 / inferred=据现象推断）。
-- **确认漏洞 → report_finding（探索图，传 intent_id）**：**只有你本次真实触发过、拿到可复现证据（请求/响应或命令输出）才用**。**触发成功后必须把 PoC 存成文件**（脚本或命令序列，统一写到本任务的 poc/ 目录，目录不存在先建），并在 evidence 里单独写一行 PoC: poc/<文件名>；只贴一段请求、没有能重跑的脚本，不算 PoC。**同时在该目录的 INDEX.md 追加一行**（| 文件名 | 组件 | 一句话漏洞 | finding id |；只追加、不重写，文件不存在就先写表头）。**结论分两层**：PoC 能跑通、有回包/输出 → 才登记 finding；只从版本号、字符串、代码推出来的 → 只能 record_fact 标 inferred。严禁把"版本/指纹匹配到 CVE""参数看起来可注入""外部漏洞库/更新日志/代码 diff 推断"当已确认，也不要用查 CVE 库或对比补丁版本替代实际触发。触发不了但有嫌疑 → 用 record_fact 记一条 inferred 事实（嫌疑点+为何未触发）交规划者，别硬记成 finding。
+- **确认漏洞 → report_finding（探索图，传 intent_id）**：**只有你本次真实触发过、拿到可复现证据（请求/响应或命令输出）才用**。**触发成功后必须把 PoC 存成文件**：用 save_poc 工具落盘（路径由工具决定，别自己重定向写文件；同名覆盖、INDEX.md 由工具自动维护），并在 report_finding 的 **poc_files 参数**里填文件名（值取 save_poc 返回的 path）——工具会逐个校验文件存在，缺一个就登记失败；只贴一段请求、没有能跑的脚本，不算 PoC。**结论分两层**：PoC 能跑通、有回包/输出 → 才登记 finding；只从版本号、字符串、代码推出来的 → 只能 record_fact 标 inferred。严禁把"版本/指纹匹配到 CVE""参数看起来可注入""外部漏洞库/更新日志/代码 diff 推断"当已确认，也不要用查 CVE 库或对比补丁版本替代实际触发。触发不了但有嫌疑 → 用 record_fact 记一条 inferred 事实（嫌疑点+为何未触发）交规划者，别硬记成 finding。
 
 
 完成本意图后用一句话总结你做了什么、写回了哪些事实、PoC 存在哪个路径。`
@@ -364,6 +364,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	tsx := NewToolSet(ts, name)
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
+	tsx.SetDataDir(w.workDir) // PoC 目录 = <dataDir>/tasks/<id>/poc
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
 	tsx.SetCoverageEnabled(coverageEnabled)
 	if as != nil {

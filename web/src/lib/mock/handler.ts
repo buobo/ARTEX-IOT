@@ -1356,6 +1356,15 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   // ── 覆盖度 / 覆盖图 / 组件关联（任务维度）──
   if (seg[0] === "tasks" && seg[2] === "coverage" && seg.length === 3) return D.coverage;
   if (seg[0] === "tasks" && seg[2] === "coverage-graph") return D.coverageGraph;
+  // 任务 PoC 目录（真后端读磁盘；mock 给一份示例，保证 demo 模式不报错）
+  if (seg[0] === "tasks" && seg[2] === "poc" && seg.length === 3 && m === "GET") {
+    return {
+      dir: `/data/tasks/${seg[1]}/poc`,
+      files: [
+        { name: "cgi_inject.py", size: 1843, modified_at: new Date().toISOString(), referenced_by: [] },
+      ],
+    };
+  }
   if (seg[0] === "tasks" && seg[2] === "component-refs") return D.componentRefsFor(Number(q.get("component_id") ?? 0));
 
   // ── 任务测试范围（增删查）──

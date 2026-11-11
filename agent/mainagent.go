@@ -116,6 +116,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		tsx.SetComponentStore(as, as.Companies())
 	}
 	tsx.SetTaskID(taskID)
+	tsx.SetDataDir(m.workDir) // PoC 目录 = <dataDir>/tasks/<id>/poc
 	tsx.SetCoverageEnabled(as == nil || as.CoverageEnabled(taskID))
 	tsx.SetNotify(notify)         // 通用唤醒（无专用回调的写操作走它，debounced）
 	tsx.SetResumeTask(resume)     // set_goals 新增目标 → 把已完成/暂停的任务拉回 running

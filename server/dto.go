@@ -318,14 +318,14 @@ type FindingDTO struct {
 	Evidence  string `json:"evidence"`
 	Report    string `json:"report,omitempty"` // 详细报告(Markdown);仅详情接口返回,列表为空
 
-	IntentID        string            `json:"intent_id,omitempty"`
-	ParamID         string            `json:"param_id,omitempty"`
-	TaskID          string            `json:"task_id,omitempty"`
-	TaskDescription string            `json:"task_description,omitempty"`
-	SourceTaskID    string            `json:"source_task_id,omitempty"`
-	Inherited       bool              `json:"inherited,omitempty"`
-	Components          []FindingComponentDTO `json:"components,omitempty"`
-	TS              string            `json:"ts"`
+	IntentID        string                `json:"intent_id,omitempty"`
+	ParamID         string                `json:"param_id,omitempty"`
+	TaskID          string                `json:"task_id,omitempty"`
+	TaskDescription string                `json:"task_description,omitempty"`
+	SourceTaskID    string                `json:"source_task_id,omitempty"`
+	Inherited       bool                  `json:"inherited,omitempty"`
+	Components      []FindingComponentDTO `json:"components,omitempty"`
+	TS              string                `json:"ts"`
 }
 
 // FindingComponentDTO is one component a finding is anchored to, pre-labelled for display.
@@ -347,9 +347,8 @@ func componentLabel(a *db.Component) string {
 	return label
 }
 
-
 // findingPayload mirrors the JSON written by the worker's report_finding tool
-// (agent/tools.go addFinding): {vulnclass, severity, summary, evidence:{by,poc}}.
+// (agent/tools.go addFinding): {vulnclass, severity, summary, evidence, poc_files}.
 type findingPayload struct {
 	VulnClass string          `json:"vulnclass"`
 	Name      string          `json:"name"`

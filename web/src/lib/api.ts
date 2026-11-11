@@ -101,6 +101,7 @@ import type {
   UsageStats,
   WorkspaceFile,
   WorkspaceListing,
+  PocFileEntry,
 } from "@/lib/types";
 
 function getToken(): string | null {
@@ -534,6 +535,14 @@ export const api = {
       ),
     ),
   // 任务视角：同一接口带 task_id
+  // 单个 PoC 文件的取回地址（inline=1 走浏览器内文本预览，否则下载）
+  taskPocFileUrl: (taskId: string, name: string, inline = false) =>
+    `/api/tasks/${encodeURIComponent(taskId)}/poc/${encodeURIComponent(name)}${inline ? "?inline=1" : ""}`,
+  // 任务 PoC 目录（save_poc 落盘的文件 + 被哪些漏洞引用）
+  taskPocFiles: (taskId: string) =>
+    get<{ dir: string; files: PocFileEntry[] }>(`/tasks/${encodeURIComponent(taskId)}/poc`).then(
+      (r) => ({ dir: r?.dir ?? "", files: r?.files ?? [] }),
+    ),
   taskComponents: (taskId: string, type = "", status = "", firmware = "", limit = 50, offset = 0) =>
     get<{ count: number; total: number; components: Component[] }>(
       `/components?task_id=${encodeURIComponent(taskId)}&type=${encodeURIComponent(type)}${status ? `&status=${encodeURIComponent(status)}` : ""}${firmware ? `&firmware=${encodeURIComponent(firmware)}` : ""}&limit=${limit}&offset=${offset}`,

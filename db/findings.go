@@ -20,6 +20,9 @@ type DBFinding struct {
 	ReportEvidenceVersion int64
 	TrafficBindings       []FindingTrafficBinding // populated only for export
 
+	// PocFiles 是这条漏洞的 PoC 文件名（poc/ 下的单层名）。
+	PocFiles []string
+
 	ID              int64
 	TaskID          *int64
 	NodeID          *int64
@@ -103,7 +106,7 @@ func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, name, severity, summary
 // findingSelectCols is the column list (with task_description join) every finding
 // list query selects, so scanFinding stays in sync across callers.
 const findingSelectCols = `f.id, f.task_id, f.node_id, f.vulnclass, COALESCE(f.name, ''), f.severity, f.summary,
-	       f.evidence, f.worker, f.component_ids, COALESCE(f.status, 'pending'), f.created_at,
+	       f.evidence, f.worker, f.component_ids, COALESCE(f.poc_files, '[]'::jsonb), COALESCE(f.status, 'pending'), f.created_at,
 	       COALESCE(t.description, '') AS task_description, f.evidence_version, f.report_evidence_version,
  (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id)`
 
@@ -116,12 +119,13 @@ func scanFindings(rows interface {
 	var out []*DBFinding
 	for rows.Next() {
 		f := &DBFinding{}
-		var aidsJSON string
+		var aidsJSON, pocJSON string
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
-			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount); err != nil {
+			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &pocJSON, &f.Status, &f.CreatedAt, &f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.ComponentIDs)
+		_ = json.Unmarshal([]byte(pocJSON), &f.PocFiles)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -508,13 +512,14 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 	var out []*DBFinding
 	for rows.Next() {
 		f := &DBFinding{}
-		var aidsJSON string
+		var aidsJSON, pocJSON string
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
-			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
+			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &pocJSON, &f.Status, &f.CreatedAt,
 			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.ComponentIDs)
+		_ = json.Unmarshal([]byte(pocJSON), &f.PocFiles)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -632,13 +637,13 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 // it also selects `report` — that column is only needed on the detail page.
 func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 	f := &DBFinding{}
-	var aidsJSON string
+	var aidsJSON, pocJSON string
 	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, '')
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
 		WHERE f.id = $1`, id).Scan(
 		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
-		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
+		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &pocJSON, &f.Status, &f.CreatedAt,
 		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -647,6 +652,7 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(aidsJSON), &f.ComponentIDs)
+	_ = json.Unmarshal([]byte(pocJSON), &f.PocFiles)
 	return f, nil
 }
 

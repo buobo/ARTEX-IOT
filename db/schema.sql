@@ -1205,6 +1205,8 @@ CREATE TABLE IF NOT EXISTS findings (
     evidence    TEXT NOT NULL DEFAULT '',
     worker      TEXT NOT NULL DEFAULT '',
     component_ids JSONB NOT NULL DEFAULT '[]',
+    -- PoC 文件名列表（save_poc 的产物；report_finding 结构化传入，不再靠解析 evidence 文本）
+    poc_files   JSONB NOT NULL DEFAULT '[]',
     -- 处置状态：pending 待处理 / in_progress 处理中 / confirmed 已确认 / resolved 已处理 / fixed 已修复 /
     -- false_positive 误报 / ignored 忽略 / duplicate 重复 / risk_accepted 风险接受。
     -- 取值不加 CHECK：旧库靠下面的 ALTER 补列,CHECK 无法回填,统一由 server 侧白名单校验。
@@ -1213,6 +1215,9 @@ CREATE TABLE IF NOT EXISTS findings (
     report      TEXT NOT NULL DEFAULT '',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- findings.poc_files：漏洞 → PoC 文件的结构化关联
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS poc_files JSONB NOT NULL DEFAULT '[]';
+
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS name   TEXT NOT NULL DEFAULT '';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS report TEXT NOT NULL DEFAULT '';

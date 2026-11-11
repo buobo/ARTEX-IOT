@@ -46,6 +46,7 @@ import { FindingsTab } from "./_tabs/findings-tab";
 import { GraphTab } from "./_tabs/graph-tab";
 import { InterceptTab } from "./_tabs/intercept-tab";
 import { OverviewTab } from "./_tabs/overview-tab";
+import { PocTab } from "./_tabs/poc-tab";
 import { ReportTab } from "./_tabs/report-tab";
 import { RetestsTab } from "./_tabs/retests-tab";
 import { SessionsTab } from "./_tabs/sessions-tab";
@@ -57,6 +58,7 @@ const TABS = [
   { value: "broadcast", label: "播报板" },
   { value: "findings", label: "发现" },
   { value: "retests", label: "复测" },
+  { value: "poc", label: "PoC" },
   { value: "components", label: "测试组件" },
   { value: "coverage", label: "组件覆盖图" },
   { value: "intercept", label: "拦截审批" },
@@ -434,6 +436,9 @@ function TaskDetailInner() {
         </TabsContent>
         <TabsContent value="retests" className="mt-0">
           <RetestsTab key={id} taskId={id} />
+        </TabsContent>
+        <TabsContent value="poc" className="mt-0">
+          <PocTab taskId={id} />
         </TabsContent>
         <TabsContent value="components" className="mt-0">
           <ComponentsTab taskId={id} />

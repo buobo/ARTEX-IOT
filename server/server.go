@@ -707,6 +707,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/task-archives/delete/batch", s.deleteTaskArchivesBatch)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage", s.taskCoverage)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage-graph", s.taskCoverageGraph)
+	mux.HandleFunc("GET /api/tasks/{id}/poc", s.taskPocFiles)
+	mux.HandleFunc("GET /api/tasks/{id}/poc/{name}", s.taskPocDownload)
 	mux.HandleFunc("GET /api/tasks/{id}/component-refs", s.taskComponentRefs)
 	mux.HandleFunc("POST /api/tasks/{id}/components", s.attachTaskComponents)
 	mux.HandleFunc("DELETE /api/tasks/{id}/components/{componentID}", s.detachTaskComponent)
@@ -2569,12 +2571,12 @@ func (s *Server) explorationNodes(w http.ResponseWriter, r *http.Request) {
 		refs[i64s(n.ID)] = taskNodeDTO(n)
 	}
 	writeJSON(w, 200, map[string]any{
-		"items":  taskNodeDTOs(nodes),
-		"total":  total,
-		"page":   page,
-		"size":   size,
-		"edges":  edgeDTOs(edges),
-		"refs":   refs,
+		"items":      taskNodeDTOs(nodes),
+		"total":      total,
+		"page":       page,
+		"size":       size,
+		"edges":      edgeDTOs(edges),
+		"refs":       refs,
 		"components": s.nodeAnchoredComponents(t, append(ids, neighbourIDs...)),
 	})
 }

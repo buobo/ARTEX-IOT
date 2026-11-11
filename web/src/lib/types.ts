@@ -1510,3 +1510,11 @@ export interface InterceptExecution {
   seq: number;
   items: Activity[];
 }
+
+// 任务 PoC 目录里的一个文件（来自 GET /api/tasks/{id}/poc）
+export interface PocFileEntry {
+  name: string;
+  size: number;
+  modified_at: string;
+  referenced_by: { id: number; name?: string }[];
+}

@@ -367,11 +367,11 @@ func (s *Server) toolAddHint() actool.CoreTool {
 	return wrTool("add_task_hint", "给指定任务注入战略提示(该任务的 planner 下轮生成意图时会读到)。\n"+
 		"★优先批量：多条提示放进 hints 数组一次提交（返回 ids 数组，与 hints 等长同序，失败项 id=0）；单条则省略 hints 直接给顶层 text。",
 		objSchema(map[string]any{
-			"task_id":      strParam("任务 id"),
-			"hints":        map[string]any{"type": "array", "description": "【优先用这个】提示数组，每个元素字段同顶层（text/component_ids/traffic_refs）。", "items": objSchema(map[string]any{"text": strParam("提示内容"), "component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": agent.HintTrafficSchema()})},
-			"text":         strParam("[单条] 提示内容"),
-			"traffic_refs": agent.HintTrafficSchema(),
-			"component_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的组件 id（可选，0/1/多个；该任务内的组件 id）"},
+			"task_id":       strParam("任务 id"),
+			"hints":         map[string]any{"type": "array", "description": "【优先用这个】提示数组，每个元素字段同顶层（text/component_ids/traffic_refs）。", "items": objSchema(map[string]any{"text": strParam("提示内容"), "component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": agent.HintTrafficSchema()})},
+			"text":          strParam("[单条] 提示内容"),
+			"traffic_refs":  agent.HintTrafficSchema(),
+			"component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的组件 id（可选，0/1/多个；该任务内的组件 id）"},
 		}, "task_id"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			return s.delegateToTask(ctx, in, (*agent.ToolSet).AddHintTool)
@@ -514,7 +514,7 @@ func (s *Server) seedOrchestrationTools() {
 // reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
 // Bump the flag whenever these tools' schemas/descriptions change in code.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v7_list_facts_paging"
+	const flag = "tool_schema_refresh_v9_poc_files_param"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -532,7 +532,7 @@ func (s *Server) refreshBuiltinToolSchemas() {
 	//     SeedTool 首插入only，旧库已 seed 的 schema 否则收不到这个新参数。
 	//   - list_facts：改为分页，新增 limit/before/q 入参；旧库已 seed 的空 schema 否则
 	//     在工具管理页显示「无参数」，模型也拿不到这几个参数说明。
-	refreshBuiltin := map[string]bool{"goal_met": true, "insert_components": true, "list_facts": true}
+	refreshBuiltin := map[string]bool{"goal_met": true, "insert_components": true, "list_facts": true, "report_finding": true, "save_poc": true}
 	for _, sd := range agent.BuiltinToolSeeds() {
 		if !refreshBuiltin[sd.Key] {
 			continue

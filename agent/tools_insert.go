@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -462,7 +465,7 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		t.addFinding(), t.recordFact(),
 		// component management (handlers guard nil store internally)。
 		// add_company_scope 不给 worker：定义企业范围属规划/主控/Auto 的职责，worker 只执行探索。
-		t.insertComponents(), t.listComponents(), t.setComponentStatus(),
+		t.insertComponents(), t.listComponents(), t.setComponentStatus(), t.savePoc(),
 		// 跨 work 回看：worker 也可复用其他 work 的观察，避免重复劳动。
 		// search_all_worker_traces：不必先知道 intent_id，按关键字全局捞命中步骤；
 		// get_worker_trace：锁定某条 work 后列步骤/就地搜/取完整内容。
@@ -488,6 +491,7 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		t.setConstraints(),
 		// component management (handlers guard nil store internally)
 		t.insertComponents(), t.addCompanyScope(), t.listComponents(), t.setComponentStatus(),
+		t.savePoc(),
 		t.addFinding(), t.recordFact(),
 		t.addTaskScope(),
 		// list_untested_components：按需查本任务范围内未测组件(类型+分页)，自行决定补测。
@@ -556,4 +560,227 @@ func (t *ToolSet) setComponentStatus() actool.CoreTool {
 			return jsonResult(map[string]any{"updated": updated, "errors": errs})
 		},
 	)
+}
+
+// =====================================================================
+// save_poc：PoC 落盘 + INDEX.md 索引
+// =====================================================================
+
+// pocDir 返回本任务的 PoC 目录 <dataDir>/tasks/<taskID>/poc。
+// 拿不到任务上下文时返回错误——路径只能由代码决定，不让模型自己拼。
+func (t *ToolSet) pocDir() (string, error) {
+	if t.dataDir == "" {
+		return "", fmt.Errorf("save_poc/PoC 校验不可用：数据目录未注入")
+	}
+	if t.taskID <= 0 {
+		return "", fmt.Errorf("save_poc 需要任务上下文；平台对话请把 PoC 交给任务 Agent")
+	}
+	return filepath.Join(t.dataDir, "tasks", strconv.FormatInt(t.taskID, 10), "poc"), nil
+}
+
+var pocExts = map[string]bool{".py": true, ".sh": true, ".c": true, ".txt": true, ".http": true, ".md": true, ".js": true, ".rb": true}
+
+// cleanPocName 只接受单层文件名：拒绝路径分隔符、上跳、隐藏前缀与不认识的扩展名。
+func cleanPocName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	name = strings.Trim(name, "`'\"")
+	if name == "" {
+		return "", fmt.Errorf("name 不能为空")
+	}
+	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") || strings.HasPrefix(name, ".") {
+		return "", fmt.Errorf("name 只能是单层文件名（不含路径/上跳）：%s", raw)
+	}
+	if !pocExts[strings.ToLower(filepath.Ext(name))] {
+		return "", fmt.Errorf("name 扩展名不支持：%s（可用 .py/.sh/.c/.js/.rb/.txt/.http/.md）", name)
+	}
+	return name, nil
+}
+
+// pocIndexPath 返回 PoC 索引文件路径。
+func pocIndexPath(dir string) string { return filepath.Join(dir, "INDEX.md") }
+
+// upsertPocIndex 在 INDEX.md 里写入/更新一行。索引由代码维护，避免模型忘写或写坏格式。
+func upsertPocIndex(dir, name, component, summary string, findingID int64) error {
+	const header = "| 文件名 | 组件 | 一句话漏洞 | finding id |\n|---|---|---|---|\n"
+	cells := []string{"`" + name + "`", component, summary, ""}
+	if findingID > 0 {
+		cells[3] = strconv.FormatInt(findingID, 10)
+	}
+	row := "| " + strings.Join(cells, " | ") + " |"
+
+	path := pocIndexPath(dir)
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if len(b) == 0 {
+		lines = strings.Split(strings.TrimRight(header, "\n"), "\n")
+	}
+	replaced := false
+	for i, ln := range lines {
+		if strings.HasPrefix(strings.TrimSpace(ln), "| `"+name+"`") || strings.HasPrefix(strings.TrimSpace(ln), "| "+name+" |") {
+			lines[i] = row
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		lines = append(lines, row)
+	}
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+// backfillPocIndexFinding 把 report_finding 得到的 finding id 写回 poc/INDEX.md 对应行。
+// save_poc 通常发生在登记之前，那时还没有 finding id；这里补上，索引才不会一直空着。
+func backfillPocIndexFinding(dir, name string, findingID int64) error {
+	if findingID <= 0 {
+		return nil
+	}
+	path := pocIndexPath(dir)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil // 没有索引文件 = 没走 save_poc，无需补
+	}
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	changed := false
+	for i, ln := range lines {
+		trimmed := strings.TrimSpace(ln)
+		if !strings.HasPrefix(trimmed, "| `"+name+"`") && !strings.HasPrefix(trimmed, "| "+name+" |") {
+			continue
+		}
+		if strings.HasSuffix(trimmed, "|") {
+			body := strings.TrimSuffix(trimmed, "|")
+			if idx := strings.LastIndex(body, "|"); idx >= 0 {
+				body = strings.TrimRight(body[:idx], " ")
+			}
+			lines[i] = body + " | " + strconv.FormatInt(findingID, 10) + " |"
+			changed = true
+		}
+		break
+	}
+	if !changed {
+		return nil
+	}
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+// backfillPocRefs 按 poc_files 里的文件逐个回填 finding id。
+func (t *ToolSet) backfillPocRefs(names []string, findingID int64) {
+	dir, err := t.pocDir()
+	if err != nil {
+		return
+	}
+	for _, name := range names {
+		if err := backfillPocIndexFinding(dir, name, findingID); err != nil {
+			log.Printf("[poc] 回填 INDEX 失败 %s: %v", name, err)
+		}
+	}
+}
+
+// validatePocFiles 校验 poc_files 里的每个文件都已落盘，返回规范化后的单层文件名。
+// 这是漏洞与 PoC 的唯一关联方式（结构化），不再解析 evidence 文本。
+func (t *ToolSet) validatePocFiles(names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	dir, err := t.pocDir()
+	if err != nil {
+		return nil, fmt.Errorf("poc_files 需要任务上下文：%v", err)
+	}
+	out := make([]string, 0, len(names))
+	var missing []string
+	for _, raw := range names {
+		name, err := cleanPocName(raw)
+		if err != nil {
+			return nil, err
+		}
+		if st, err := os.Stat(filepath.Join(dir, name)); err != nil || st.IsDir() {
+			missing = append(missing, name)
+			continue
+		}
+		out = append(out, name)
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("poc_files 里的文件不存在：%s。先用 save_poc 落盘（它返回 path），把文件名传进来",
+			strings.Join(missing, "、"))
+	}
+	return out, nil
+}
+
+// savePoc 是 PoC 落盘工具：路径、目录、索引全由代码决定。
+func (t *ToolSet) savePoc() actool.CoreTool {
+	return writeTool(
+		"save_poc",
+		"把已复现漏洞的 PoC 存成本任务的 PoC 文件，并自动登记到 poc/INDEX.md。\n"+
+			"不要用 shell 重定向自己写文件——路径写错会让复测跑不起来。\n"+
+			"写完把文件名填进 report_finding 的 poc_files 参数（工具会校验文件存在，缺了就登记失败）。\n"+
+			"name 只接受单层文件名，扩展名限 .py/.sh/.c/.js/.rb/.txt/.http/.md；同名覆盖。\n"+
+			"返回：{path, absolute_path, bytes}",
+		obj(map[string]any{
+			"name":         str("文件名，例如 cgi_inject.py"),
+			"content":      str("PoC 正文（完整可运行脚本/命令序列/payload）"),
+			"summary":      str("一句话漏洞（写进 INDEX.md）"),
+			"component":    str("受影响组件名（可带版本，如 lighttpd 1.4.35）"),
+			"finding_id":   idp("可选：已登记漏洞 id；先报漏洞再存 PoC 时填，便于索引关联"),
+			"component_id": idp("可选：受影响组件 id（仅用于校验/提示，不改变索引格式）"),
+		}, "name", "content"),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				Name        string `json:"name"`
+				Content     string `json:"content"`
+				Summary     string `json:"summary"`
+				Component   string `json:"component"`
+				FindingID   int64  `json:"finding_id"`
+				ComponentID int64  `json:"component_id"`
+			}
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			name, err := cleanPocName(a.Name)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if strings.TrimSpace(a.Content) == "" {
+				return actool.Errorf("content 不能为空：PoC 必须能照做复现"), nil
+			}
+			dir, err := t.pocDir()
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return actool.Errorf(fmt.Sprintf("创建 PoC 目录失败: %v", err)), nil
+			}
+			path := filepath.Join(dir, name)
+			// 覆盖提示：同名文件已存在时如实告诉模型，别让它以为又新建了一份。
+			overwritten := ""
+			if st, err := os.Stat(path); err == nil && !st.IsDir() {
+				overwritten = fmt.Sprintf("覆盖了已有文件（原 %d 字节，修改于 %s）", st.Size(), st.ModTime().Format("2006-01-02 15:04"))
+			}
+			if err := os.WriteFile(path, []byte(a.Content), 0o644); err != nil {
+				return actool.Errorf(fmt.Sprintf("写入 PoC 失败: %v", err)), nil
+			}
+			component := strings.TrimSpace(a.Component)
+			if component == "" && a.ComponentID > 0 && t.as != nil {
+				if cs, err := t.as.GetByIDs([]int64{a.ComponentID}); err == nil && len(cs) > 0 {
+					component = cs[0].ComponentName
+					if cs[0].Version != "" {
+						component += " " + cs[0].Version
+					}
+				}
+			}
+			if err := upsertPocIndex(dir, name, component, strings.TrimSpace(a.Summary), a.FindingID); err != nil {
+				return actool.Errorf(fmt.Sprintf("更新 poc/INDEX.md 失败: %v", err)), nil
+			}
+			out := map[string]any{
+				"path":          "poc/" + name,
+				"absolute_path": path,
+				"bytes":         len(a.Content),
+			}
+			if overwritten != "" {
+				out["overwritten"] = true
+				out["note"] = overwritten + "；poc_files 里填这个名字仍指向这一份"
+			}
+			return jsonResult(out)
+		})
 }
