@@ -17,7 +17,7 @@ const maxChatMentions = 10
 
 // The visible token survives drafts, uploads, retries and conversation history.
 // Labels are only for display: the server trusts only the type and numeric ID.
-var chatMentionPattern = regexp.MustCompile(`@\[(漏洞|组件|企业|接口|IP|应用|域名|子域名|服务)#([0-9]+)(?: [^\]\r\n]*)?\]`)
+var chatMentionPattern = regexp.MustCompile(`@\[(漏洞|组件|企业)#([0-9]+)(?: [^\]\r\n]*)?\]`)
 var chatMentionKinds = map[string]string{
 	"漏洞": "finding", "组件": "component", "企业": "company",
 }
@@ -40,7 +40,10 @@ func parseChatMentions(message string) ([]chatMentionRef, error) {
 		if err != nil || id <= 0 {
 			return nil, &chatMentionInputError{"引用 ID 无效，请重新选择"}
 		}
-		kind := chatMentionKinds[m[1]]
+		kind, ok := chatMentionKinds[m[1]]
+		if !ok {
+			return nil, &chatMentionInputError{"引用类型无效，请重新选择"}
+		}
 		key := kind + ":" + strconv.FormatInt(id, 10)
 		if seen[key] {
 			continue

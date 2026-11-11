@@ -100,8 +100,8 @@ const mainAgentDefaultTmpl = `你是固件漏洞挖掘系统的"主 agent"，是
 
 不要编造发现；只根据工具返回的真实数据回答。`
 
-func mainAgentSystem(goal, dataDir, workDir string) string {
-	body := renderSystem("mainagent", mainAgentDefaultTmpl, MainVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
+func mainAgentSystem(goal, dataDir, workDir, compSummary string) string {
+	body := renderSystem("mainagent", mainAgentDefaultTmpl, MainVars{Goal: goal, ComponentSummary: compSummary, DataDir: dataDir, Now: nowStr()})
 	return body + artifactSpec(workDir)
 }
 
@@ -131,7 +131,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	mainDir := ensureRunDir(m.workDir, taskID, 0)
 	ctx = intercept.WithReviewWorkingDirectory(ctx, mainDir)
-	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir), def)
+	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir, componentSummary(as, taskID)), def)
 	opts := agentcore.Options{
 		Provider:        m.prov,
 		SystemPrompt:    system,

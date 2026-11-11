@@ -30,3 +30,15 @@ func TestMain(m *testing.M) {
 	defer conn.Exec(`SELECT pg_advisory_unlock(7337741002)`) //nolint:errcheck
 	os.Exit(m.Run())
 }
+
+// testSetup 打开测试库并返回 DB + 组件/企业 store。
+// （原先定义在已删除的 legacy_component_test.go 里；组件时代没有资产/服务之分，
+// 测试只需要一个可指认的组件实体。）
+func testSetup(t *testing.T) (*DB, *ComponentStore, *CompanyStore) {
+	t.Helper()
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	return d, d.Components(), d.Companies()
+}

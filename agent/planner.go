@@ -343,8 +343,8 @@ const plannerDefaultTmpl = `你是固件漏洞挖掘系统的"规划者"，被�
 
 不重复、不硬凑；但目标未达成、又有未覆盖且更深的打法时，该派就派。简洁、聚焦、高效。`
 
-func plannerSystem(goal, dataDir, workDir string) string {
-	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
+func plannerSystem(goal, dataDir, workDir, compSummary string) string {
+	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, ComponentSummary: compSummary, DataDir: dataDir, Now: nowStr()})
 	return body + artifactSpec(workDir)
 }
 
@@ -394,7 +394,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.ComponentStore,
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
-	sysBody := plannerSystem(goal, p.workDir, taskDir)
+	sysBody := plannerSystem(goal, p.workDir, taskDir, componentSummary(as, taskID))
 	if p.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
 	}

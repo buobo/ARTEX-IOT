@@ -124,16 +124,16 @@ func packItemCount(items []Item, maxSize, reserve int, footer string, size func(
 func byteSize(s string) int { return len(s) }
 func runeSize(s string) int { return utf8.RuneCountInString(s) }
 
-// assetLine 把资产列表渲染成一行展示文本，超过 limit 个时省略其余并标注总数。
-// 一个漏洞可能锚定几十个资产，全列出来会挤爆消息。
-func assetLine(assets []string, limit int) string {
-	if len(assets) == 0 {
+// componentLine 把组件列表渲染成一行展示文本，超过 limit 个时省略其余并标注总数。
+// 一个漏洞可能命中几十个组件，全列出来会挤爆消息。
+func componentLine(components []string, limit int) string {
+	if len(components) == 0 {
 		return ""
 	}
-	if limit <= 0 || len(assets) <= limit {
-		return strings.Join(assets, "、")
+	if limit <= 0 || len(components) <= limit {
+		return strings.Join(components, "、")
 	}
-	return strings.Join(assets[:limit], "、") + " 等 " + itoa(len(assets)) + " 个"
+	return strings.Join(components[:limit], "、") + " 等 " + itoa(len(components)) + " 个"
 }
 
 // itoa 是 strconv.Itoa 的短别名，仅用于拼接展示文本，避免到处 import strconv。

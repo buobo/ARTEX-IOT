@@ -13,9 +13,8 @@ import type {
   AgentDetail,
   AgentTrigger,
   ArchiveBatchItem,
-  Asset,
-  AssetInterceptRule,
-  AssetInterceptRuleInput,
+  Component,
+  ComponentStatus,
   Audit,
   BatchCategoryItem,
   BatchControlItem,
@@ -26,7 +25,7 @@ import type {
   CompanyScopeRule,
   Conversation,
   ConvTokenSummary,
-  CoverageAssetRefs,
+  CoverageComponentRefs,
   CoverageGraphData,
   DailyTokenBucket,
   DeleteTaskOptions,
@@ -36,7 +35,7 @@ import type {
   ExplorationNodePage,
   ExplorationNodeQuery,
   Finding,
-  FindingAssetTree,
+  FindingComponentTree,
   FindingDeepenResponse,
   FindingGroupsPage,
   FindingQuery,
@@ -46,7 +45,7 @@ import type {
   FindingsPage,
   FindingTraffic,
   FindingTrafficDetail,
-  IntentAsset,
+  IntentComponent,
   InterceptApprovalFilter,
   InterceptApprovalRow,
   InterceptDetail,
@@ -76,16 +75,12 @@ import type {
   Severity,
   SkillCall,
   SkillItem,
-  SSProject,
-  SSTask,
-  FofaRow,
-  Collection,
   Stats,
   Task,
   TaskArchive,
   TaskArchivePage,
-  TaskAssetMutation,
-  TaskAssetScopeMutation,
+  TaskComponentMutation,
+  TaskComponentScopeMutation,
   TaskCategory,
   TaskConstraint,
   TaskGoal,
@@ -214,7 +209,7 @@ const arr = <T>(x: T[] | null | undefined): T[] => x ?? [];
 const tq = (task?: string, sep: "?" | "&" = "?") => (task ? `${sep}task=${encodeURIComponent(task)}` : "");
 
 // findingFilterParams 把发现页的筛选条件序列化成 query string。列表 / 分组 /
-// 资产树 / 导出共用同一份,新增筛选项只改这里(后端也只解析这一份)。
+// 组件树 / 导出共用同一份,新增筛选项只改这里(后端也只解析这一份)。
 function findingFilterParams(q: Omit<FindingQuery, "page" | "pageSize">): URLSearchParams {
   const p = new URLSearchParams();
   if (q.severity && q.severity !== "all") p.set("severity", q.severity);
@@ -223,7 +218,7 @@ function findingFilterParams(q: Omit<FindingQuery, "page" | "pageSize">): URLSea
   if (q.task && q.task !== "all") p.set("task_id", q.task);
   if (q.query?.trim()) p.set("q", q.query.trim());
   if (q.sort) p.set("sort", q.sort);
-  if (q.assetScope) p.set("asset_scope", q.assetScope);
+  if (q.componentScope) p.set("component_scope", q.componentScope);
   return p;
 }
 
@@ -257,12 +252,10 @@ export const api = {
     llmProfileIds?: number[];
     sourceTaskIds?: string[];
     companyIds?: number[];
-    collectionIds?: number[];
     timeoutSeconds?: number;
     seedFirstIntent?: boolean;
     planHeartbeatSeconds?: number;
     coverageEnabled?: boolean;
-    interceptRules?: AssetInterceptRuleInput[];
   }) =>
     post<Task>("/tasks", {
       name: input.name ?? "",
@@ -272,12 +265,10 @@ export const api = {
       llm_profile_ids: input.llmProfileIds ?? [],
       source_task_ids: input.sourceTaskIds ?? [],
       company_ids: input.companyIds ?? [],
-      collection_ids: input.collectionIds ?? [],
       timeout_seconds: input.timeoutSeconds ?? 0,
       seed_first_intent: input.seedFirstIntent ?? false,
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
-      coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
-      intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
+      coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭组件覆盖度功能
     }),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
   updateTask: (id: string, input: { name?: string; pinned?: boolean }) => patch<Task>(`/tasks/${id}`, input),
@@ -296,11 +287,11 @@ export const api = {
     }),
   taskTemplates: () => get<{ templates: TaskTemplate[] }>("/task-templates").then((r) => arr(r.templates)),
   createTaskTemplate: (
-    input: Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">,
+    input: Pick<TaskTemplate, "name" | "description" | "goal" | "category_id">,
   ) => post<TaskTemplate>("/task-templates", input),
   updateTaskTemplate: (
     id: number,
-    input: Partial<Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">>,
+    input: Partial<Pick<TaskTemplate, "name" | "description" | "goal" | "category_id">>,
   ) => patch<TaskTemplate>(`/task-templates/${id}`, input),
   deleteTaskTemplate: (id: number) => del<{ deleted: number }>(`/task-templates/${id}`),
   updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number) =>
@@ -370,17 +361,17 @@ export const api = {
   setActive: (id: string) => post<{ active: string }>("/active", { id }),
   // ---- stats ----
   stats: (task?: string) => get<Stats>(`/stats${tq(task)}`),
-  // 资产测试覆盖度(粗估，供参考)：范围内资产被 fact 碰过的占比 + 按类型的 总数/已测。
+  // 组件测试覆盖度(粗估，供参考)：本任务组件里 status=completed 的占比 + 按类型的 总数/已测。
   taskCoverage: (id: string) =>
     get<{
-      enabled: boolean; // 资产覆盖度功能是否开启；false 时其余字段为零值
+      enabled: boolean; // 覆盖度功能是否开启；false 时其余字段为零值
       scope_rows: number;
       denominator: number;
       tested: number;
       pct: number | null;
       by_type: { type: string; total: number; tested: number }[];
     }>(`/tasks/${id}/coverage`),
-  // 资产覆盖图：范围内全部资产 + 连接用的根域名/公司节点，含 tested/in_scope。
+  // 组件覆盖图：组件类型分组 → 组件，两层，含 tested/in_scope/statuspe。
   taskCoverageGraph: (id: string) => get<CoverageGraphData>(`/tasks/${id}/coverage-graph`),
   // 全局 llm_usage 聚合（仪表盘新版 token 视图）：按 profile 总量 + 按天分桶。
   usageStats: (days = 365) => get<UsageStats>(`/tokens/usage?days=${days}`),
@@ -413,17 +404,7 @@ export const api = {
   deleteConstraint: (id: string, constraintId: string) =>
     del<{ ok: boolean }>(`/tasks/${id}/constraints/${constraintId}`),
 
-  // ---- 任务级资产拦截/允许规则（总览）----
-  taskInterceptRules: (id: string) =>
-    get<{ rules: AssetInterceptRule[] | null }>(`/tasks/${id}/intercept-rules`).then((r) => arr(r.rules)),
-  createTaskInterceptRule: (id: string, rule: AssetInterceptRuleInput) =>
-    post<AssetInterceptRule>(`/tasks/${id}/intercept-rules`, rule),
-  updateTaskInterceptRule: (id: string, ruleId: number, rule: AssetInterceptRuleInput) =>
-    put<AssetInterceptRule>(`/tasks/${id}/intercept-rules/${ruleId}`, rule),
-  deleteTaskInterceptRule: (id: string, ruleId: number) =>
-    del<{ deleted: boolean }>(`/tasks/${id}/intercept-rules/${ruleId}`),
-  toggleTaskInterceptRule: (id: string, ruleId: number, enabled: boolean) =>
-    post<{ ok: boolean; enabled: boolean }>(`/tasks/${id}/intercept-rules/${ruleId}/toggle`, { enabled }),
+  // ---- 任务测试范围（总览）----
 
   // 本任务测试范围列表（含继承自来源任务的范围）。
   taskScope: (id: string) => get<{ scope: TaskScopeRow[] }>(`/tasks/${id}/scope`),
@@ -432,8 +413,9 @@ export const api = {
     post<TaskScopeRow>(`/tasks/${id}/scope`, { kind, value, reason }),
   // 删除本任务的一条测试范围。
   deleteTaskScope: (id: string, scopeId: number) => del<{ ok: boolean }>(`/tasks/${id}/scope/${scopeId}`),
-  // 某资产在本任务里关联的意图 / 事实 / 发现（覆盖图节点抽屉用）。
-  taskAssetRefs: (id: string, assetId: number) => get<CoverageAssetRefs>(`/tasks/${id}/asset-refs?asset_id=${assetId}`),
+  // 某组件在本任务里关联的意图 / 事实 / 发现（覆盖图节点抽屉用）。
+  taskComponentRefs: (id: string, componentId: number) =>
+    get<CoverageComponentRefs>(`/tasks/${id}/component-refs?component_id=${componentId}`),
 
   // ---- workspace file manager (workDir) ----
   workspaceList: (path = "") => get<WorkspaceListing>(`/workspace/list?path=${encodeURIComponent(path)}`),
@@ -510,43 +492,67 @@ export const api = {
     URL.revokeObjectURL(objUrl);
   },
 
-  // ---- assets ----
-  // Server-side paginated: pass limit/offset, get back the page + full match total.
-  assets: (type = "", limit = 50, offset = 0) =>
-    get<{ count: number; total: number; assets: Asset[] }>(`/assets?type=${type}&limit=${limit}&offset=${offset}`).then(
-      (r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 }),
+  // ---- components（组件库：固件解包出来的可指认组件） ----
+  // 服务端分页：传 limit/offset，拿回这一页 + 命中总数。
+  components: (type = "", status = "", firmware = "", limit = 50, offset = 0) =>
+    get<{ count: number; total: number; components: Component[] }>(
+      `/components?type=${encodeURIComponent(type)}${status ? `&status=${encodeURIComponent(status)}` : ""}${firmware ? `&firmware=${encodeURIComponent(firmware)}` : ""}&limit=${limit}&offset=${offset}`,
+    ).then((r) => ({ components: r?.components ?? [], total: r?.total ?? r?.count ?? 0 })),
+  searchComponents: (dsl: string, type = "", status = "", firmware = "", limit = 50, offset = 0) =>
+    get<{ count: number; total: number; components: Component[] }>(
+      `/components?dsl=${encodeURIComponent(dsl)}${type ? `&type=${encodeURIComponent(type)}` : ""}${status ? `&status=${encodeURIComponent(status)}` : ""}${firmware ? `&firmware=${encodeURIComponent(firmware)}` : ""}&limit=${limit}&offset=${offset}`,
+    ).then((r) => ({ components: r?.components ?? [], total: r?.total ?? r?.count ?? 0 })),
+  componentCounts: (taskId = "") =>
+    get<Record<string, number>>(`/components/counts${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
+  // 按挖掘状态汇总（pending/running/completed/ignored），不受分页影响。
+  // 按固件 sha256 汇总（组件页固件筛选下拉）
+  componentFirmwareCounts: (taskId = "") =>
+    get<Record<string, number>>(
+      `/components/counts?by=firmware${taskId ? `&task_id=${encodeURIComponent(taskId)}` : ""}`,
     ),
-  searchAssets: (dsl: string, type = "", limit = 50, offset = 0) =>
-    get<{ count: number; total: number; assets: Asset[] }>(
-      `/assets?dsl=${encodeURIComponent(dsl)}${type ? `&type=${encodeURIComponent(type)}` : ""}&limit=${limit}&offset=${offset}`,
-    ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
-  assetCounts: (taskId = "") =>
-    get<Record<string, number>>(`/assets/counts${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
-  deleteAssets: (ids: number[]) =>
-    http<{ deleted: number }>("/assets", { method: "DELETE", body: JSON.stringify({ ids }) }),
-  // task-scoped view of the same endpoint — server-side paginated like `assets`
-  taskAssets: (taskId: string, type = "", limit = 50, offset = 0) =>
-    get<{ count: number; total: number; assets: Asset[] }>(
-      `/assets?task_id=${encodeURIComponent(taskId)}&type=${encodeURIComponent(type)}&limit=${limit}&offset=${offset}`,
-    ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
-  // DSL search scoped to a task — the backend forces the task_id filter, so it
-  // always stays within that task's assets (same DSL grammar as `searchAssets`).
-  searchTaskAssets: (taskId: string, dsl: string, type = "", limit = 50, offset = 0) =>
-    get<{ count: number; total: number; assets: Asset[] }>(
-      `/assets?task_id=${encodeURIComponent(taskId)}&dsl=${encodeURIComponent(dsl)}&type=${encodeURIComponent(type)}&limit=${limit}&offset=${offset}`,
-    ).then((r) => ({ assets: r?.assets ?? [], total: r?.total ?? r?.count ?? 0 })),
-  attachTaskAssets: (taskId: string, assetIds: number[], sourceSummary: string) =>
-    post<TaskAssetMutation>(`/tasks/${taskId}/assets`, {
-      asset_ids: assetIds,
+  componentStatusCounts: (taskId = "") =>
+    get<Record<string, number>>(
+      `/components/counts?by=status${taskId ? `&task_id=${encodeURIComponent(taskId)}` : ""}`,
+    ),
+  // 手工登记（组件页「新增组件」；不带 task_id 时只进组件库，不挂任务）
+  insertComponents: (body: {
+    task_id?: number;
+    components?: { type: string; component_name: string; version?: string; vendor?: string;
+      binary_path?: string; config_path?: string; started_by?: string; port?: number;
+      notes?: string; firmware_sha256?: string }[];
+  }) => post<{ inserted: number; updated: number; ids: number[] }>("/components", body),
+  deleteComponents: (ids: number[]) =>
+    http<{ deleted: number }>("/components", { method: "DELETE", body: JSON.stringify({ ids }) }),
+  // taskId 非空时后端按任务守卫（组件必须在该任务范围内）
+  setComponentStatus: (ids: number[], status: ComponentStatus, taskId = "") =>
+    Promise.all(
+      ids.map((id) =>
+        post<{ ok: boolean }>(`/components/${id}/status`, {
+          status,
+          ...(taskId ? { task_id: Number(taskId) } : {}),
+        }),
+      ),
+    ),
+  // 任务视角：同一接口带 task_id
+  taskComponents: (taskId: string, type = "", status = "", firmware = "", limit = 50, offset = 0) =>
+    get<{ count: number; total: number; components: Component[] }>(
+      `/components?task_id=${encodeURIComponent(taskId)}&type=${encodeURIComponent(type)}${status ? `&status=${encodeURIComponent(status)}` : ""}${firmware ? `&firmware=${encodeURIComponent(firmware)}` : ""}&limit=${limit}&offset=${offset}`,
+    ).then((r) => ({ components: r?.components ?? [], total: r?.total ?? r?.count ?? 0 })),
+  searchTaskComponents: (taskId: string, dsl: string, type = "", status = "", firmware = "", limit = 50, offset = 0) =>
+    get<{ count: number; total: number; components: Component[] }>(
+      `/components?task_id=${encodeURIComponent(taskId)}&dsl=${encodeURIComponent(dsl)}&type=${encodeURIComponent(type)}${status ? `&status=${encodeURIComponent(status)}` : ""}${firmware ? `&firmware=${encodeURIComponent(firmware)}` : ""}&limit=${limit}&offset=${offset}`,
+    ).then((r) => ({ components: r?.components ?? [], total: r?.total ?? r?.count ?? 0 })),
+  attachTaskComponents: (taskId: string, componentIds: number[], sourceSummary: string) =>
+    post<TaskComponentMutation>(`/tasks/${taskId}/components`, {
+      component_ids: componentIds,
       source_summary: sourceSummary,
     }),
-  registerTaskAssetScopes: (taskId: string, scope: CompanyScopeRule[]) =>
-    post<TaskAssetScopeMutation>(`/tasks/${taskId}/assets`, { scope }),
-  detachTaskAsset: (taskId: string, assetId: number) => del<{ detached: number }>(`/tasks/${taskId}/assets/${assetId}`),
-  taskIntentAssets: (taskId: string) =>
-    get<{ assets: IntentAsset[] }>(`/tasks/${taskId}/intent-assets`).then((r) => arr(r.assets)),
+  detachTaskComponent: (taskId: string, componentId: number) =>
+    del<{ detached: number }>(`/tasks/${taskId}/components/${componentId}`),
+  taskIntentComponents: (taskId: string) =>
+    get<{ components: IntentComponent[] }>(`/tasks/${taskId}/intent-components`).then((r) => arr(r.components)),
 
-  // ---- companies (企业 + 资产范围；归属唯一来源) ----
+  // ---- companies (企业 + 范围；企业模块暂时保留) ----
   companies: () => get<Company[]>("/companies").then(arr),
   createCompany: (name: string, scope: CompanyScopeRule[]) =>
     post<{ id: number; created: boolean; scope_added?: number; scope_invalid?: number; scope_errors?: string[] }>(
@@ -567,10 +573,10 @@ export const api = {
       reason,
       reset: true,
     }),
-  deleteCompany: (id: number, deleteAssets = false) =>
-    http<{ deleted: number; assets_deleted: number }>(`/companies/${id}`, {
+  deleteCompany: (id: number, deleteComponents = false) =>
+    http<{ deleted: number; components_deleted: number }>(`/companies/${id}`, {
       method: "DELETE",
-      body: JSON.stringify({ delete_assets: deleteAssets }),
+      body: JSON.stringify({ delete_components: deleteComponents }),
     }),
 
   // ---- exploration (per task) ----
@@ -588,10 +594,10 @@ export const api = {
     p.set("limit", String(q.pageSize));
     return get<FindingGroupsPage>(`/exploration/findings/groups?${p.toString()}`);
   },
-  // findingAssetTree 取「按资产」视图的左侧树:只含有发现的资产及其祖先,
-  // 节点带子树聚合计数。不分页——树是导航结构,一次取完。
-  findingAssetTree: (q: Omit<FindingQuery, "page" | "pageSize">) =>
-    get<FindingAssetTree>(`/exploration/findings/asset-tree?${findingFilterParams(q).toString()}`),
+  // findingComponentTree 取「按组件」视图的左侧树:组件类型 → 组件，
+  // 节点带命中漏洞数。不分页——树是导航结构,一次取完。
+  findingComponentTree: (q: Omit<FindingQuery, "page" | "pageSize">) =>
+    get<FindingComponentTree>(`/exploration/findings/component-tree?${findingFilterParams(q).toString()}`),
   findingStats: () => get<FindingStats>("/exploration/findings/stats"),
   // exportFindings 触发发现页导出并下载文件。scope=selected 时传 ids(finding_id 列表);
   // scope=filtered 时传当前筛选(沿用 FindingQuery 的筛选字段);scope=all 忽略筛选。
@@ -752,7 +758,7 @@ export const api = {
       size: r.size ?? query.size ?? 20,
       edges: arr(r.edges),
       refs: r.refs ?? {},
-      assets: r.assets ?? {},
+      components: r.components ?? {},
     }));
   },
   activity: (task?: string, opts?: { intent?: string; since?: number; limit?: number }) => {
@@ -804,7 +810,7 @@ export const api = {
     get<{ sessions: { seq: number; created_at: string }[]; current: number }>(
       `/exploration/main-sessions${tq(task)}`,
     ).then((r) => ({ sessions: arr(r.sessions), current: r.current ?? 0 })),
-  // Start a fresh main-agent session segment (does not touch the task's graph/assets/goal).
+  // Start a fresh main-agent session segment (does not touch the task's graph/components/goal).
   newMainSession: (task: string) =>
     post<{ seq: number; created_at: string; current: number }>(`/exploration/main-session/new${tq(task)}`),
 
@@ -1145,65 +1151,6 @@ export const api = {
   mcpTools: (id: number) => get<{ tools: MCPTool[] }>(`/mcp/${id}/tools`).then((r) => arr(r.tools)),
   refreshMcpServer: (id: number) => post<{ tools: MCPTool[] }>(`/mcp/${id}/refresh`, {}).then((r) => arr(r.tools)),
 
-  // ---- 资产同步 (ScopeSentry 数据源) ----
-  ssStatus: () =>
-    get<{ exists: boolean; configured: boolean; enabled: boolean; reachable: boolean; url?: string; tools: string[] }>(
-      "/sync/scopesentry/status",
-    ),
-  ssDatasource: (body: { url?: string; api_key?: string }) =>
-    post<{ id: number; enabled: boolean }>("/sync/scopesentry/datasource", body),
-  ssProjects: (page = 1, size = 50, search = "") =>
-    get<{ projects: SSProject[]; tag: Record<string, number> }>(
-      `/sync/scopesentry/projects?page=${page}&size=${size}${search ? `&search=${encodeURIComponent(search)}` : ""}`,
-    ).then((r) => ({ projects: arr(r.projects), tag: r.tag ?? {} })),
-  ssTasks: (page = 1, size = 50, search = "") =>
-    get<{ tasks: SSTask[] }>(
-      `/sync/scopesentry/tasks?page=${page}&size=${size}${search ? `&search=${encodeURIComponent(search)}` : ""}`,
-    ).then((r) => arr(r.tasks)),
-  ssSync: (body: {
-    dimension: "project" | "task";
-    targets: string[];
-    asset_types: string[];
-    create_company?: boolean;
-    page_size?: number;
-  }) =>
-    post<{
-      synced: Record<string, number>;
-      companies: string[] | null;
-      warnings: string[] | null;
-      errors: string[] | null;
-    }>("/sync/scopesentry/sync", body),
-
-  // ---- 资产同步 (FOFA 数据源) ----
-  fofaStatus: () =>
-    get<{ configured: boolean; reachable: boolean; email: string }>("/sync/fofa/status"),
-  fofaDatasource: (body: { email?: string; key?: string }) =>
-    post<{ configured: boolean; email: string }>("/sync/fofa/datasource", body),
-  fofaQuery: (body: { query: string; size?: number }) =>
-    post<{ total: number; mode: string; rows: FofaRow[] }>("/sync/fofa/query", body).then((r) => ({
-      ...r,
-      rows: arr(r.rows),
-    })),
-  fofaSync: (body: {
-    query: string;
-    size?: number;
-    collection_name?: string;
-    page_size?: number;
-  }) =>
-    post<{
-      synced: Record<string, number>;
-      total: number;
-      imported: number;
-      truncated: boolean;
-      collection: { id: number; name: string; members: number } | null;
-      warnings: string[] | null;
-      errors: string[] | null;
-    }>("/sync/fofa/sync", body),
-
-  // ---- 资产合集 (FOFA 收集的显式资产集合，可作任务目标) ----
-  collections: () => get<{ collections: Collection[] }>("/collections").then((r) => arr(r.collections)),
-  deleteCollection: (id: number) => del<{ deleted: boolean }>(`/collections/${id}`),
-
   // ---- skills (文件系统) ----
   skills: () => get<{ skills: SkillItem[] }>("/skills").then((r) => arr(r.skills)),
   createSkill: (s: {
@@ -1267,16 +1214,6 @@ export const api = {
   deleteInterceptRule: (id: number) => del<{ deleted: number }>(`/intercept/rules/${id}`),
   toggleInterceptRule: (id: number, enabled: boolean) =>
     post<{ ok: boolean; enabled: boolean }>(`/intercept/rules/${id}/toggle`, { enabled }),
-
-  // ---- asset intercept rules（资产拦截：全局黑名单） ----
-  assetInterceptRules: () => get<{ rules: AssetInterceptRule[] }>("/asset-intercept/rules").then((r) => arr(r.rules)),
-  createAssetInterceptRule: (rule: Pick<AssetInterceptRule, "enabled" | "kind" | "pattern" | "note">) =>
-    post<AssetInterceptRule>("/asset-intercept/rules", rule),
-  updateAssetInterceptRule: (id: number, rule: Pick<AssetInterceptRule, "enabled" | "kind" | "pattern" | "note">) =>
-    put<AssetInterceptRule>(`/asset-intercept/rules/${id}`, rule),
-  deleteAssetInterceptRule: (id: number) => del<{ deleted: number }>(`/asset-intercept/rules/${id}`),
-  toggleAssetInterceptRule: (id: number, enabled: boolean) =>
-    post<{ ok: boolean; enabled: boolean }>(`/asset-intercept/rules/${id}/toggle`, { enabled }),
 
   // ---- intercept pending (ask) ----
   interceptPending: () => get<{ pending: InterceptPending[] }>("/intercept/pending").then((r) => arr(r.pending)),

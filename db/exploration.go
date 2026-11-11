@@ -255,6 +255,19 @@ func (s *ExplorationStore) Anchor(nodeID, componentID int64) error {
 	return err
 }
 
+// AnchorMany 批量把多个组件锚到同一个节点（一条 SQL）。登记组件时用，
+// 避免 N 个组件做 N 次往返。
+func (s *ExplorationStore) AnchorMany(nodeID int64, componentIDs []int64) error {
+	if nodeID <= 0 || len(componentIDs) == 0 {
+		return nil
+	}
+	_, err := s.db.Exec(`
+INSERT INTO exploration_anchors(node_id, component_id)
+SELECT $1, u.id FROM unnest($2::bigint[]) AS u(id) WHERE u.id > 0
+ON CONFLICT DO NOTHING`, nodeID, componentIDs)
+	return err
+}
+
 // Link adds a typed exploration edge (idempotent).
 func (s *ExplorationStore) Link(from int64, rel string, to int64) error {
 	_, err := s.db.Exec(`

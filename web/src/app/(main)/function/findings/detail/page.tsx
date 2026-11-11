@@ -281,11 +281,11 @@ function FindingDetailInner() {
                   )}
                 </FieldRow>
 
-                {/* 涉及资产 */}
-                <FieldRow label="涉及资产">
-                  {finding.assets && finding.assets.length > 0 ? (
+                {/* 涉及组件 */}
+                <FieldRow label="涉及组件">
+                  {finding.components && finding.components.length > 0 ? (
                     <div className="flex flex-wrap justify-end gap-1">
-                      {finding.assets.map((a) => (
+                      {finding.components.map((a) => (
                         <code
                           key={a.id}
                           className="max-w-[16rem] truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs"

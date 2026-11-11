@@ -445,7 +445,7 @@ func restoreArchiveComponents(tx *sql.Tx, taskID int64, raw json.RawMessage) (ma
 		if companyID, ok := jsonInt64(row["company_id"]); ok && companyID > 0 && !rowExists(tx, "companies", companyID) {
 			row["company_id"] = nil
 			row["company_source"] = "explicit"
-			warnings = append(warnings, fmt.Sprintf("资产 %d 的企业 %d 已删除，已恢复为未归属", oldID, companyID))
+			warnings = append(warnings, fmt.Sprintf("组件 %d 的企业 %d 已删除，已恢复为未归属", oldID, companyID))
 		}
 		if existing, found, err := findArchiveComponentNaturalID(tx, row); err != nil {
 			return nil, nil, err
@@ -462,7 +462,7 @@ func restoreArchiveComponents(tx *sql.Tx, taskID int64, raw json.RawMessage) (ma
 				return nil, nil, err
 			}
 			row["id"] = candidate
-			warnings = append(warnings, fmt.Sprintf("资产 ID %d 已被占用，恢复为 %d", oldID, candidate))
+			warnings = append(warnings, fmt.Sprintf("组件 ID %d 已被占用，恢复为 %d", oldID, candidate))
 		}
 		row["task_ids"] = mergeJSONTaskID(row["task_ids"], taskID)
 		componentRaw, _ := json.Marshal(row)

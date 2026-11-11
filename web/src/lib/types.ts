@@ -37,8 +37,8 @@ export interface Task {
   llm_failover_reason?: string;
   source_task_ids?: string[]; // directly related tasks inherited as read-only context
   archive_blocked_by_task_id?: string; // live direct dependent that must be archived first
-  company_ids?: number[]; // associated company scopes; current company assets join the task at creation
-  coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
+  company_ids?: number[]; // associated company scopes
+  coverage_enabled?: boolean; // 组件覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
 }
 
 export interface TaskCategory {
@@ -55,13 +55,12 @@ export interface TaskTemplate {
   description: string;
   goal: string;
   category_id?: number | null; // 预设分类；null/缺省=无
-  intercept_rules?: AssetInterceptRuleInput[]; // 预设的任务级拦截/允许规则
   created_at: string;
   updated_at: string;
 }
 
 export interface DeleteTaskOptions {
-  delete_assets: boolean;
+  delete_components: boolean;
   delete_traffic: boolean;
   delete_files: boolean;
   delete_findings: boolean;
@@ -70,8 +69,8 @@ export interface DeleteTaskOptions {
 
 export interface DeleteTaskResult {
   deleted: string;
-  assets_deleted: number;
-  assets_detached: number;
+  components_deleted: number;
+  components_detached: number;
   traffic_deleted: number;
   files_deleted: boolean;
   findings_deleted: number;
@@ -147,162 +146,84 @@ export interface ArchiveBatchItem {
   error?: string;
 }
 
-// ---- Asset graph (global, shared across tasks) ----
-export type AssetType =
-  | "company"
-  | "domain"
-  | "ip"
-  | "port"
-  | "service"
-  | "site"
-  | "endpoint"
-  | "parameter"
-  | "tech"
-  | "credential"
-  | "data";
+// ---- 组件模型 ----
+// 组件来自固件解包：一行 = 一个可指认组件（web 服务 / mqtt broker / ros 节点 / ssh 服务…）。
+export type ComponentKind =
+  | "web"
+  | "mqtt"
+  | "ros"
+  | "ssh"
+  | "telnet"
+  | "upnp"
+  | "onvif"
+  | "rtsp"
+  | "ftp"
+  | "other";
 
-export type NodeState = "observed" | "confirmed" | "tombstoned";
+// 与 tasks / findings 一致的状态词，不自造新词。
+export type ComponentStatus = "pending" | "running" | "completed" | "ignored";
 
-export interface AssetNode {
-  id: string;
-  type: AssetType;
-  name: string;
-  key: string; // nkey
-  value?: string;
-  company_id?: string; // 归属公司资产 id；空=未归属
-  state: NodeState;
-  confidence: number; // 0..1
-  attrs?: Record<string, unknown>;
-  first_seen: string;
-  last_seen: string;
-}
-
-export type AssetRel =
-  | "owns"
-  | "resolves"
-  | "exposes"
-  | "runs"
-  | "serves"
-  | "has_endpoint"
-  | "has_param"
-  | "fingerprinted"
-  | "authenticates_as"
-  | "reachable"
-  | "has_subdomain";
-
-export interface Edge {
-  src: string;
-  dst: string;
-  rel: AssetRel | ExploreRel;
-}
-
-// Task asset view — server-side enriched, paginated.
-export interface TaskAssetRef {
-  id: string;
-  name?: string;
-  key: string;
-  attrs?: Record<string, unknown>;
-}
-
-export interface TaskAssetItem extends AssetNode {
-  techs?: TaskAssetRef[];
-  auth?: TaskAssetRef[];
-  params?: TaskAssetRef[];
-}
-
-export interface TaskAssetView {
-  counts: Record<string, number>;
-  total: number;
-  items: TaskAssetItem[];
-}
-
-// ---- New unified asset model (new backend) ----
-export type NewAssetType = "root_domain" | "ip" | "subdomain" | "app" | "service" | "endpoint";
-
-export interface Asset {
+export interface Component {
   id: number;
-  type: NewAssetType;
+  type: ComponentKind | string;
+  component_name: string;
+  version?: string;
+  vendor?: string;
+  binary_path?: string;
+  config_path?: string;
+  started_by?: string;
+  firmware_sha256?: string;
+  port?: number;
+  technologies?: string[];
+  status: ComponentStatus;
+  notes?: string;
   company_id?: number;
   task_ids: number[];
-  domain?: string;
-  root_domain?: string;
-  ip?: string;
-  c_segment?: string;
-  port?: number;
-  icp?: string;
-  bound_domains?: string[];
-  open_ports?: { port: number; service?: string }[];
-  record_type?: string;
-  record_value?: string[] | string;
-  bundle_id?: string;
-  app_name?: string;
-  category?: string;
-  app_description?: string;
-  app_icp?: string;
-  url?: string;
-  service_type?: string;
-  service_name?: string;
-  favicon_mmh3?: string;
-  status_code?: number;
-  content_length?: number;
-  page_title?: string;
-  technologies?: string[];
-  auth?: Record<string, unknown>[];
-  method?: string;
-  params?: Record<string, unknown>[];
-  extra?: Record<string, unknown>;
-  last_seen: string;
+  created_at?: string;
+  updated_at?: string;
+  last_seen?: string;
+  // 任务视角下由后端从 task_component_links 回填
   task_source?: string;
   task_source_summary?: string;
   task_source_node_id?: number;
 }
 
-export interface IntentAsset {
-  intent_id: number | string;
-  asset_id: number;
-  type: NewAssetType;
-  label: string;
-  source: string;
-  source_summary: string;
-  source_node_id?: number;
-  source_task_id: number;
-  inherited: boolean;
+// 意图锚定的组件（worker 运行时下发的目标清单）。
+// IntentComponent 是某条意图锚定到的组件（后端按 (intent, component) 去重后下发）。
+export interface IntentComponent {
+  intent_id: number;
+  component_id: number;
+  type: ComponentKind | string;
+  component_name: string;
+  version?: string;
+  status?: ComponentStatus;
+  label: string; // 组件名 + 版本，直接可显示
 }
 
-export interface TaskAssetMutation {
+export interface TaskComponentMutation {
   requested: number;
   attached: number;
   existing: number;
 }
 
-export interface TaskAssetScopeMutation {
+export interface TaskComponentScopeMutation {
   requested: number;
-  assets_linked: number;
-  assets_existing: number;
+  components_linked: number;
+  components_existing: number;
   scopes_added: number;
   scopes_existing: number;
 }
 
-// ---- Asset coverage graph (per task) ----
-// 力导向「资产覆盖图」的一个节点。key 唯一：资产="a:<id>"、公司="c:<id>"、
-// 无资产行的根域名="r:<domain>"。in_scope=false 的是仅用于连线的灰色上下文节点。
+// ---- 组件覆盖图（per task） ----
+// 两层：类型分组节点 kind="type"（key="t:<type>"）→ 组件节点 kind="component"（key="a:<id>"）。
 export interface CoverageGraphNode {
   key: string;
-  kind: "company" | "root_domain" | "subdomain" | "ip" | "service" | "app" | "endpoint";
+  /** 分组节点是组件类型名（web/mqtt/...），叶子节点是 "component"。 */
+  kind: string;
   label: string;
   tested: boolean;
   in_scope: boolean;
-  asset_id?: number;
-  company_id?: number;
-  domain?: string;
-  root_domain?: string;
-  ip?: string;
-  url?: string;
-  port?: number;
-  service_type?: string;
-  app_name?: string;
-  page_title?: string;
-  status_code?: number;
+  component_id?: number;
 }
 
 export interface CoverageGraphEdge {
@@ -315,8 +236,8 @@ export interface CoverageGraphData {
   edges: CoverageGraphEdge[];
 }
 
-// 某资产在本任务探索图里关联到的意图/事实/发现（覆盖图节点抽屉用）。
-export interface CoverageAssetRef {
+// 某组件在本任务探索图里关联到的意图/事实/发现（覆盖图节点抽屉用）。
+export interface CoverageComponentRef {
   id: number;
   kind: string;
   state: string;
@@ -324,10 +245,10 @@ export interface CoverageAssetRef {
   source_task_id?: string;
   inherited?: boolean;
 }
-export interface CoverageAssetRefs {
-  intents: CoverageAssetRef[];
-  facts: CoverageAssetRef[];
-  findings: CoverageAssetRef[];
+export interface CoverageComponentRefs {
+  intents: CoverageComponentRef[];
+  facts: CoverageComponentRef[];
+  findings: CoverageComponentRef[];
 }
 
 // ---- Workspace file manager (workDir) ----
@@ -367,14 +288,14 @@ export interface TaskScopeRow {
 
 export type CompanyScopeKind = "domain" | "ip" | "cidr" | "icp" | "keyword";
 
-// 新增企业时提交的结构化资产范围规则。
+// 新增企业时提交的结构化范围规则。
 export interface CompanyScopeRule {
   kind: CompanyScopeKind;
   value: string;
 }
 
-// 资产范围写入的结果。errors 是本次提交里不合法的行；warnings 是与本次提交无关、
-// 但会让归属结果不符合预期的既有数据问题（如 ip 字段存了主机名的资产）。
+// 范围写入的结果。errors 是本次提交里不合法的行；warnings 是与本次提交无关、
+// 但会让结果不符合预期的既有数据问题。
 export interface CompanyScopeMutation {
   added: number;
   skipped: number;
@@ -383,7 +304,7 @@ export interface CompanyScopeMutation {
   warnings?: string[];
 }
 
-// 公司资产范围规则的一条（归属唯一真值来源）。
+// 公司范围规则的一条。
 export interface ScopeRow {
   id: number;
   company_id: number;
@@ -395,12 +316,12 @@ export interface ScopeRow {
   reason?: string;
 }
 
-// 企业：type=company 的资产节点 + 图标 + 资产计数 + 资产范围规则。
+// 企业：组织维度 + 图标 + 组件计数 + 范围规则。
 export interface Company {
   id: number;
   name: string;
   logo?: string; // 远程图标 URL；空则前端用名称首字母
-  asset_count: number;
+  component_count: number;
   scope?: ScopeRow[];
 }
 
@@ -411,6 +332,13 @@ export type IntentState = "open" | "running" | "paused" | "done" | "blocked" | "
 export type FindingState = "confirmed" | "dismissed";
 export type HintState = "active" | "consumed";
 export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves" | "covers";
+
+// 探索图的一条边。rel 取 ExploreRel；老库里可能残留其它关系名，故放宽为 string。
+export interface Edge {
+  src: string;
+  dst: string;
+  rel: ExploreRel | string;
+}
 
 export interface TaskNode {
   id: string;
@@ -434,8 +362,8 @@ export interface ExplorationNodePage {
   size: number;
   edges: Edge[];
   refs: Record<string, TaskNode>;
-  // 节点 id → 该节点锚定的资产(播报板展开时顺带展示,含本页节点与其邻居)。
-  assets: Record<string, FindingAsset[]>;
+  // 节点 id → 该节点锚定的组件(播报板展开时顺带展示,含本页节点与其邻居)。
+  components: Record<string, FindingComponent[]>;
 }
 
 export interface ExplorationNodeQuery {
@@ -482,8 +410,8 @@ export type FindingStatus =
   | "duplicate"
   | "risk_accepted";
 
-// FindingAsset 是一个漏洞绑定的资产(已在后端预渲染 label)。
-export interface FindingAsset {
+// FindingComponent 是一个漏洞绑定的组件(已在后端预渲染 label)。
+export interface FindingComponent {
   id: string;
   type: string;
   label: string;
@@ -509,7 +437,7 @@ export interface Finding {
   task_description?: string;
   source_task_id?: string;
   inherited?: boolean;
-  assets?: FindingAsset[];
+  components?: FindingComponent[];
   ts: string;
 }
 
@@ -580,40 +508,36 @@ export interface FindingQuery {
   task?: string; // 任务 id;"all"/空 = 不按任务筛选
   query?: string;
   sort?: "severity" | "time";
-  // 资产树节点 key;选中一个节点 = 选中它的整棵子树。空 = 不按资产筛选。
-  assetScope?: string;
+  // 组件树节点 key;选中一个节点 = 选中它的整棵子树。空 = 不按组件筛选。
+  componentScope?: string;
 }
 
-// ---- Findings by asset (资产视图) ----
-export type FindingAssetKind = "company" | "root_domain" | "subdomain" | "ip" | "service" | "app" | "endpoint" | "none";
+// ---- Findings by component（漏洞 → 组件视图） ----
+// 分组节点的 kind 是组件类型名（web/mqtt/…），叶子是 "component"，未关联桶是 "none"。
+export type FindingComponentKind = "component" | "none" | (string & {});
 
-// FindingAssetNode 是资产树的一个节点。key 形如 a:<id>(资产)、c:<id>(企业)、
-// r:<domain>(库里没有资产行的根域名)、__none__(未关联资产)。
-export interface FindingAssetNode {
+// FindingComponentNode 是组件树的一个节点：
+//   kind="type"      组件类型分组（key="t:<type>"）
+//   kind="component" 组件叶子（key="a:<id>"）
+//   kind="none"      未关联组件的漏洞桶（key="__none__"）
+export interface FindingComponentNode {
   key: string;
-  parent?: string;
-  kind: FindingAssetKind;
+  kind: FindingComponentKind;
   label: string;
-  asset_id?: number;
-  company_id?: number;
-  self: number; // 直接挂在该资产上的发现数
-  total: number; // 含子孙、按发现去重
-  critical: number;
-  high: number;
-  medium: number;
-  low: number;
-  last_found_at: string;
+  component_id?: number;
+  status?: ComponentStatus;
+  version?: string;
+  finding_count: number;
+  children?: FindingComponentNode[];
 }
 
-export interface FindingAssetTree {
-  nodes: FindingAssetNode[];
-  finding_total: number;
+export interface FindingComponentTree {
+  nodes: FindingComponentNode[];
+  total: number;
   truncated: boolean;
-  dropped_kinds?: string[];
 }
 
 // FINDING_UNASSIGNED_ASSET 与后端 db.FindingUnassignedAsset 对应。
-export const FINDING_UNASSIGNED_ASSET = "__none__";
 
 // ---- Activity / sessions ----
 export type ActivityKind =
@@ -982,7 +906,7 @@ export interface Settings {
 export interface NotificationFilter {
   min_severity?: string; // "" | low | medium | high | critical
   task_ids?: number[]; // 空=不限；非空则要求与漏洞所属任务有交集
-  asset_ids?: number[]; // 空=不限；非空则要求与漏洞锚定资产有交集
+  component_ids?: number[]; // 空=不限；非空则要求与漏洞锚定组件有交集
   vulnclass_include?: string[]; // 空=全收；非空则要求漏洞类型命中任一关键词（大小写不敏感子串）
   vulnclass_exclude?: string[]; // 命中任一关键词即排除（排除优先于包含）
   on_status_change?: boolean; // 是否也接收漏洞处置状态变更事件
@@ -1265,72 +1189,6 @@ export interface Tool {
   calls?: number; // persistent runtime invocation count (older APIs may omit it)
 }
 
-// ---- Stats ----
-export interface Stats {
-  assets: number;
-  engine_mode: EngineMode;
-  llm_configured: boolean;
-  roe_enabled: boolean;
-  findings_confirmed: number;
-  active_task?: Partial<Task>;
-}
-
-// ---- Intercept Rules ----
-export type InterceptAction = "allow" | "deny" | "ask";
-export type InterceptMatchTarget = "tool_name" | "tool_input";
-export type InterceptMatchType = "string" | "regex";
-
-export interface InterceptRule {
-  id: number;
-  name: string;
-  enabled: boolean;
-  priority: number;
-  match_target: InterceptMatchTarget;
-  match_type: InterceptMatchType;
-  pattern: string;
-  action: InterceptAction;
-  message: string;
-  timeout_enabled: boolean;
-  timeout_seconds: number;
-  timeout_action: "deny" | "allow";
-  created_at: string;
-  updated_at: string;
-}
-
-// ---- Asset Intercept Rules（资产拦截：全局黑名单） ----
-export type AssetInterceptKind =
-  | "exact_domain"
-  | "exact_ip"
-  | "exact_url"
-  | "fuzzy_domain"
-  | "fuzzy_ip"
-  | "fuzzy_url"
-  | "cidr";
-
-// action 仅用于任务级规则：block=拦截(禁止测试) allow=允许(白名单)。
-export type AssetInterceptAction = "block" | "allow";
-
-// 任务级资产拦截/允许规则的录入项（创建任务、任务详情编辑使用）。
-export interface AssetInterceptRuleInput {
-  action: AssetInterceptAction;
-  kind: AssetInterceptKind;
-  pattern: string;
-  note: string;
-  enabled: boolean;
-}
-
-export interface AssetInterceptRule {
-  id: number;
-  enabled: boolean;
-  action?: AssetInterceptAction; // 全局规则不带此字段（恒为拦截）；任务级规则区分 block/allow
-  kind: AssetInterceptKind;
-  pattern: string;
-  note: string;
-  builtin: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface InterceptPending {
   decision_source?: "rule" | "model" | "unknown" | "";
   id: number;
@@ -1386,45 +1244,6 @@ export interface InterceptApprovalRow extends InterceptPending {
   rule_name: string; // "" if rule was deleted
 }
 
-// ── 资产同步 (ScopeSentry 数据源) ──────────────────────────────────────────────
-export interface SSProject {
-  id: string; // MongoDB ObjectID — used as filter.project
-  name: string;
-  logo?: string;
-  AssetCount?: number;
-  tag?: string;
-}
-
-export interface SSTask {
-  id: string;
-  name: string; // used as filter.task
-  status?: number;
-  progress?: number;
-  creatTime?: string;
-  endTime?: string;
-}
-
-// FofaRow — 一行 FOFA 搜索结果（预览用，字段子集，顺序对应后端固定 fields）。
-export interface FofaRow {
-  host: string;
-  ip: string;
-  port: string;
-  protocol: string;
-  domain: string;
-  title: string;
-  server: string;
-}
-
-// Collection — 资产合集：FOFA 等收集的显式资产集合（以查询语法命名），可作任务目标。
-export interface Collection {
-  id: number;
-  name: string;
-  query: string;
-  source: string;
-  member_count: number;
-  created_at: string;
-}
-
 // ConvTokenSummary — one conversation's token total (+ profile/date) for merging
 // chat usage into the dashboard token stats. GET /api/tokens/conversations.
 export interface ConvTokenSummary {
@@ -1434,6 +1253,38 @@ export interface ConvTokenSummary {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
+}
+
+// ---- Stats ----
+export interface Stats {
+  components: number;
+  engine_mode: EngineMode;
+  llm_configured: boolean;
+  roe_enabled: boolean;
+  findings_confirmed: number;
+  active_task?: Partial<Task>;
+}
+
+// ---- Intercept Rules ----
+export type InterceptAction = "allow" | "deny" | "ask";
+export type InterceptMatchTarget = "tool_name" | "tool_input";
+export type InterceptMatchType = "string" | "regex";
+
+export interface InterceptRule {
+  id: number;
+  name: string;
+  enabled: boolean;
+  priority: number;
+  match_target: InterceptMatchTarget;
+  match_type: InterceptMatchType;
+  pattern: string;
+  action: InterceptAction;
+  message: string;
+  timeout_enabled: boolean;
+  timeout_seconds: number;
+  timeout_action: "deny" | "allow";
+  created_at: string;
+  updated_at: string;
 }
 
 // ---- Command recording (Bash execution history) ----
@@ -1612,6 +1463,8 @@ export interface FindingTrafficDetail {
 export interface UpdateCheck {
   /** 当前运行的版本；开发构建为 "dev" 或 git describe 的带后缀形式。 */
   current: string;
+  /** 该版本对应的发布产物文件名（selfupdate 的 asset 名，与产品「组件」无关）。 */
+  asset?: string;
   /** 运行形态。docker 下换装只作用于容器可写层，重建容器会退回镜像版本。 */
   mode: "docker" | "binary";
   os: string;
@@ -1629,7 +1482,7 @@ export interface UpdateCheck {
   html_url?: string;
   published_at?: string;
   /** 当前平台对应的发布包名，以及该 Release 是否真的带了它。 */
-  asset?: string;
+  asset_name?: string;
   asset_available?: boolean;
   size?: number;
   has_update?: boolean;

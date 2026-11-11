@@ -37,7 +37,7 @@ MQTT 是 IoT 与车联网（TSP/遥测）后端最常见的消息总线。本 sk
 ```
 Phase 0 识别端口与形态 → Phase 1 匿名接入 → Phase 2 主题枚举 + $SYS 指纹
   → Phase 3 认证 / ACL 越权 → Phase 4 保留消息 / 敏感数据 → Phase 5 TLS + 版本漏洞
-  → 汇总 + insert_assets + report_finding
+  → 汇总 + insert_components + report_finding
 ```
 
 ### Phase 0 — 端口与形态
@@ -120,5 +120,5 @@ openssl s_client -connect <HOST>:8883 -servername <HOST> </dev/null 2>/dev/null 
 ## 交付
 
 - 对每个确认问题 `report_finding`：匿名接入、弱/默认口令、跨设备越权读/写、明文传输、保留消息泄露敏感数据、管理面未授权、已知 CVE。
-- `insert_assets` 写入 broker 服务（host:port、service_name=mqtt、版本）与管理面端点。
+- `insert_components` 写入 broker 组件（type=mqtt、component_name、version、port）。
 - 证据保留：订阅/发布命令与 broker 响应、$SYS 指纹、越权判定的请求/响应；**不保留真实遥测隐私数据正文**，只记字段名与越权事实。

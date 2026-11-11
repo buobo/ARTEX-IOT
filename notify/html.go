@@ -89,7 +89,7 @@ func htmlItem(it Item, full bool) string {
 
 	if !full {
 		var extras []string
-		if a := assetLine(it.Components, maxAssetsShown); a != "" {
+		if a := componentLine(it.Components, maxComponentsShown); a != "" {
 			extras = append(extras, htmlEscape(a))
 		}
 		if it.Summary != "" {
@@ -109,8 +109,8 @@ func htmlItem(it Item, full bool) string {
 	if it.VulnClass != "" && it.VulnClass != it.Title() {
 		fmt.Fprintf(&b, `<div><b>类型</b>：%s</div>`, htmlEscape(it.VulnClass))
 	}
-	if a := assetLine(it.Components, maxAssetsShown); a != "" {
-		fmt.Fprintf(&b, `<div><b>资产</b>：%s</div>`, htmlEscape(a))
+	if a := componentLine(it.Components, maxComponentsShown); a != "" {
+		fmt.Fprintf(&b, `<div><b>组件</b>：%s</div>`, htmlEscape(a))
 	}
 	if s := OneLine(it.Summary, maxSummaryRunes); s != "" {
 		fmt.Fprintf(&b, `<div><b>摘要</b>：%s</div>`, htmlEscape(s))

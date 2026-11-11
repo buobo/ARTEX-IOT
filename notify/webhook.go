@@ -47,7 +47,7 @@ const webhookDefaultTemplate = `{
       "vulnclass": {{json $it.VulnClass}},
       "severity": {{json $it.Severity}},
       "summary": {{json $it.Summary}},
-      "assets": {{json $it.Components}},
+      "components": {{json $it.Components}},
       "detail_url": {{json $it.DetailURL}}
     }
 {{- end}}

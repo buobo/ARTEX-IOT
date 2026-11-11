@@ -84,8 +84,7 @@ func TestFindingTrafficToolUpgradePreservesCustomization(t *testing.T) {
 	if err != nil || worker == nil {
 		t.Fatal("missing worker", err)
 	}
-	oldPrompt, _ := pg.CurrentPrompt(worker.ID)
-	t.Cleanup(func() { pg.SavePrompt(worker.ID, oldPrompt, "restore test fixture", "test") })
+	snapshotPrompt(t, pg, "worker")
 	if _, err := pg.SavePrompt(worker.ID, "USER CUSTOM PROMPT", "test", "test"); err != nil {
 		t.Fatal(err)
 	}

@@ -6,7 +6,7 @@
 
 AI 自主渗透测试系统 ARTEX **增强**版（Go 后端 + Next.js 前端）
 
-核心增强：**getshell后渗透**、**Fofa资产批量打**、**高危操作卡点收紧**、**IoT类资产协议支持**
+核心增强：**固件解包与组件登记**、**组件级覆盖度**、**PoC 复测与证据留痕**、**高危操作卡点收紧**
 
 **能挖到漏洞的Agent，才是好Agent** 
 
@@ -51,13 +51,9 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | :---: | :---: |
 | ![执行过程](screenshots/sessions.png) | ![探索链路](screenshots/graph.png) |
 
-| 发现 | 资产 |
+| 发现 | 组件库（截图待更新） |
 | :---: | :---: |
-| ![发现](screenshots/findings.png) | ![资产](screenshots/assets.png) |
-
-| 资产覆盖图（力导向布局 · 已测高亮 · 节点折叠展开） |
-| :---: |
-| ![资产覆盖图](screenshots/assets_test.png) |
+| ![发现](screenshots/findings.png) | — |
 
 | 流量录制 | 人在环路对话 |
 | :---: | :---: |
@@ -79,16 +75,6 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 全局「审批记录」、任务内「拦截审批」及对话中的审批卡片均支持展开查看详情。展示结构参考
 [AegisHook 的审批详情组件](https://github.com/RuoJi6/AegisHook/blob/main/web/src/components/CallDetail.vue)，沿用 ARTEX 的组件和主题：
 
-
-## 资产同步（ScopeSentry）
-
-支持从 [ScopeSentry](https://github.com/Autumn-27/ScopeSentry) 直接同步资产数据，免去重复收集：
-
-- 在「**资产同步**」页填 ScopeSentry 的地址与 API Key，接入数据源；
-- 按**项目**或**任务**维度选择要同步的目标与资产类型（域名 / 子域 / IP / 端口 / 站点 / 端点…）；
-- 一键导入并按公司资产范围归并，直接进入 ARTEX 的资产图供 agent 探索使用。
-
----
 
 ## 安装
 
@@ -295,14 +281,14 @@ server {
 
 ## 系统技术架构
 
-ARTEX 是一套 **LLM 多 agent 驱动的自主渗透系统**：Go 单体后端（内嵌 Next.js 前端）+ PostgreSQL，agent 能力由 [`norma`](https://github.com/Autumn-27/norma) SDK 提供（`agentcore` / `tool` / `permission` / `harness` / `memory` / `transcript`）。核心是**双图架构**，以及围绕它的两条自主性机制：**worker 间过程级信息交换**与 **planner 多轮共享 todolist 稳定攻击链路**。
+ARTEX 是一套 **LLM 多 agent 驱动的固件漏洞挖掘系统**：Go 单体后端（内嵌 Next.js 前端）+ PostgreSQL，agent 能力由 [`norma`](https://github.com/Autumn-27/norma) SDK 提供（`agentcore` / `tool` / `permission` / `harness` / `memory` / `transcript`）。核心是**双图架构**，以及围绕它的两条自主性机制：**worker 间过程级信息交换**与 **planner 多轮共享 todolist 稳定攻击链路**。
 
 ### 总体分层
 
 ```mermaid
 flowchart TB
   subgraph FE["前端 Next.js（go:embed 内嵌单二进制）"]
-    UI["仪表盘 · 任务 · 资产 · 覆盖图 · 流量 · 工作空间 · 系统配置"]
+    UI["仪表盘 · 任务 · 组件 · 覆盖图 · 流量 · 工作空间 · 系统配置"]
   end
   subgraph SRV["server（Go net/http）"]
     API["REST /api/*　JWT 鉴权　SSE"]
@@ -316,7 +302,7 @@ flowchart TB
     MA["mainagent　人在环路"]
   end
   subgraph DB["PostgreSQL"]
-    AGRAPH["资产图　assets / companies / task_scope"]
+    AGRAPH["组件库　components / companies / task_scope"]
     EGRAPH["探索图　exploration_nodes / anchors / activity"]
   end
   subgraph SUB["支撑子系统"]
@@ -346,20 +332,20 @@ flowchart TB
 
 | 层 | 职责 |
 | --- | --- |
-| **前端** | Next.js 静态导出，`go:embed` 内嵌进单二进制；可视化任务/资产/探索链路/覆盖图，人在环路对话 |
+| **前端** | Next.js 静态导出，`go:embed` 内嵌进单二进制；可视化任务/组件/探索链路/覆盖图，人在环路对话 |
 | **server** | `net/http` 路由 + JWT 鉴权 + SSE；`Manager` 托管任务、引擎、DB store 的生命周期 |
 | **engine** | 每任务一个 `plannerLoop` + N 个 worker goroutine；意图领取、超时/暂停/drain |
 | **agent** | goals / planner / worker / mainagent，`ToolSet` 把双图暴露成 LLM 工具 |
 | **db** | 双图的 Postgres 落地（pgx）；schema 随 `go:embed` 每次启动幂等建表 |
 | **支撑** | 记录型 MITM 代理、审批门、异步补全、MCP/技能/记忆/报告 |
 
-### 双图架构：探索图 + 资产图
+### 双图架构：探索图 + 组件库
 
-系统把「**目标是什么**」和「**测到了什么程度**」拆成两张相互独立、又通过锚点相连的图：
+系统把「**测什么**」和「**想到哪了**」拆成两份相互独立、又通过锚点相连的数据：
 
-- **资产图（Asset Graph，全局共享）**：跨任务同一份的资产真值库。节点为 `root_domain / subdomain / ip / service / app / endpoint`，归属公司；域名→子域→服务→端点的父子关系与去重 key 全部由程序计算，agent 只提交原始信息。
+- **组件库（components，全局共享）**：跨任务同一份的组件清单。一行 = 固件里的一个可指认组件（`type / component_name / version / vendor / binary_path / config_path / started_by / port / status`），按 `(firmware_sha256, type, component_name, version)` 去重；`status` 就是挖掘进度（`pending / running / completed / ignored`）。
 - **探索图（Exploration Graph，每任务独立）**：一次任务的“思考与推进”过程。节点为 `goal（目标）/ intent（意图）/ fact（事实）/ finding（漏洞）/ hint（提示）`，靠 `spawns / derived_from / yields / proves` 等边连成**血缘链**，回答“哪个方向派生自哪些事实、产出了什么”。
-- **两图靠锚点相连**：`exploration_anchors(node_id, asset_id)` 把意图/事实/漏洞锚定到具体资产上——于是既能从“探索方向”看它打的是哪些资产，也能从“某个资产”反查它在本任务被哪些意图测过、得出过哪些事实。这也支撑了**资产测试覆盖度**与**资产覆盖图**（范围内资产 + 已测高亮）。
+- **两边靠锚点相连**：`exploration_anchors(node_id, component_id)` 把意图/事实/漏洞锚定到具体组件上——于是既能从“探索方向”看它打的是哪些组件，也能从“某个组件”反查它在本任务被哪些意图测过、得出过哪些事实。这也支撑了**组件测试覆盖度**与**组件覆盖图**（组件类型 → 组件两层 + 已测高亮）。
 
 ```mermaid
 flowchart LR
@@ -375,7 +361,7 @@ flowchart LR
     F1 -->|derived_from| I2
     I2 -->|proves| FD
   end
-  subgraph AG["资产图（全局共享 · 真值库）"]
+  subgraph AG["组件库（全局共享 · 真值库）"]
     direction TB
     RD["root_domain"]
     SD["subdomain"]
@@ -389,7 +375,7 @@ flowchart LR
   FD -. anchor .-> EP
 ```
 
-> 分工：**planner** 读探索图态势、判目标、只在有未覆盖的新方向时派**意图**进 frontier；**worker** 领**一条意图**、用真实工具执行、把新资产/事实/漏洞写回两图后即停。资产图是共享事实，探索图是每任务的推进链。
+> 分工：**planner** 读探索图态势、判目标、只在有未覆盖的新方向时派**意图**进 frontier；**worker** 领**一条意图**、用真实工具执行、把新组件/事实/漏洞写回两图后即停。组件库是跨任务共享的事实，探索图是每任务的推进链。
 
 ### 引擎与意图生命周期（一次探索的闭环）
 
@@ -407,13 +393,13 @@ sequenceDiagram
 
   EV-->>P: 唤醒
   P->>DB: 读态势(graph_overview 预取 + coverage/scope)
-  P->>FR: 派 0..N 个意图(带 asset_ids)
+  P->>FR: 派 0..N 个意图(带 component_ids)
   Note over P,FR: 大多数唤醒派 0 个——无新方向即结束
   W->>FR: claimNext 领一条意图
-  W->>DB: 取意图 asset_ids 的原始资产作为初始信息
+  W->>DB: 取意图 component_ids 的组件信息作为初始信息
   W->>PX: 真实工具执行(Kali / Bash / HTTP)
   PX-->>W: 响应(全程留痕 + CA 验证)
-  W->>DB: 写回 fact / asset / finding + 每步 activity
+  W->>DB: 写回 fact / component / finding + 每步 activity
   DB-->>EV: 图变更
   EV-->>P: 再次唤醒(闭环)
 ```

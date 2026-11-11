@@ -341,22 +341,37 @@ func (s *Server) listComponents(w http.ResponseWriter, r *http.Request) {
 	// beyond the last row can return an empty page without an expensive scan.
 	total := 0
 
-	if dsl := q.Get("dsl"); dsl != "" {
+	// firmware=<sha256> 时按固件归属过滤：拼成 DSL 子句，与 dsl/type/status 同一条路径，
+	// 保证 total 和分页口径一致（组件可能在多固件任务里复用，这是唯一能按固件切开的维度）。
+	dsl := strings.TrimSpace(q.Get("dsl"))
+	if fw := strings.TrimSpace(q.Get("firmware")); fw != "" {
+		if !isSha256Hex(fw) {
+			writeErr(w, http.StatusBadRequest, "firmware 需要 64 位十六进制 sha256")
+			return
+		}
+		clause := "firmware_sha256==" + fw
+		if dsl == "" {
+			dsl = clause
+		} else {
+			dsl = "(" + dsl + ") AND " + clause
+		}
+	}
+	if dsl != "" {
 		if err := db.ValidateDSL(dsl); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		// task_id scopes the DSL search to a task's components (the task detail
-		// "测试资产" search); 0 means the global component view.
+		// "测试组件" search); 0 means the global component view.
 		taskID, _ := strconv.ParseInt(q.Get("task_id"), 10, 64)
-		total, err = as.CountDSL(dsl, typ, taskID)
+		total, err = as.CountDSL(dsl, typ, q.Get("status"), taskID)
 		if err == nil && offset < total {
-			components, err = as.QueryDSL(dsl, typ, taskID, limit, offset)
+			components, err = as.QueryDSL(dsl, typ, q.Get("status"), taskID, limit, offset)
 		}
 	} else {
 		taskID, _ := strconv.ParseInt(q.Get("task_id"), 10, 64)
 		components, total, err = as.ListComponents(db.ComponentFilter{
-			Type: typ, TaskID: taskID, Limit: limit, Offset: offset,
+			Type: typ, Status: q.Get("status"), TaskID: taskID, Limit: limit, Offset: offset,
 		})
 	}
 
@@ -365,8 +380,8 @@ func (s *Server) listComponents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"count":  len(components),
-		"total":  total,
+		"count":      len(components),
+		"total":      total,
 		"components": components,
 	})
 }
@@ -375,6 +390,21 @@ func (s *Server) listComponents(w http.ResponseWriter, r *http.Request) {
 // GET /api/components/counts
 // =====================================================================
 
+// isSha256Hex reports whether v is a 64-char lowercase/uppercase hex string.
+func isSha256Hex(v string) bool {
+	if len(v) != 64 {
+		return false
+	}
+	for _, r := range v {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) componentCounts(w http.ResponseWriter, r *http.Request) {
 	as := s.componentStore()
 	if as == nil {
@@ -382,6 +412,26 @@ func (s *Server) componentCounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID, _ := strconv.ParseInt(r.URL.Query().Get("task_id"), 10, 64)
+	// by=firmware 时按固件 sha256 汇总（组件页的固件筛选下拉用）。
+	if r.URL.Query().Get("by") == "firmware" {
+		counts, err := as.FirmwareCounts(taskID)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, counts)
+		return
+	}
+	// by=status 时按挖掘状态汇总（任务详情「组件」页的进度按钮用），默认按类型汇总。
+	if r.URL.Query().Get("by") == "status" {
+		counts, err := as.StatusCounts(taskID)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, counts)
+		return
+	}
 	counts, err := as.CountsByType(taskID)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -430,19 +480,19 @@ func (s *Server) insertComponents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		TaskID     int64              `json:"task_id"`
-		Components []db.ComponentInput `json:"components"`
-		Type           string   `json:"type"`
-		ComponentName  string   `json:"component_name"`
-		Version        string   `json:"version"`
-		Vendor         string   `json:"vendor"`
-		BinaryPath     string   `json:"binary_path"`
-		ConfigPath     string   `json:"config_path"`
-		StartedBy      string   `json:"started_by"`
-		FirmwareSha256 string   `json:"firmware_sha256"`
-		Port           int      `json:"port"`
-		Technologies   []string `json:"technologies"`
-		Notes          string   `json:"notes"`
+		TaskID         int64               `json:"task_id"`
+		Components     []db.ComponentInput `json:"components"`
+		Type           string              `json:"type"`
+		ComponentName  string              `json:"component_name"`
+		Version        string              `json:"version"`
+		Vendor         string              `json:"vendor"`
+		BinaryPath     string              `json:"binary_path"`
+		ConfigPath     string              `json:"config_path"`
+		StartedBy      string              `json:"started_by"`
+		FirmwareSha256 string              `json:"firmware_sha256"`
+		Port           int                 `json:"port"`
+		Technologies   []string            `json:"technologies"`
+		Notes          string              `json:"notes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "invalid JSON: "+err.Error())
@@ -472,4 +522,40 @@ func (s *Server) insertComponents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, map[string]any{"inserted": inserted, "updated": updated, "ids": ids})
+}
+
+// =====================================================================
+// POST /api/components/{id}/status
+// =====================================================================
+
+func (s *Server) setComponentStatus(w http.ResponseWriter, r *http.Request) {
+	as := s.componentStore()
+	if as == nil {
+		writeErr(w, 503, "database unavailable")
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, 400, "invalid component id")
+		return
+	}
+	var req struct {
+		Status string `json:"status"`
+		TaskID int64  `json:"task_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
+	// 带 task_id 时按任务守卫（与 set_component_status 工具同一口径：只有该任务范围内的
+	// 组件才能改状态）；不带则是组件库全局视角。
+	taskID := req.TaskID
+	if taskID <= 0 {
+		taskID, _ = strconv.ParseInt(r.URL.Query().Get("task_id"), 10, 64)
+	}
+	if err := as.SetTaskComponentStatus(taskID, id, req.Status); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "status": req.Status})
 }

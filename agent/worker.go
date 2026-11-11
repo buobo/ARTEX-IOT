@@ -348,19 +348,19 @@ func renderWorkerGraphOverview(data map[string]any) string {
 // max_turns) and a per-kind breakdown of what was written back (so an intent that
 // explored but persisted nothing isn't mistaken for done, and the engine can log
 // facts/components/findings separately instead of lumping them under "facts").
-func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.ComponentStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string)) (harness.TerminalReason, WriteCounts, error) {
-	return w.execute(ctx, name, taskID, as, ts, intent, hooks, emit, enr, notifyFinding, "", "")
+func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.ComponentStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), notifyFinding func(int64, string)) (harness.TerminalReason, WriteCounts, error) {
+	return w.execute(ctx, name, taskID, as, ts, intent, hooks, emit, notifyFinding, "", "")
 }
 
 // ExecuteWithMessage runs the next turn in the same intent conversation with a
 // human-authored message. The HTTP handler does not edit the transcript;
 // agentcore records the message as a normal user turn when this Worker starts.
 // This keeps Worker continuation identical to the regular agent chat flow.
-func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int64, as *db.ComponentStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
-	return w.execute(ctx, name, taskID, as, ts, intent, hooks, emit, enr, notifyFinding, strings.TrimSpace(requestID), strings.TrimSpace(message))
+func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int64, as *db.ComponentStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
+	return w.execute(ctx, name, taskID, as, ts, intent, hooks, emit, notifyFinding, strings.TrimSpace(requestID), strings.TrimSpace(message))
 }
 
-func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.ComponentStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
+func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.ComponentStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
 	tsx := NewToolSet(ts, name)
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
@@ -369,8 +369,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if as != nil {
 		tsx.SetComponentStore(as, as.Companies())
 	}
-	tsx.SetOwnerNode(intent.ID)         // components this worker discovers anchor to its intent → visible to the task
-	tsx.SetEnrich(enr)                  // async DNS/HTTP auto-completion for components this worker writes
+	tsx.SetOwnerNode(intent.ID)         // 本 worker 登记的组件锚到它的意图节点（来源链）
 	tsx.SetNotifyFinding(notifyFinding) // report_finding 落库时当场唤醒 planner，带上「哪个意图+finding」
 	// base = built-in worker tools ∪ host tools (traffic) ∪ default tools (incl. Bash);
 	// then augment with the agent's visible skills/MCP. During the SDK settlement

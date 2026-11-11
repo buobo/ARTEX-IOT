@@ -39,7 +39,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { api } from "@/lib/api";
 import type { LLMProfile, Task } from "@/lib/types";
 
-import { AssetsTab } from "./_tabs/assets-tab";
+import { ComponentsTab } from "./_tabs/components-tab";
 import { BroadcastTab } from "./_tabs/broadcast-tab";
 import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
 import { FindingsTab } from "./_tabs/findings-tab";
@@ -57,8 +57,8 @@ const TABS = [
   { value: "broadcast", label: "播报板" },
   { value: "findings", label: "发现" },
   { value: "retests", label: "复测" },
-  { value: "assets", label: "测试资产" },
-  { value: "coverage", label: "资产覆盖图" },
+  { value: "components", label: "测试组件" },
+  { value: "coverage", label: "组件覆盖图" },
   { value: "intercept", label: "拦截审批" },
   { value: "report", label: "报告" },
 ];
@@ -374,7 +374,7 @@ function TaskDetailInner() {
                 <AlertDialogHeader>
                   <AlertDialogTitle>归档任务 #{task.id}？</AlertDialogTitle>
                   <AlertDialogDescription>
-                    任务图谱、关联记录、独占资产与流量、工作文件和 LLM
+                    任务图谱、关联记录、本任务组件与流量、工作文件和 LLM
                     历史将压缩到冷存储。归档完成后可在任务列表的“已归档”页还原。
                   </AlertDialogDescription>
                 </AlertDialogHeader>
@@ -435,8 +435,8 @@ function TaskDetailInner() {
         <TabsContent value="retests" className="mt-0">
           <RetestsTab key={id} taskId={id} />
         </TabsContent>
-        <TabsContent value="assets" className="mt-0">
-          <AssetsTab taskId={id} />
+        <TabsContent value="components" className="mt-0">
+          <ComponentsTab taskId={id} />
         </TabsContent>
         <TabsContent value="coverage" className="mt-0">
           <CoverageGraphTab taskId={id} coverageEnabled={task?.coverage_enabled !== false} />

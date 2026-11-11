@@ -125,5 +125,5 @@ curl -s -u guest:guest http://<HOST>:15672/api/overview | head
 ## 交付
 
 - 每个确认问题 `report_finding`：未认证可达、默认/泄露密钥、明文传输、可未授权写（OT）、可未授权改端口映射（UPnP）、管理台默认口令、固件硬编码凭据等。
-- `insert_assets` 写入发现的服务/设备资产（协议、端口、型号、固件版本）。
+- `insert_components` 写入发现的组件（type、component_name、version、port、binary_path）。
 - OT/物理相关发现要在报告中**明确标注未执行写操作、仅做权限判定**，并给出修复建议（加认证、网络隔离、禁用默认账户/密钥）。

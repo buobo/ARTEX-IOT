@@ -16,7 +16,6 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	pgdb "github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/enrich"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/traffic"
@@ -57,7 +56,7 @@ type Task struct {
 	// 任务级超时(见 docs/任务级超时与收尾设计.md)。DeadlineAt/FirstRunAt 为 unix 秒,0=未设/未运行。
 	TimeoutSeconds       int                    `json:"timeout_seconds"`
 	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
-	CoverageEnabled      bool                   `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
+	CoverageEnabled      bool                   `json:"coverage_enabled"`       // 组件覆盖度功能开关(创建时定,默认开)
 	FirstRunAt           int64                  `json:"first_run_at,omitempty"`
 	DeadlineAt           int64                  `json:"deadline_at,omitempty"`
 	Store                *pgdb.ExplorationStore `json:"-"`
@@ -194,7 +193,7 @@ func (t *Task) setLLMState(profileID, activeID *int64, profileIDs []int64, revis
 // DeleteTaskOptions controls cleanup of data stored outside the task's own
 // exploration graph. All options default to false for backward compatibility.
 type DeleteTaskOptions struct {
-	DeleteComponents     bool `json:"delete_components"`
+	DeleteComponents bool `json:"delete_components"`
 	DeleteTraffic    bool `json:"delete_traffic"`
 	DeleteFiles      bool `json:"delete_files"`
 	DeleteFindings   bool `json:"delete_findings"`
@@ -203,14 +202,14 @@ type DeleteTaskOptions struct {
 
 // DeleteTaskResult makes destructive cleanup auditable to API callers.
 type DeleteTaskResult struct {
-	Deleted           string `json:"deleted"`
-	ComponentsDeleted     int64  `json:"components_deleted"`
-	ComponentsDetached    int64  `json:"components_detached"`
-	TrafficDeleted    int64  `json:"traffic_deleted"`
-	FilesDeleted      bool   `json:"files_deleted"`
-	FindingsDeleted   int64  `json:"findings_deleted"`
-	LLMRecordsDeleted int64  `json:"llm_records_deleted"`
-	CleanupWarning    string `json:"cleanup_warning,omitempty"`
+	Deleted            string `json:"deleted"`
+	ComponentsDeleted  int64  `json:"components_deleted"`
+	ComponentsDetached int64  `json:"components_detached"`
+	TrafficDeleted     int64  `json:"traffic_deleted"`
+	FilesDeleted       bool   `json:"files_deleted"`
+	FindingsDeleted    int64  `json:"findings_deleted"`
+	LLMRecordsDeleted  int64  `json:"llm_records_deleted"`
+	CleanupWarning     string `json:"cleanup_warning,omitempty"`
 }
 
 // Manager owns the PostgreSQL data source (component graph + every task's exploration
@@ -218,9 +217,8 @@ type DeleteTaskResult struct {
 type Manager struct {
 	dir         string
 	pg          *pgdb.DB
-	components      *pgdb.ComponentStore
+	components  *pgdb.ComponentStore
 	traffic     *traffic.Traffic       // process-wide recording proxy (may be nil)
-	enrich      *enrich.Engine         // engine-side component auto-completion (DNS/HTTP)
 	interceptor *intercept.Interceptor // user-configured tool-call interception rules
 
 	companyMu sync.Mutex // serializes task/company-scope commits with live handle registration
@@ -337,8 +335,6 @@ func (m *Manager) SetWorkers(n int) error {
 }
 
 // Enrich returns the component auto-completion engine (may be nil if init failed).
-func (m *Manager) Enrich() *enrich.Engine { return m.enrich }
-
 // NewManager connects to PostgreSQL and, if proxyAddr is non-empty, starts the
 // traffic-recording proxy. PostgreSQL is required (it is the single data source).
 func NewManager(dir, proxyAddr string) (*Manager, error) {
@@ -439,7 +435,6 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 			log.Printf("[proxy] 全局代理 %q 无效，已忽略: %v", m.globalProxy, err)
 		}
 	}
-	m.enrich = enrich.New(m.components, m.ProxyAddr, 4)
 	// Reconcile the seeded browser MCP with the persisted capture state, so a
 	// restart with capture already on keeps Playwright routed through the proxy.
 	m.syncBrowserMCPProxy()
@@ -733,9 +728,9 @@ func (m *Manager) HostTools() []actool.CoreTool {
 	return m.traffic.Tools()
 }
 
-func (m *Manager) Components() *pgdb.ComponentStore  { return m.components }
-func (m *Manager) PG() *pgdb.DB              { return m.pg }
-func (m *Manager) Traffic() *traffic.Traffic { return m.traffic }
+func (m *Manager) Components() *pgdb.ComponentStore { return m.components }
+func (m *Manager) PG() *pgdb.DB                     { return m.pg }
+func (m *Manager) Traffic() *traffic.Traffic        { return m.traffic }
 
 // ProxyAddr returns the egress proxy address agents route target traffic through:
 //   - capture ON  → the recording MITM proxy (which itself exits via the global

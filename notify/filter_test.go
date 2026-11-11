@@ -63,11 +63,11 @@ func TestMatchSeverityThreshold(t *testing.T) {
 
 func TestMatchScopeRestrictions(t *testing.T) {
 	ev := Snapshot{
-		Kind:      EventFindingCreated,
-		Severity:  "high",
-		TaskID:    7,
-		ComponentIDs:  []int64{10, 20},
-		VulnClass: "SQL注入",
+		Kind:         EventFindingCreated,
+		Severity:     "high",
+		TaskID:       7,
+		ComponentIDs: []int64{10, 20},
+		VulnClass:    "SQL注入",
 	}
 	cases := []struct {
 		name   string

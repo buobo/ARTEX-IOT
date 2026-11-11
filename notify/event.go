@@ -6,17 +6,17 @@ package notify
 //
 // 为什么冗余存漏洞字段而不在渲染时回查：漏洞事后会被改名、改级别、改状态，
 // 而推送内容应当反映**事发当时**的结论——回查会得到「事后被改成 low」的
-// 危险误导。另外 fan-out 与渲染因此不必 JOIN findings/tasks/assets 三张表。
+// 危险误导。另外 fan-out 与渲染因此不必 JOIN findings/tasks/components 三张表。
 type Snapshot struct {
 	// 事件类型：finding_created / finding_status_changed
-	Kind      string  `json:"kind"`
-	FindingID int64   `json:"finding_id"`
-	TaskID    int64   `json:"task_id"`
-	VulnClass string  `json:"vulnclass"`
-	Name      string  `json:"name"`
-	Severity  string  `json:"severity"`
-	Summary   string  `json:"summary"`
-	ComponentIDs  []int64 `json:"component_ids"`
+	Kind         string  `json:"kind"`
+	FindingID    int64   `json:"finding_id"`
+	TaskID       int64   `json:"task_id"`
+	VulnClass    string  `json:"vulnclass"`
+	Name         string  `json:"name"`
+	Severity     string  `json:"severity"`
+	Summary      string  `json:"summary"`
+	ComponentIDs []int64 `json:"component_ids"`
 	// 仅 kind=finding_status_changed 时非空。
 	FromStatus string `json:"from_status,omitempty"`
 	ToStatus   string `json:"to_status,omitempty"`

@@ -140,7 +140,7 @@ export default function DashboardPage() {
   const [tokens, setTokens] = React.useState<TokenTotal | null>(null);
   const [convTokens, setConvTokens] = React.useState<ConvTokenSummary[]>([]);
   const [usageStats, setUsageStats] = React.useState<UsageStats | null>(null);
-  const [assetCounts, setAssetCounts] = React.useState<Record<string, number>>({});
+  const [componentCounts, setAssetCounts] = React.useState<Record<string, number>>({});
   const [traffic, setTraffic] = React.useState<TrafficExchange[]>([]);
   const [agents, setAgents] = React.useState<Agent[]>([]);
   const [mcpServers, setMcpServers] = React.useState<MCPServer[]>([]);
@@ -225,7 +225,7 @@ export default function DashboardPage() {
       try {
         const [traf, counts, agentList, mcpList, skillList, toolList, profileList, usage] = await Promise.all([
           api.traffic(0, 50),
-          api.assetCounts(),
+          api.componentCounts(),
           api.agents(),
           api.mcpServers(),
           api.skills(),
@@ -292,17 +292,17 @@ export default function DashboardPage() {
     [activity],
   );
 
-  const totalAssets = React.useMemo(() => Object.values(assetCounts).reduce((a, b) => a + b, 0), [assetCounts]);
+  const totalComponents = React.useMemo(() => Object.values(componentCounts).reduce((a, b) => a + b, 0), [componentCounts]);
 
   // asset type breakdown
-  const assetByType = React.useMemo(() => {
-    return Object.entries(assetCounts)
+  const componentByType = React.useMemo(() => {
+    return Object.entries(componentCounts)
       .filter(([, n]) => n > 0)
       .sort(([, a], [, b]) => b - a)
       .slice(0, 8);
-  }, [assetCounts]);
+  }, [componentCounts]);
 
-  const assetMax = assetByType[0]?.[1] ?? 1;
+  const assetMax = componentByType[0]?.[1] ?? 1;
 
   // traffic status code breakdown
   const trafficByCodes = React.useMemo(() => {
@@ -538,13 +538,13 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
 
-        {/* 资产节点 */}
+        {/* 组件节点 */}
         <Card className="gap-1">
           <CardHeader className="pb-0">
             <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-              <NetworkIcon className="size-3" /> 资产节点
+              <NetworkIcon className="size-3" /> 组件节点
             </div>
-            <div className="text-2xl font-semibold tabular-nums">{totalAssets}</div>
+            <div className="text-2xl font-semibold tabular-nums">{totalComponents}</div>
           </CardHeader>
           <CardContent className="text-[10px] text-muted-foreground">跨任务共享</CardContent>
         </Card>
@@ -1041,19 +1041,19 @@ export default function DashboardPage() {
         </table>
       </Card>
 
-      {/* ── Row 5: 资产分布 | 流量状态码 | 拦截 & 待审批 ── */}
+      {/* ── Row 5: 组件分布 | 流量状态码 | 拦截 & 待审批 ── */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-        {/* 资产分布 */}
+        {/* 组件分布 */}
         <Card className="p-4">
           <SectionTitle icon={NetworkIcon} sub="按类型">
-            资产分布
+            组件分布
           </SectionTitle>
 
-          {assetByType.length === 0 ? (
-            <div className="py-6 text-center text-xs text-muted-foreground">暂无资产数据</div>
+          {componentByType.length === 0 ? (
+            <div className="py-6 text-center text-xs text-muted-foreground">暂无组件数据</div>
           ) : (
             <div className="flex flex-col gap-2">
-              {assetByType.map(([type, count]) => (
+              {componentByType.map(([type, count]) => (
                 <div key={type} className="flex items-center gap-2 text-xs">
                   <span className="w-8 shrink-0 text-right text-[10px] text-muted-foreground">
                     {ASSET_TYPE_LABELS[type] ?? type}
@@ -1070,7 +1070,7 @@ export default function DashboardPage() {
             </div>
           )}
 
-          <div className="mt-3 border-t pt-3 text-[10px] text-muted-foreground">共 {totalAssets} 节点</div>
+          <div className="mt-3 border-t pt-3 text-[10px] text-muted-foreground">共 {totalComponents} 节点</div>
         </Card>
 
         {/* 流量状态码 */}

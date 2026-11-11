@@ -30,8 +30,8 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import { type Tone, toneClasses, toneDot } from "@/lib/status";
-import { taskAssetTypeLabel } from "@/lib/task-assets";
-import type { Edge, ExploreKind, FindingAsset, NewAssetType, TaskNode } from "@/lib/types";
+import { componentTypeLabel } from "@/lib/task-components";
+import type { Edge, ExploreKind, FindingComponent, TaskNode } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const PAGE_SIZES = [20, 50, 100];
@@ -209,18 +209,18 @@ function KindChip({ kind }: { kind: string }) {
   );
 }
 
-// 节点锚定的资产:类型标签 + 可辨识文本。数据随播报页一起下发(node id → 资产),
+// 节点锚定的组件:类型标签 + 可辨识文本。数据随播报页一起下发(node id → 组件),
 // 展开时直接展示,不额外请求。
-function AssetList({ assets, dense = false }: { assets: FindingAsset[]; dense?: boolean }) {
-  if (assets.length === 0) return null;
+function ComponentList({ components, dense = false }: { components: FindingComponent[]; dense?: boolean }) {
+  if (components.length === 0) return null;
   return (
     <div>
-      <div className="mb-1.5 text-xs font-medium text-muted-foreground">涉及资产 · {assets.length}</div>
+      <div className="mb-1.5 text-xs font-medium text-muted-foreground">涉及组件 · {components.length}</div>
       <ul className="flex flex-wrap gap-1.5">
-        {assets.map((a) => {
+        {components.map((a) => {
           // 运行时 a.type 可能是标签表未覆盖的类型,退回原始字符串。转一层类型让回退不被判成多余。
           const typeLabel =
-            (taskAssetTypeLabel as (t: NewAssetType) => string | undefined)(a.type as NewAssetType) || a.type;
+            (componentTypeLabel as (t: string) => string | undefined)(a.type as string) || a.type;
           return (
             <li
               key={a.id}
@@ -240,9 +240,9 @@ function AssetList({ assets, dense = false }: { assets: FindingAsset[]; dense?: 
   );
 }
 
-// 悬停在上下游条目上时弹出的节点名片:类型/状态/来源/时间 + 摘要 + payload 片段 + 涉及资产。
+// 悬停在上下游条目上时弹出的节点名片:类型/状态/来源/时间 + 摘要 + payload 片段 + 涉及组件。
 // 数据来自本页已经拿到的 refs,不额外发请求——播报接口已经把邻居节点整份带回来了。
-function RelatedNodeCard({ node, assets }: { node: TaskNode; assets: FindingAsset[] }) {
+function RelatedNodeCard({ node, components }: { node: TaskNode; components: FindingComponent[] }) {
   const kind = viewKind(node);
   const meta = KIND_META[kind] ?? KIND_META.fact;
   const ts = Date.parse(node.ts);
@@ -263,7 +263,7 @@ function RelatedNodeCard({ node, assets }: { node: TaskNode; assets: FindingAsse
         <span>{Number.isNaN(ts) ? node.ts : new Date(ts).toLocaleString("zh-CN")}</span>
       </div>
       <p className="line-clamp-4 text-xs break-words">{summary || "（无摘要）"}</p>
-      <AssetList assets={assets} dense />
+      <ComponentList components={components} dense />
       <pre className="max-h-40 overflow-auto rounded border bg-muted/40 p-2 font-mono text-[11px] whitespace-pre-wrap">
         {prettyPayload(node.payload)}
       </pre>
@@ -276,12 +276,12 @@ function RelatedList({
   title,
   rows,
   refs,
-  assets,
+  components,
 }: {
   title: string;
   rows: Array<{ rel: string; id: string }>;
   refs: Record<string, TaskNode>;
-  assets: Record<string, FindingAsset[]>;
+  components: Record<string, FindingComponent[]>;
 }) {
   if (rows.length === 0) return null;
   return (
@@ -307,7 +307,7 @@ function RelatedList({
                     </button>
                   </HoverCardTrigger>
                   <HoverCardContent align="start" className="w-96">
-                    <RelatedNodeCard node={node} assets={assets[node.id] ?? []} />
+                    <RelatedNodeCard node={node} components={components[node.id] ?? []} />
                   </HoverCardContent>
                 </HoverCard>
               ) : (
@@ -325,14 +325,14 @@ function BroadcastRow({
   node,
   edges,
   refs,
-  assets,
+  components,
   now,
   fresh,
 }: {
   node: TaskNode;
   edges: Edge[];
   refs: Record<string, TaskNode>;
-  assets: Record<string, FindingAsset[]>;
+  components: Record<string, FindingComponent[]>;
   now: number;
   fresh: boolean;
 }) {
@@ -411,11 +411,11 @@ function BroadcastRow({
                 <span className="ml-2 break-words text-muted-foreground">{node.delete_reason}</span>
               </div>
             )}
-            <AssetList assets={assets[node.id] ?? []} />
+            <ComponentList components={components[node.id] ?? []} />
             {(upstream.length > 0 || downstream.length > 0) && (
               <div className="flex flex-col gap-3 sm:flex-row">
-                <RelatedList title="上游 · 由此而来" rows={upstream} refs={refs} assets={assets} />
-                <RelatedList title="下游 · 由此产生" rows={downstream} refs={refs} assets={assets} />
+                <RelatedList title="上游 · 由此而来" rows={upstream} refs={refs} components={components} />
+                <RelatedList title="下游 · 由此产生" rows={downstream} refs={refs} components={components} />
               </div>
             )}
             <div>
@@ -443,7 +443,7 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
   const [items, setItems] = React.useState<TaskNode[]>([]);
   const [edges, setEdges] = React.useState<Edge[]>([]);
   const [refs, setRefs] = React.useState<Record<string, TaskNode>>({});
-  const [assets, setAssets] = React.useState<Record<string, FindingAsset[]>>({});
+  const [components, setComponents] = React.useState<Record<string, FindingComponent[]>>({});
   const [total, setTotal] = React.useState(0);
   const [loaded, setLoaded] = React.useState(false);
   const [freshIDs, setFreshIDs] = React.useState<Set<string>>(new Set());
@@ -495,7 +495,7 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
             setItems(r.items);
             setEdges(r.edges);
             setRefs(r.refs);
-            setAssets(r.assets);
+            setComponents(r.components);
           }
           setTotal(r.total);
           if (atLive) {
@@ -671,7 +671,7 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
                   node={node}
                   edges={edges}
                   refs={nodeIndex}
-                  assets={assets}
+                  components={components}
                   now={now}
                   fresh={freshIDs.has(node.id)}
                 />

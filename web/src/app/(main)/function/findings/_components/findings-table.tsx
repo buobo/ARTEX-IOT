@@ -158,7 +158,7 @@ export function FindingsTable({
           <TableHead className="w-8" />
           <TableHead className="w-20">严重度</TableHead>
           <TableHead>漏洞名称</TableHead>
-          <TableHead className="w-44">资产</TableHead>
+          <TableHead className="w-44">组件</TableHead>
           <TableHead className="w-28">状态</TableHead>
           <TableHead className="w-32">所属任务</TableHead>
           <TableHead className="w-24">时间</TableHead>
@@ -220,9 +220,9 @@ export function FindingsTable({
                   </div>
                 </TableCell>
                 <TableCell>
-                  {f.assets && f.assets.length > 0 ? (
+                  {f.components && f.components.length > 0 ? (
                     <div className="flex flex-wrap gap-1">
-                      {f.assets.slice(0, 3).map((a) => (
+                      {f.components.slice(0, 3).map((a) => (
                         <code
                           key={a.id}
                           className="max-w-full truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
@@ -231,8 +231,8 @@ export function FindingsTable({
                           {a.label}
                         </code>
                       ))}
-                      {f.assets.length > 3 && (
-                        <span className="text-xs text-muted-foreground">+{f.assets.length - 3}</span>
+                      {f.components.length > 3 && (
+                        <span className="text-xs text-muted-foreground">+{f.components.length - 3}</span>
                       )}
                     </div>
                   ) : (
@@ -386,10 +386,10 @@ export function FindingsTable({
                           </span>
                         )}
                         {f.param_id && <code className="rounded bg-muted px-1.5 py-0.5 font-mono">{f.param_id}</code>}
-                        {f.assets && f.assets.length > 0 && (
+                        {f.components && f.components.length > 0 && (
                           <span className="flex flex-wrap items-center gap-1">
-                            · 资产：
-                            {f.assets.map((a) => (
+                            · 组件：
+                            {f.components.map((a) => (
                               <code key={a.id} className="rounded bg-muted px-1.5 py-0.5 font-mono" title={a.type}>
                                 {a.label}
                               </code>

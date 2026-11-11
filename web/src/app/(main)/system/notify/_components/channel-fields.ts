@@ -133,7 +133,7 @@ export type ChannelForm = {
   includeText: string;
   excludeText: string;
   taskIDsText: string;
-  assetIDsText: string;
+  componentIDsText: string;
   onStatusChange: boolean;
 };
 
@@ -148,7 +148,7 @@ export const emptyForm = (kind: string): ChannelForm => ({
   includeText: "",
   excludeText: "",
   taskIDsText: "",
-  assetIDsText: "",
+  componentIDsText: "",
   onStatusChange: false,
 });
 

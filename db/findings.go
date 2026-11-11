@@ -29,7 +29,7 @@ type DBFinding struct {
 	Summary         string
 	Evidence        string
 	Worker          string
-	ComponentIDs        []int64
+	ComponentIDs    []int64
 	Status          string
 	Report          string // 详细报告(Markdown);仅 GetFinding 填充,列表查询不带
 	CreatedAt       time.Time
@@ -156,8 +156,8 @@ type FindingFilter struct {
 	TaskID    string // 任务 id(字符串形式;空/非法 = 不按任务筛选)
 	Query     string // 名称/类型/摘要/证据/报告正文的模糊检索关键词
 	Sort      string // "severity" | "time"
-	// ComponentScope 是资产树的节点 key(a:<id> / c:<id> / r:<domain> / __none__),
-	// 选中一个节点等于选中它的整棵子树。空 = 不按资产筛选。
+	// ComponentScope 是组件树的节点 key（组件类型名 / component:<id> / __none__），
+	// 选中一个节点等于选中它的整棵子树。空 = 不按组件筛选。
 	ComponentScope string
 
 	// 下面三个由 applyComponentScope 从 ComponentScope 解析而来,调用方不用设置。
@@ -754,8 +754,8 @@ func (d *DB) SetFindingVulnClass(id int64, vulnclass string) (int64, error) {
 type FindingMeta struct {
 	TrafficCount int
 
-	ID       int64
-	Status   string
+	ID           int64
+	Status       string
 	ComponentIDs []int64
 }
 

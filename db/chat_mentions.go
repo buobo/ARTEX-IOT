@@ -80,12 +80,12 @@ SELECT kind, id, left(label, 160), left(description, 240) FROM (
     AND ($4::bigint=0 OR (id::text=$2)<$6 OR ((id::text=$2)=$6 AND (id<$4 OR (id=$4 AND 'company'>$5))))
   ORDER BY (id::text=$2) DESC, id DESC LIMIT 21)
  UNION ALL
- (SELECT type, id,
+ (SELECT 'component', id,
     COALESCE(NULLIF(component_name,''),'组件 #'||id::text),
     concat_ws(' · ',type,NULLIF(version,''),NULLIF(vendor,''),NULLIF(binary_path,''),port::text)
-  FROM components WHERE ($1='' OR $1='component' OR type=$1) AND
+  FROM components WHERE ($1='' OR $1='component') AND
     ($2='' OR id::text=$2 OR concat_ws(' ',component_name,version,vendor,binary_path,config_path,started_by,notes) ILIKE $3)
-    AND ($4::bigint=0 OR (id::text=$2)<$6 OR ((id::text=$2)=$6 AND (id<$4 OR (id=$4 AND type>$5))))
+    AND ($4::bigint=0 OR (id::text=$2)<$6 OR ((id::text=$2)=$6 AND (id<$4 OR (id=$4 AND 'component'>$5))))
   ORDER BY (id::text=$2) DESC, id DESC LIMIT 21)
 ) matches ORDER BY (id::text=$2) DESC, id DESC, kind LIMIT 21`, kind, query, pattern, after.ID, after.Kind, after.Exact)
 	if err != nil {

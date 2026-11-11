@@ -101,7 +101,7 @@ export default function NotifyPage() {
       includeText: (f.vulnclass_include ?? []).join("\n"),
       excludeText: (f.vulnclass_exclude ?? []).join("\n"),
       taskIDsText: (f.task_ids ?? []).join(","),
-      assetIDsText: (f.asset_ids ?? []).join(","),
+      componentIDsText: (f.component_ids ?? []).join(","),
       onStatusChange: f.on_status_change ?? false,
     });
     setOpen(true);
@@ -158,7 +158,7 @@ export default function NotifyPage() {
       vulnclass_include: parseKeywords(form.includeText),
       vulnclass_exclude: parseKeywords(form.excludeText),
       task_ids: parseIDs(form.taskIDsText),
-      asset_ids: parseIDs(form.assetIDsText),
+      component_ids: parseIDs(form.componentIDsText),
       on_status_change: form.onStatusChange,
     };
   }
@@ -561,14 +561,14 @@ export default function NotifyPage() {
                     />
                   </div>
                   <div className="grid gap-2">
-                    <Label htmlFor="n-assets">限定资产 ID</Label>
+                    <Label htmlFor="n-components">限定组件 ID</Label>
                     <Input
-                      id="n-assets"
+                      id="n-components"
                       placeholder="10, 11"
-                      value={form.assetIDsText}
-                      onChange={(e) => setF({ assetIDsText: e.target.value })}
+                      value={form.componentIDsText}
+                      onChange={(e) => setF({ componentIDsText: e.target.value })}
                     />
-                    <p className="text-muted-foreground text-xs">任务/资产留空=不限；填写后要求与漏洞有交集。</p>
+                    <p className="text-muted-foreground text-xs">任务/组件留空=不限；填写后要求与漏洞有交集。</p>
                   </div>
                   <div className="flex items-center gap-2 text-sm">
                     <Switch

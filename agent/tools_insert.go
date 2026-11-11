@@ -68,14 +68,18 @@ func (t *ToolSet) insertComponents() actool.CoreTool {
 				"description": "批量：[{type, component_name, version?, vendor?, binary_path?, config_path?, started_by?, port?, technologies?, notes?}]",
 				"items":       map[string]any{"type": "object"},
 			},
-			"type":           str("[单条] web/mqtt/ros/ssh/telnet/upnp/onvif/rtsp/ftp/other"),
-			"component_name": str("[单条] 组件名（lighttpd / mosquitto / roscore）"),
-			"version":        str("[单条] 版本号，确知才填"),
-			"binary_path":    str("[单条] 可执行文件绝对路径"),
-			"config_path":    str("[单条] 配置文件路径"),
-			"started_by":     str("[单条] 启动脚本路径"),
-			"port":           intp("[单条] 主监听端口"),
-			"notes":          str("[单条] 备注"),
+			"type":            str("[单条] web/mqtt/ros/ssh/telnet/upnp/onvif/rtsp/ftp/other"),
+			"component_name":  str("[单条] 组件名（lighttpd / mosquitto / roscore）"),
+			"version":         str("[单条] 版本号，确知才填"),
+			"binary_path":     str("[单条] 可执行文件绝对路径"),
+			"config_path":     str("[单条] 配置文件路径"),
+			"started_by":      str("[单条] 启动脚本路径"),
+			"vendor":          str("[单条] 厂商/品牌（如 Xiaomi、Realtek）"),
+			"port":            intp("[单条] 主监听端口"),
+			"technologies":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "[单条] 依赖库/协议栈等特征"},
+			"status":          str("[单条] 初始状态 pending/running/completed/ignored，默认 pending"),
+			"firmware_sha256": str("[单条] 仅当该组件明确来自某个固件：固件 sha256(64 位十六进制)"),
+			"notes":           str("[单条] 备注"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.as == nil {
@@ -98,12 +102,19 @@ func (t *ToolSet) insertComponents() actool.CoreTool {
 			}
 
 			// 固件 sha256：单条/批量都可显式指定，否则回落到任务范围里登记的固件。
+			// 只在任务里恰好登记了一个固件时回落：多固件任务无从判断这条组件来自哪个固件，
+			// 宁可留空（组件库按 COALESCE(sha,'') 归并），也不能把它标到随便一个固件名下。
 			sha := strings.TrimSpace(a.FirmwareSha256)
 			if sha == "" && t.taskID > 0 && t.as != nil {
 				if scopes, err := t.as.ListTaskScope(t.taskID); err == nil {
 					for _, sc := range scopes {
-						if sc.Kind == "firmware" && sc.Sha256 != "" {
+						if sc.Kind != "firmware" || sc.Sha256 == "" {
+							continue
+						}
+						if sha == "" {
 							sha = sc.Sha256
+						} else if sha != sc.Sha256 {
+							sha = "" // 多固件：不猜
 							break
 						}
 					}
@@ -139,6 +150,21 @@ func (t *ToolSet) insertComponents() actool.CoreTool {
 			inserted, updated, ids, err := t.as.UpsertComponents(taskIDs, inputs)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
+			}
+			// 来源链路（与旧的资产工具一致）：把组件锚到本次执行节点（worker=意图节点）
+			// 并写任务↔组件来源行。两者都是批量一次写；失败不影响「组件已入库」这个结果。
+			if t.ts != nil && t.ownerNode > 0 {
+				_ = t.ts.AnchorMany(t.ownerNode, ids)
+			}
+			if t.taskID > 0 {
+				summary := "Agent 通过 insert_components 登记"
+				var sourceNodeID *int64
+				if t.ownerNode > 0 {
+					n := t.ownerNode
+					sourceNodeID = &n
+					summary = fmt.Sprintf("Worker 意图 #%d 通过 insert_components 登记", t.ownerNode)
+				}
+				_ = t.as.SetTaskComponentSources(t.taskID, ids, "agent", summary, sourceNodeID)
 			}
 			return jsonResult(map[string]any{
 				"inserted": inserted,
@@ -357,7 +383,7 @@ func (t *ToolSet) listComponents() actool.CoreTool {
 			case len(a.IDs) > 0:
 				components, err = t.as.GetByIDsInScope(t.taskID, a.IDs)
 			case a.DSL != "":
-				components, err = t.as.QueryDSLInScope(a.DSL, a.Type, t.taskID, a.Limit, a.Offset)
+				components, err = t.as.QueryDSLInScope(a.DSL, a.Type, "", t.taskID, a.Limit, a.Offset)
 			default:
 				return actool.Errorf("未传 id/ids 时 dsl 不能为空：不允许无条件查询全部组件，请提供查询条件"), nil
 			}
@@ -365,7 +391,7 @@ func (t *ToolSet) listComponents() actool.CoreTool {
 				return actool.Errorf("DSL 错误: " + err.Error()), nil
 			}
 			return jsonResult(map[string]any{
-				"count":  len(components),
+				"count":      len(components),
 				"components": components,
 			})
 		},
@@ -395,10 +421,10 @@ func (t *ToolSet) listCompanies() actool.CoreTool {
 			}
 			q := strings.ToLower(strings.TrimSpace(a.Search))
 			type companyOut struct {
-				ID         int64    `json:"id"`
-				Name       string   `json:"name"`
+				ID             int64    `json:"id"`
+				Name           string   `json:"name"`
 				ComponentCount int      `json:"component_count"`
-				Scope      []string `json:"scope"`
+				Scope          []string `json:"scope"`
 			}
 			out := make([]companyOut, 0, len(cos))
 			for _, c := range cos {

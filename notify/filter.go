@@ -13,7 +13,7 @@ type Filter struct {
 	// MinSeverity 是最低级别门槛（low/medium/high/critical），空=不设门槛。
 	MinSeverity string `json:"min_severity"`
 	// TaskIDs / ComponentIDs 为空数组表示不限；非空则要求事件与它有交集。
-	TaskIDs  []int64 `json:"task_ids"`
+	TaskIDs      []int64 `json:"task_ids"`
 	ComponentIDs []int64 `json:"component_ids"`
 	// VulnClassInclude 为空表示全收；非空则要求 vulnclass 命中其中任一关键词。
 	// VulnClassExclude 命中任一关键词即排除（排除优先于包含）。

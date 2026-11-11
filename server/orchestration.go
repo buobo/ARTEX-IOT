@@ -245,7 +245,7 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			"description":            strParam("任务描述(简短标题)"),
 			"goal":                   strParam("任务目标(要达成什么)"),
 			"parent_ref":             strParam("可选：父任务 id(做父子关联)"),
-			"source_task_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": fmt.Sprintf("可选：只读继承的来源任务 id 列表(最多 %d 个)。子任务可只读引用这些任务已探明的资产/结论作为起点；与 parent_ref 的纯父子指针不同，这是内容继承。", db.MaxTaskSourceCount)},
+			"source_task_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": fmt.Sprintf("可选：只读继承的来源任务 id 列表(最多 %d 个)。子任务可只读引用这些任务已探明的组件/结论作为起点；与 parent_ref 的纯父子指针不同，这是内容继承。", db.MaxTaskSourceCount)},
 			"llm_profile_id":         map[string]any{"type": "integer", "description": "可选：指定本子任务 planner/worker 用的 LLM 配置 id(见 list_llm_profiles)；留空则继承父任务、再回退全局激活配置"},
 			"timeout_seconds":        map[string]any{"type": "integer", "description": "可选：任务级超时(秒)。到点后触发优雅收尾并进入 timeout 终态；留空或 0 = 不限时"},
 			"plan_heartbeat_seconds": map[string]any{"type": "integer", "description": "可选：planner 心跳触发间隔(秒)。距上轮规划结束/任务开始满该值且期间无触发 → 触发一轮规划(兜底死锁 + 唤醒去监督飞行中的 worker)。留空或 0 = 默认 600(10min)；"},
@@ -348,7 +348,7 @@ func (s *Server) toolPauseTask() actool.CoreTool {
 }
 
 func (s *Server) toolGetTaskGraph() actool.CoreTool {
-	return roTool("get_task_graph", "读指定任务的探索图总览(同 graph_overview：资产计数/frontier/发现/覆盖等)，用 task_id 指定任务。",
+	return roTool("get_task_graph", "读指定任务的探索图总览(同 graph_overview：组件计数/frontier/发现/覆盖等)，用 task_id 指定任务。",
 		objSchema(map[string]any{"task_id": strParam("任务 id")}, "task_id"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			return s.delegateToTask(ctx, in, (*agent.ToolSet).GraphOverviewTool)
@@ -371,7 +371,7 @@ func (s *Server) toolAddHint() actool.CoreTool {
 			"hints":        map[string]any{"type": "array", "description": "【优先用这个】提示数组，每个元素字段同顶层（text/component_ids/traffic_refs）。", "items": objSchema(map[string]any{"text": strParam("提示内容"), "component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": agent.HintTrafficSchema()})},
 			"text":         strParam("[单条] 提示内容"),
 			"traffic_refs": agent.HintTrafficSchema(),
-			"component_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的资产 id（可选，0/1/多个；该任务内的资产 id）"},
+			"component_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的组件 id（可选，0/1/多个；该任务内的组件 id）"},
 		}, "task_id"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			return s.delegateToTask(ctx, in, (*agent.ToolSet).AddHintTool)
@@ -412,7 +412,7 @@ func (s *Server) toolGetTaskNodeDetail() actool.CoreTool {
 		"读指定任务里某个探索图节点的完整内容(发现/事实/意图/目标：摘要 + 详情/证据/PoC)。id 为探索节点 id(如 report_finding 返回、或 list_task_findings 里的 id)。写漏洞报告前用它取该漏洞的完整证据。",
 		objSchema(map[string]any{
 			"task_id": strParam("任务 id"),
-			"id":      map[string]any{"type": "integer", "description": "探索图节点 id(非资产 id)"},
+			"id":      map[string]any{"type": "integer", "description": "探索图节点 id(非组件 id)"},
 		}, "task_id", "id"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			return s.delegateToTask(ctx, in, (*agent.ToolSet).NodeDetailTool)
@@ -528,7 +528,7 @@ func (s *Server) refreshBuiltinToolSchemas() {
 	// 同时把部分内置 agent 工具刷成代码默认：
 	//   - goal_met：旧库 seed 的描述带“结束本轮规划”的误导，会让 planner 把它当成
 	//     “结束空轮”的手段、刚开跑就误判整个任务完成。
-	//   - insert_components：新增 related 入参(标记资产是否与当前任务相关、决定是否入覆盖度)，
+	//   - insert_components：新增 related 入参(标记组件是否与当前任务相关、决定是否入覆盖度)，
 	//     SeedTool 首插入only，旧库已 seed 的 schema 否则收不到这个新参数。
 	//   - list_facts：改为分页，新增 limit/before/q 入参；旧库已 seed 的空 schema 否则
 	//     在工具管理页显示「无参数」，模型也拿不到这几个参数说明。
@@ -910,7 +910,7 @@ func (s *Server) seedAutoDefaultBindings() {
 		keys = append(keys, t.Name())
 	}
 	keys = append(keys, platformToolKeys...)
-	// 资产工具：Auto 操作平台常要看/登记资产、管理公司范围。
+	// 组件工具：Auto 操作平台常要看/登记组件、管理公司范围。
 	keys = append(keys, "insert_components", "add_company_scope", "list_components")
 	if err := s.m.pg.AddAgentToToolBinding("auto", keys); err != nil {
 		log.Printf("[auto] 默认绑定失败: %v", err)

@@ -19,7 +19,7 @@ type goalSpec struct {
 
 // launchTask runs the shared post-creation sequence for a task created via ANY
 // path (HTTP createTask 或 orchestration spawn_task),避免两处复制粘贴:
-//  1. seed 根资产,喂给事件驱动 loop;
+//  1. seed 根节点,喂给事件驱动 loop;
 //  2. 可选种子意图,worker 免等首轮 planner 直接开跑;
 //  3. 后台异步做目标分解(发「第 0 轮目标拆解」round + LLM 分解步骤 + 逐条 goal,页面可见),
 //     分解完再 engine.Run —— 引擎在 goal 节点就绪后才启动,避免 planner 抢在 goal 之前跑的竞态。

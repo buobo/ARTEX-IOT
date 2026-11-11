@@ -26,7 +26,7 @@ func findingPaginationParam(raw string, fallback, upperBound int) int {
 }
 
 // findingFilterFromQuery builds the shared findings filter from a request's
-// query string. 列表 / 分组 / 资产树 / 导出走同一份解析,新增筛选项只改这里。
+// query string. 列表 / 分组 / 组件树 / 导出走同一份解析,新增筛选项只改这里。
 func findingFilterFromQuery(q url.Values) db.FindingFilter {
 	return db.FindingFilter{
 		Severity:  normFilter(q.Get("severity")),
@@ -40,7 +40,7 @@ func findingFilterFromQuery(q url.Values) db.FindingFilter {
 	}
 }
 
-// findingComponentTree serves the「按资产」view's left-hand tree: every component that
+// findingComponentTree serves the「按组件」view's left-hand tree: every component that
 // carries at least one matching finding, plus the ancestors needed to place it.
 func (s *Server) findingComponentTree(w http.ResponseWriter, r *http.Request) {
 	tree, err := s.m.pg.BuildFindingComponentTree(findingFilterFromQuery(r.URL.Query()))

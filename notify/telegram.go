@@ -136,8 +136,8 @@ func telegramHTML(m Message) (string, int) {
 	if it.VulnClass != "" && it.VulnClass != it.Title() {
 		b.WriteString("\n<b>类型</b>：" + telegramEscape(it.VulnClass))
 	}
-	if a := assetLine(it.Components, maxAssetsShown); a != "" {
-		b.WriteString("\n<b>资产</b>：" + telegramEscape(a))
+	if a := componentLine(it.Components, maxComponentsShown); a != "" {
+		b.WriteString("\n<b>组件</b>：" + telegramEscape(a))
 	}
 	if s := OneLine(it.Summary, maxSummaryRunes); s != "" {
 		b.WriteString("\n<b>摘要</b>：" + telegramEscape(s))
@@ -153,7 +153,7 @@ const telegramReservedRunes = 160
 
 // telegramBatchLine 渲染汇总里的一条（未转义，由调用方统一转义）。
 func telegramBatchLine(it Item, idx int) string {
-	if a := assetLine(it.Components, maxAssetsShown); a != "" {
+	if a := componentLine(it.Components, maxComponentsShown); a != "" {
 		return fmt.Sprintf("%d. %s · %s — %s", idx, SeverityLabel(it.Severity), it.Title(), a)
 	}
 	return fmt.Sprintf("%d. %s · %s", idx, SeverityLabel(it.Severity), it.Title())

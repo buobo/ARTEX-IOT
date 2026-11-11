@@ -225,7 +225,7 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 	// 留着会让 UI 列出一个跑不起来的工具，甚至被绑到 agent 上导致运行时找不到实现。
 	if err := pg.PruneBuiltinTools([]string{
 		"insert_assets", "list_assets", "list_untested_assets", "asset_neighbors",
-		"delete_assets_by_host",
+		"delete_assets", "delete_assets_by_host",
 	}); err != nil {
 		log.Printf("[tools] 清理已下线工具失败: %v", err)
 	}

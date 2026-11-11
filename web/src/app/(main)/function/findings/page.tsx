@@ -44,7 +44,7 @@ import { statusMeta } from "@/lib/status";
 import type {
   ActiveFindingRetest,
   Finding,
-  FindingAssetNode,
+  FindingComponentNode,
   FindingGroup,
   FindingStats,
   FindingStatus,
@@ -52,7 +52,7 @@ import type {
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-import { AssetTree, assetPathOf } from "./_components/asset-tree";
+import { ComponentTree, componentPathOf } from "./_components/component-tree";
 import {
   FINDING_STATUSES,
   type FindingEdit,
@@ -68,15 +68,15 @@ import {
 const FINDING_LIST_PREFERENCE_KEY = "artex_finding_list_preferences";
 
 // 列表视图:flat = 跨任务平铺大表(默认);grouped = 按任务分组折叠;
-// asset = 左侧资产树 + 右侧该子树下的发现。
-type FindingView = "flat" | "grouped" | "asset";
+// asset = 左侧组件树 + 右侧该子树下的发现。
+type FindingView = "flat" | "grouped" | "component";
 
-const FINDING_VIEWS: FindingView[] = ["flat", "grouped", "asset"];
+const FINDING_VIEWS: FindingView[] = ["flat", "grouped", "component"];
 
-// 资产树的一次性快照。与另外两个视图不同,资产视图不轮询:进入视图、改筛选、
+// 组件树的一次性快照。与另外两个视图不同,组件视图不轮询:进入视图、改筛选、
 // 或本页改动了发现之后才重新查询。
-interface AssetTreeState {
-  nodes: FindingAssetNode[];
+interface ComponentTreeState {
+  nodes: FindingComponentNode[];
   findingTotal: number;
   truncated: boolean;
   droppedKinds: string[];
@@ -84,7 +84,7 @@ interface AssetTreeState {
   loading: boolean;
 }
 
-const EMPTY_ASSET_TREE: AssetTreeState = {
+const EMPTY_COMPONENT_TREE: ComponentTreeState = {
   nodes: [],
   findingTotal: 0,
   truncated: false,
@@ -141,8 +141,8 @@ export default function FindingsPage() {
   const [flat, setFlat] = React.useState<FlatFindingsState>(EMPTY_FLAT_STATE);
   const [flatPage, setFlatPage] = React.useState(1);
   const [flatPageSize, setFlatPageSize] = React.useState(20);
-  const [assetTree, setAssetTree] = React.useState<AssetTreeState>(EMPTY_ASSET_TREE);
-  const [assetScope, setAssetScope] = React.useState<string | null>(null);
+  const [componentTree, setComponentTree] = React.useState<ComponentTreeState>(EMPTY_COMPONENT_TREE);
+  const [componentScope, setComponentScope] = React.useState<string | null>(null);
   const [groups, setGroups] = React.useState<FindingGroup[]>([]);
   const [groupTotal, setGroupTotal] = React.useState(0);
   const [expandedGroups, setExpandedGroups] = React.useState<Set<string>>(() => new Set());
@@ -299,7 +299,7 @@ export default function FindingsPage() {
   }
 
   const flatRequest = React.useRef(0);
-  const assetTreeRequest = React.useRef(0);
+  const componentTreeRequest = React.useRef(0);
   const groupRequests = React.useRef<Record<string, number>>({});
   const groupsRequest = React.useRef(0);
   const flatStateRef = React.useRef(flat);
@@ -311,8 +311,8 @@ export default function FindingsPage() {
   groupFindingsRef.current = groupFindings;
   visibleGroupKeysRef.current = new Set(groups.map(findingGroupKey));
 
-  // 资产视图右侧列表 = 平铺列表 + 选中子树的筛选,所以两个视图共用一份列表状态。
-  const activeAssetScope = view === "asset" ? assetScope : null;
+  // 组件视图右侧列表 = 平铺列表 + 选中子树的筛选,所以两个视图共用一份列表状态。
+  const activeComponentScope = view === "component" ? componentScope : null;
 
   // loadFlat 拉取平铺视图的当前页;task 筛选交给后端,与分组视图共用同一批筛选条件。
   const loadFlat = React.useCallback(async () => {
@@ -330,7 +330,7 @@ export default function FindingsPage() {
         task,
         query,
         sort,
-        assetScope: activeAssetScope ?? undefined,
+        componentScope: activeComponentScope ?? undefined,
       });
       if (request !== flatRequest.current || activeFilterFingerprint.current !== requestFilter) return;
       setFlat({ items: result.items, total: result.total, loaded: true, loading: false });
@@ -339,30 +339,30 @@ export default function FindingsPage() {
       // Polling keeps the last successful snapshot visible.
       setFlat((current) => ({ ...current, loading: false }));
     }
-  }, [activeAssetScope, filterFingerprint, flatPage, flatPageSize, severity, status, vulnclass, task, query, sort]);
+  }, [activeComponentScope, filterFingerprint, flatPage, flatPageSize, severity, status, vulnclass, task, query, sort]);
 
-  // loadAssetTree 取整棵资产树。树不随选中节点变化(否则选一下就塌成一条链),
-  // 所以这里不带 assetScope。
-  const loadAssetTree = React.useCallback(async () => {
+  // loadComponentTree 取整棵组件树。树不随选中节点变化(否则选一下就塌成一条链),
+  // 所以这里不带 componentScope。
+  const loadComponentTree = React.useCallback(async () => {
     const requestFilter = filterFingerprint;
     if (activeFilterFingerprint.current !== requestFilter) return;
-    const request = ++assetTreeRequest.current;
-    setAssetTree((current) => ({ ...current, loading: true }));
+    const request = ++componentTreeRequest.current;
+    setComponentTree((current) => ({ ...current, loading: true }));
     try {
-      const result = await api.findingAssetTree({ severity, status, vulnclass, task, query, sort });
-      if (request !== assetTreeRequest.current || activeFilterFingerprint.current !== requestFilter) return;
-      setAssetTree({
+      const result = await api.findingComponentTree({ severity, status, vulnclass, task, query, sort });
+      if (request !== componentTreeRequest.current || activeFilterFingerprint.current !== requestFilter) return;
+      setComponentTree({
         nodes: result.nodes ?? [],
-        findingTotal: result.finding_total ?? 0,
+        findingTotal: result.total ?? 0,
         truncated: Boolean(result.truncated),
-        droppedKinds: result.dropped_kinds ?? [],
+        droppedKinds: [],
         loaded: true,
         loading: false,
       });
     } catch (e) {
-      if (request !== assetTreeRequest.current || activeFilterFingerprint.current !== requestFilter) return;
-      setAssetTree((current) => ({ ...current, loading: false }));
-      toast.error(`资产树加载失败：${(e as Error).message}`);
+      if (request !== componentTreeRequest.current || activeFilterFingerprint.current !== requestFilter) return;
+      setComponentTree((current) => ({ ...current, loading: false }));
+      toast.error(`组件树加载失败：${(e as Error).message}`);
     }
   }, [filterFingerprint, severity, status, vulnclass, task, query, sort]);
 
@@ -476,10 +476,10 @@ export default function FindingsPage() {
   // 行内改动后刷新当前视图:平铺视图重拉当前页,分组视图刷组头 + 该发现所在的组。
   const refreshAfterMutation = React.useCallback(
     (finding: Finding, removed = false) => {
-      if (view === "asset") {
-        // 资产视图不轮询,所以改完要顺带把树的计数也重新算一次。
+      if (view === "component") {
+        // 组件视图不轮询,所以改完要顺带把树的计数也重新算一次。
         void loadFlat();
-        void loadAssetTree();
+        void loadComponentTree();
         return;
       }
       if (view === "flat") {
@@ -496,7 +496,7 @@ export default function FindingsPage() {
         void loadGroup(key, Math.min(state.page, lastPage), state.pageSize);
       }
     },
-    [loadAssetTree, loadFlat, loadGroup, refreshGroups, view],
+    [loadComponentTree, loadFlat, loadGroup, refreshGroups, view],
   );
 
   // Reset every view's pagination and expansion when a shared finding filter changes.
@@ -508,33 +508,33 @@ export default function FindingsPage() {
     setGroupFindings({});
     setFlatPage(1);
     setFlat(EMPTY_FLAT_STATE);
-    // 筛选变了树也会变,原先选中的节点可能已经不在树里,退回「全部资产」。
-    setAssetScope(null);
-    setAssetTree(EMPTY_ASSET_TREE);
+    // 筛选变了树也会变,原先选中的节点可能已经不在树里,退回「全部组件」。
+    setComponentScope(null);
+    setComponentTree(EMPTY_COMPONENT_TREE);
   }, [filterFingerprint]);
 
-  // 换资产节点等于换了一份结果集,回到第一页。
+  // 换组件节点等于换了一份结果集,回到第一页。
   React.useEffect(() => {
-    void assetScope;
+    void componentScope;
     setFlatPage(1);
-  }, [assetScope]);
+  }, [componentScope]);
 
-  // 资产树只在进入视图 / 筛选变化时查一次(以及本页改动发现后由
+  // 组件树只在进入视图 / 筛选变化时查一次(以及本页改动发现后由
   // refreshAfterMutation 主动重拉),不做轮询。
   React.useEffect(() => {
-    if (!preferencesHydrated || view !== "asset") return;
-    void activeRetestFingerprint; // 复测结束可能改变状态筛选下的资产计数。
-    void loadAssetTree();
-  }, [activeRetestFingerprint, loadAssetTree, preferencesHydrated, view]);
+    if (!preferencesHydrated || view !== "component") return;
+    void activeRetestFingerprint; // 复测结束可能改变状态筛选下的组件计数。
+    void loadComponentTree();
+  }, [activeRetestFingerprint, loadComponentTree, preferencesHydrated, view]);
 
   // 只轮询当前视图:平铺视图刷当前页,分组视图刷组头与每个已展开的组(其分页彼此独立)。
-  // 资产视图只查一次(见下面的 return),它的左树是导航结构,没必要每 5 秒重算。
+  // 组件视图只查一次(见下面的 return),它的左树是导航结构,没必要每 5 秒重算。
   // 等偏好水合后再发首个请求,否则会先按默认视图/筛选白拉一次。
   React.useEffect(() => {
     if (!preferencesHydrated) return;
-    void activeRetestFingerprint; // 包括不定时轮询的资产视图，也在复测结束后刷新处置状态。
+    void activeRetestFingerprint; // 包括不定时轮询的组件视图，也在复测结束后刷新处置状态。
     const refresh = () => {
-      if (view === "flat" || view === "asset") {
+      if (view === "flat" || view === "component") {
         if (!flatStateRef.current.loading) void loadFlat();
         return;
       }
@@ -546,7 +546,7 @@ export default function FindingsPage() {
       }
     };
     refresh();
-    if (view === "asset") return;
+    if (view === "component") return;
     const timer = setInterval(refresh, 5000);
     return () => clearInterval(timer);
   }, [activeRetestFingerprint, loadFlat, loadGroup, preferencesHydrated, refreshGroups, view]);
@@ -761,11 +761,11 @@ export default function FindingsPage() {
   ];
 
   // 导出弹窗里「当前筛选」的条数:两个视图的筛选一致,只是统计口径来源不同。
-  // 平铺与资产视图共用 flat 列表状态,分组视图的口径来自组接口的 finding_total。
+  // 平铺与组件视图共用 flat 列表状态,分组视图的口径来自组接口的 finding_total。
   const filteredTotal = view === "grouped" ? total : flat.total;
-  const assetPath = React.useMemo(
-    () => (view === "asset" ? assetPathOf(assetTree.nodes, assetScope) : []),
-    [assetScope, assetTree.nodes, view],
+  const componentPath = React.useMemo(
+    () => (view === "component" ? componentPathOf(componentTree.nodes, componentScope) : []),
+    [componentScope, componentTree.nodes, view],
   );
 
   const rowProps = {
@@ -786,7 +786,7 @@ export default function FindingsPage() {
     onDelete: deleteFinding,
   };
 
-  // 平铺视图与资产视图右侧是同一张表 + 同一份分页,只是筛选条件不同。
+  // 平铺视图与组件视图右侧是同一张表 + 同一份分页,只是筛选条件不同。
   const flatListCard = (
     <Card className="gap-0 py-0">
       <CardContent className="px-0">
@@ -825,7 +825,7 @@ export default function FindingsPage() {
           <TabsList>
             <TabsTrigger value="flat">全部发现</TabsTrigger>
             <TabsTrigger value="grouped">按任务分组</TabsTrigger>
-            <TabsTrigger value="asset">按资产</TabsTrigger>
+            <TabsTrigger value="component">按组件</TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
@@ -961,24 +961,24 @@ export default function FindingsPage() {
 
         {view === "flat" && flatListCard}
 
-        {view === "asset" && (
+        {view === "component" && (
           <div className="grid min-h-0 items-start gap-4 lg:grid-cols-[20rem_minmax(0,1fr)] xl:grid-cols-[24rem_minmax(0,1fr)]">
             <Card className="gap-0 py-3 lg:sticky lg:top-4">
               <CardContent className="flex flex-col px-3">
-                {assetTree.loading && !assetTree.loaded ? (
+                {componentTree.loading && !componentTree.loaded ? (
                   <div className="flex min-h-36 items-center justify-center">
                     <Spinner />
                   </div>
                 ) : (
-                  <AssetTree
-                    nodes={assetTree.nodes}
-                    selected={assetScope}
-                    onSelect={setAssetScope}
-                    loading={assetTree.loading}
-                    truncated={assetTree.truncated}
-                    droppedKinds={assetTree.droppedKinds}
-                    findingTotal={assetTree.findingTotal}
-                    onRefresh={() => void loadAssetTree()}
+                  <ComponentTree
+                    nodes={componentTree.nodes}
+                    selected={componentScope}
+                    onSelect={setComponentScope}
+                    loading={componentTree.loading}
+                    truncated={componentTree.truncated}
+                    droppedKinds={componentTree.droppedKinds}
+                    findingTotal={componentTree.findingTotal}
+                    onRefresh={() => void loadComponentTree()}
                   />
                 )}
               </CardContent>
@@ -987,24 +987,24 @@ export default function FindingsPage() {
               <div className="flex min-w-0 flex-wrap items-center gap-1 text-sm text-muted-foreground">
                 <button
                   type="button"
-                  className={cn("hover:text-foreground", assetScope === null && "font-medium text-foreground")}
-                  onClick={() => setAssetScope(null)}
+                  className={cn("hover:text-foreground", componentScope === null && "font-medium text-foreground")}
+                  onClick={() => setComponentScope(null)}
                 >
-                  全部资产
+                  全部组件
                 </button>
-                {assetPath.map((node) => (
+                {componentPath.map((node) => (
                   <React.Fragment key={node.key}>
                     <ChevronRightIcon className="size-3.5 shrink-0" aria-hidden="true" />
                     <button
                       type="button"
                       className={cn(
                         "max-w-[16rem] truncate hover:text-foreground",
-                        node.key === assetScope && "font-medium text-foreground",
+                        node.key === componentScope && "font-medium text-foreground",
                       )}
                       title={node.label}
-                      onClick={() => setAssetScope(node.key)}
+                      onClick={() => setComponentScope(node.key)}
                     >
-                      {node.display}
+                      {node.label}
                     </button>
                   </React.Fragment>
                 ))}
@@ -1177,7 +1177,7 @@ export default function FindingsPage() {
                 disabled={deepening}
               />
               <FieldDescription className="flex justify-between gap-3">
-                <span>新意图会继承该漏洞的资产锚点。</span>
+                <span>新意图会继承该漏洞的组件锚点。</span>
                 <span className="shrink-0 tabular-nums">{deepenDescription.length} / 4000</span>
               </FieldDescription>
             </Field>

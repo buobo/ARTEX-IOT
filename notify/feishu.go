@@ -185,8 +185,8 @@ func feishuItemLines(it Item) string {
 	if it.VulnClass != "" && it.VulnClass != it.Title() {
 		out += fmt.Sprintf("\n**类型**：%s", markdownText(it.VulnClass, 0))
 	}
-	if a := assetLine(it.Components, maxAssetsShown); a != "" {
-		out += fmt.Sprintf("\n**资产**：%s", markdownText(a, 0))
+	if a := componentLine(it.Components, maxComponentsShown); a != "" {
+		out += fmt.Sprintf("\n**组件**：%s", markdownText(a, 0))
 	}
 	if it.Summary != "" {
 		if s := markdownText(it.Summary, maxSummaryRunes); s != "" {
@@ -199,7 +199,7 @@ func feishuItemLines(it Item) string {
 // feishuBatchLine 渲染汇总卡片里的一条。
 func feishuBatchLine(it Item, index int) string {
 	line := fmt.Sprintf("**%d. %s · %s**", index, SeverityLabel(it.Severity), markdownText(it.Title(), 0))
-	if a := assetLine(it.Components, maxAssetsShown); a != "" {
+	if a := componentLine(it.Components, maxComponentsShown); a != "" {
 		line += " — " + markdownText(a, 0)
 	}
 	return line

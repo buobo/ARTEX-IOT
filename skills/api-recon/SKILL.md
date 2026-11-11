@@ -73,7 +73,7 @@ description: 收集网站API接口时调用该skill。
 - [ ] **进壳**：访问业务 path 时非 `/login`（注意 hash 路由）
 - [ ] **参数**：coverage/both 完成参数触发矩阵 + `param_samples.json`；Phase 5 合并 `params_merged.json`
 - [ ] **深度**（若模块页空白）：Phase 4 权限树还原并重跑，直至出现 **module 级 API**（非仅 locale/bootstrap）
-- [ ] **交付**：Phase 5 产出齐全（见 Phase 5 产出表）；`insert_assets` 写入服务与端点资产
+- [ ] **交付**：Phase 5 产出齐全（见 Phase 5 产出表）；`insert_components` 写入服务与端点组件
 
 ---
 
@@ -124,7 +124,7 @@ Phase 0 分类 + OUTDIR
   → Phase 2 鉴权三道门 → config.json
   → 门禁 B → Phase 3 运行时 + 参数矩阵
   → Phase 4 权限树（必要时）→ 重跑 Phase 3
-  → Phase 5 合并报告 + insert_assets批量插入所有发现的服务、端点api资产，无论如何插入时不允许漏掉已发现的资产
+  → Phase 5 合并报告 + insert_components 批量插入所有发现的服务／接口组件，不允许漏掉已发现的组件
 ```
 
 按序勾选；**前一项未完成不得进入下一 Phase**。
@@ -136,7 +136,7 @@ Phase 0 分类 + OUTDIR
 5. [ ] **门禁 B**：调整 runtime 脚本 → [Phase 3](#phase-3--运行时)
 6. [ ] **Phase 3**：depth / coverage / both；确认进壳；参数触发矩阵 → `param_samples.json`
 7. [ ] **Phase 4**（若需要）：权限树 → patch stubs → 重跑 Phase 3 → [Phase 4](#phase-4--权限树还原)
-8. [ ] **Phase 5**：合并产出 + 报告 + `insert_assets` → [Phase 5](#phase-5--合并与报告)
+8. [ ] **Phase 5**：合并产出 + 报告 + `insert_components` → [Phase 5](#phase-5--合并与报告)
 
 ---
 
@@ -373,7 +373,7 @@ stub 检查：外层 `response_code` 与拦截器门一致；flat codes 与 tree
 | `params_merged.json` | 5 | 合并参数字段 + 置信度 |
 | `api_merged.txt` | 5 | `METHOD /path [params] [static\|runtime\|both]` |
 | `site_map.json` | 5 | 路由、API、params、功能点、局限 |
-| **insert_assets** | 5 | 将所有服务、端点资产写入资产库 |
+| **insert_components** | 5 | 将所有服务、接口写入组件库 |
 
 ### 5b — 参数合并
 

@@ -37,23 +37,15 @@ type Component struct {
 	StartedBy      string   `json:"started_by,omitempty"`
 	FirmwareSha256 string   `json:"firmware_sha256,omitempty"`
 	Port           *int     `json:"port,omitempty"`
-	OpenPorts      []PortService `json:"open_ports,omitempty"`
 	Technologies   []string `json:"technologies,omitempty"`
 	Status         string   `json:"status"`
 	Notes          string   `json:"notes,omitempty"`
-	Extra          map[string]any `json:"extra,omitempty"`
 	LastSeen       string   `json:"last_seen"`
 
 	// 任务维度来源（task_component_links），仅按任务查询时填充。
 	TaskSource        string `json:"task_source,omitempty"`
 	TaskSourceSummary string `json:"task_source_summary,omitempty"`
 	TaskSourceNodeID  *int64 `json:"task_source_node_id,omitempty"`
-}
-
-// PortService is one entry in open_ports: {"port":22,"service":"ssh"}.
-type PortService struct {
-	Port    int    `json:"port"`
-	Service string `json:"service,omitempty"`
 }
 
 // ComponentInput is one item accepted by insert_components.
@@ -67,7 +59,6 @@ type ComponentInput struct {
 	StartedBy      string   `json:"started_by"`
 	FirmwareSha256 string   `json:"firmware_sha256"`
 	Port           int      `json:"port"`
-	OpenPorts      []PortService `json:"open_ports"`
 	Technologies   []string `json:"technologies"`
 	Notes          string   `json:"notes"`
 	Status         string   `json:"status"`
@@ -80,16 +71,6 @@ type ComponentFilter struct {
 	Status        string // 状态（精确）
 	TaskID        int64  // >0 时只看该任务
 	Limit, Offset int
-}
-
-// TypeStat 是按组件类型汇总的挖掘进度。
-type TypeStat struct {
-	Type      string `json:"type"`
-	Total     int    `json:"total"`     // 不含 ignored
-	Pending   int    `json:"pending"`
-	Running   int    `json:"running"`
-	Completed int    `json:"completed"`
-	Ignored   int    `json:"ignored"`
 }
 
 // ErrComponentInvalid 表示组件输入不合法。
@@ -129,32 +110,26 @@ func componentCols() string {
 	return `id, type, company_id, array_to_json(task_ids)::text,
        component_name, COALESCE(version,''), COALESCE(vendor,''),
        COALESCE(binary_path,''), COALESCE(config_path,''), COALESCE(started_by,''),
-       COALESCE(firmware_sha256,''), port, array_to_json(open_ports)::text,
+       COALESCE(firmware_sha256,''), port,
        array_to_json(technologies)::text, status, COALESCE(notes,''),
-       extra, last_seen::text`
+       last_seen::text`
 }
 
 // scanComponent 扫描 componentCols() 的列。
 func scanComponent(sc interface{ Scan(...any) error }) (*Component, error) {
 	var (
-		c          Component
-		taskIDs    string
-		openPorts  string
-		techs      string
-		extra      []byte
+		c       Component
+		taskIDs string
+		techs   string
 	)
 	if err := sc.Scan(&c.ID, &c.Type, &c.CompanyID, &taskIDs, &c.ComponentName,
 		&c.Version, &c.Vendor, &c.BinaryPath, &c.ConfigPath, &c.StartedBy,
-		&c.FirmwareSha256, &c.Port, &openPorts, &techs, &c.Status, &c.Notes,
-		&extra, &c.LastSeen); err != nil {
+		&c.FirmwareSha256, &c.Port, &techs, &c.Status, &c.Notes,
+		&c.LastSeen); err != nil {
 		return nil, err
 	}
 	c.TaskIDs = parseIDArray(taskIDs)
-	c.OpenPorts = parsePortServices(openPorts)
 	c.Technologies = parseStringArray(techs)
-	if len(extra) > 0 {
-		_ = json.Unmarshal(extra, &c.Extra)
-	}
 	return &c, nil
 }
 
@@ -193,26 +168,7 @@ func parseStringArray(s string) []string {
 	return v
 }
 
-func parsePortServices(s string) []PortService {
-	if s == "" || s == "null" {
-		return nil
-	}
-	var v []PortService
-	if err := json.Unmarshal([]byte(s), &v); err != nil {
-		return nil
-	}
-	return v
-}
-
 func marshalStringArray(items []string) string {
-	if len(items) == 0 {
-		return "{}"
-	}
-	b, _ := json.Marshal(items)
-	return string(b)
-}
-
-func marshalPortServices(items []PortService) string {
 	if len(items) == 0 {
 		return "{}"
 	}
@@ -286,9 +242,9 @@ func (s *ComponentStore) UpsertComponents(taskIDs []int64, items []ComponentInpu
 		row := q.QueryRow(`
 INSERT INTO components
     (type, task_ids, component_name, version, vendor, binary_path, config_path,
-     started_by, firmware_sha256, port, open_ports, technologies, status, notes)
+     started_by, firmware_sha256, port, technologies, status, notes)
 VALUES ($1, $2::bigint[], $3, NULLIF($4,''), NULLIF($5,''), NULLIF($6,''), NULLIF($7,''),
-        NULLIF($8,''), NULLIF($9,''), NULLIF($10,0), $11::jsonb[], $12::text[], $13, $14)
+        NULLIF($8,''), NULLIF($9,''), NULLIF($10,0), $11::text[], $12, $13)
 ON CONFLICT (COALESCE(firmware_sha256,''), type, component_name, COALESCE(version,''))
 DO UPDATE SET
     version       = COALESCE(NULLIF(EXCLUDED.version,''), components.version),
@@ -297,7 +253,6 @@ DO UPDATE SET
     config_path   = COALESCE(NULLIF(EXCLUDED.config_path,''), components.config_path),
     started_by    = COALESCE(NULLIF(EXCLUDED.started_by,''), components.started_by),
     port          = COALESCE(EXCLUDED.port, components.port),
-    open_ports    = CASE WHEN cardinality(EXCLUDED.open_ports) > 0 THEN EXCLUDED.open_ports ELSE components.open_ports END,
     technologies  = CASE WHEN cardinality(EXCLUDED.technologies) > 0 THEN EXCLUDED.technologies ELSE components.technologies END,
     notes         = CASE WHEN EXCLUDED.notes <> '' THEN EXCLUDED.notes ELSE components.notes END,
     task_ids      = (SELECT array_agg(DISTINCT x) FROM unnest(components.task_ids || EXCLUDED.task_ids) AS x),
@@ -306,7 +261,7 @@ DO UPDATE SET
 RETURNING id, (xmax = 0) AS created`,
 			it.Type, taskIDsArg, it.Name, it.Version, it.Vendor, it.BinaryPath, it.ConfigPath,
 			it.StartedBy, it.FirmwareSha256, it.Port,
-			marshalPortServices(it.OpenPorts), marshalStringArray(it.Technologies),
+			marshalStringArray(it.Technologies),
 			it.Status, it.Notes)
 		if err := row.Scan(&id, &created); err != nil {
 			return inserted, updated, ids, err
@@ -363,7 +318,17 @@ func (s *ComponentStore) ListComponents(f ComponentFilter) ([]*Component, int, e
 		return nil, 0, err
 	}
 	out, err := scanComponents(rows)
-	return out, total, err
+	if err != nil {
+		return nil, 0, err
+	}
+	// 任务视角列表同样要带来源：DSL 分支在 component_dsl.go 里回填，这里补上，
+	// 否则不带 dsl/type 的默认请求（任务详情「组件」页签就是这条）拿不到 task_source*。
+	if f.TaskID > 0 {
+		if err := s.hydrateTaskComponentSources(f.TaskID, out); err != nil {
+			return nil, 0, err
+		}
+	}
+	return out, total, nil
 }
 
 // GetByIDs returns components by primary key.
@@ -383,6 +348,9 @@ func (s *ComponentStore) DeleteByIDs(ids []int64) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	if err := s.purgeFindingRefs(ids); err != nil {
+		return 0, err
+	}
 	res, err := s.q().Exec(`DELETE FROM components WHERE id = ANY($1::bigint[])`, ids)
 	if err != nil {
 		return 0, err
@@ -390,20 +358,66 @@ func (s *ComponentStore) DeleteByIDs(ids []int64) (int64, error) {
 	return res.RowsAffected()
 }
 
-// DeleteByTaskID detaches every component from a task and deletes the ones left orphaned.
-func (s *ComponentStore) DeleteByTaskID(taskID int64) (int64, error) {
-	if taskID <= 0 {
-		return 0, nil
+// purgeFindingRefs 把即将删除的组件 id 从 findings.component_ids 里摘掉。
+// 该列是 jsonb 数组，没有外键，不清理就会留下永久悬空 id（漏洞树会把它算成「未关联」）。
+func (s *ComponentStore) purgeFindingRefs(ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := s.q().Exec(`
+UPDATE findings f
+   SET component_ids = COALESCE((
+        SELECT jsonb_agg(to_jsonb(v::bigint))
+          FROM jsonb_array_elements_text(f.component_ids) AS t(v)
+         WHERE v::bigint <> ALL($1::bigint[])), '[]'::jsonb)
+ WHERE f.component_ids IS NOT NULL
+   AND f.component_ids <> '[]'::jsonb
+   AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(f.component_ids) AS t(v)
+                WHERE v::bigint = ANY($1::bigint[]))`, ids)
+	return err
+}
+
+// AttachComponentsToTask adds a task id to the given components and records provenance.
+func (s *ComponentStore) AttachComponentsToTask(taskID int64, ids []int64, sourceSummary string) (int64, error) {
+	if taskID <= 0 || len(ids) == 0 {
+		return 0, fmt.Errorf("%w: task_id/组件 id 不能为空", ErrComponentInvalid)
 	}
 	q := s.q()
-	if _, err := q.Exec(`UPDATE components SET task_ids = array_remove(task_ids, $1) WHERE $1 = ANY(task_ids)`, taskID); err != nil {
-		return 0, err
-	}
-	res, err := q.Exec(`DELETE FROM components WHERE cardinality(task_ids) = 0`)
+	res, err := q.Exec(`UPDATE components SET task_ids = (
+        SELECT array_agg(DISTINCT x) FROM unnest(task_ids || $1::bigint[]) AS x
+    ), updated_at = now() WHERE id = ANY($2::bigint[])`, []int64{taskID}, ids)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		if _, err := q.Exec(`
+INSERT INTO task_component_links(task_id, component_id, source, source_summary)
+SELECT $1, unnest($2::bigint[]), 'manual', $3
+ON CONFLICT (task_id, component_id) DO UPDATE SET source = 'manual', source_summary = EXCLUDED.source_summary`,
+			taskID, ids, sourceSummary); err != nil {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+// DetachComponentFromTask removes one component from a task.
+func (s *ComponentStore) DetachComponentFromTask(taskID, componentID int64) (bool, error) {
+	q := s.q()
+	res, err := q.Exec(`UPDATE components SET task_ids = array_remove(task_ids, $1), updated_at = now()
+WHERE id = $2 AND $1 = ANY(task_ids)`, taskID, componentID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return false, nil
+	}
+	if _, err := q.Exec(`DELETE FROM task_component_links WHERE task_id=$1 AND component_id=$2`, taskID, componentID); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // CountsByType returns component counts per type (optionally scoped to a task).
@@ -432,131 +446,63 @@ func (s *ComponentStore) CountsByType(taskID int64) (map[string]int, error) {
 	return out, rows.Err()
 }
 
-// ComponentStats returns per-type progress for a task (denominator excludes ignored).
-func (s *ComponentStore) ComponentStats(taskID int64) ([]TypeStat, error) {
-	query := `SELECT type,
-       count(*) FILTER (WHERE status <> 'ignored') AS total,
-       count(*) FILTER (WHERE status = 'pending')   AS pending,
-       count(*) FILTER (WHERE status = 'running')   AS running,
-       count(*) FILTER (WHERE status = 'completed') AS completed,
-       count(*) FILTER (WHERE status = 'ignored')   AS ignored
-FROM components`
-	var args []any
-	if taskID > 0 {
-		args = append(args, taskID)
-		query += ` WHERE $1 = ANY(task_ids)`
-	}
-	query += ` GROUP BY type ORDER BY type`
-	rows, err := s.q().Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []TypeStat
-	for rows.Next() {
-		var t TypeStat
-		if err := rows.Scan(&t.Type, &t.Total, &t.Pending, &t.Running, &t.Completed, &t.Ignored); err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
-}
-
-// SetComponentStatus updates one component's mining status.
-func (s *ComponentStore) SetComponentStatus(id int64, status string) error {
-	st, ok := normalizeComponentStatus(status)
-	if !ok {
-		return fmt.Errorf("%w: status=%q 不在 %v 内", ErrComponentInvalid, status, ComponentStatuses)
-	}
-	res, err := s.q().Exec(`UPDATE components SET status=$2, updated_at=now() WHERE id=$1`, id, st)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("组件 %d 不存在", id)
-	}
-	return nil
-}
-
-// AttachComponentsToTask adds a task id to the given components and records provenance.
-func (s *ComponentStore) AttachComponentsToTask(taskID int64, ids []int64, sourceSummary string) (int64, error) {
-	if taskID <= 0 || len(ids) == 0 {
-		return 0, fmt.Errorf("%w: task_id/组件 id 不能为空", ErrComponentInvalid)
-	}
-	q := s.q()
-	res, err := q.Exec(`UPDATE components SET task_ids = (
-        SELECT array_agg(DISTINCT x) FROM unnest(task_ids || $1::bigint[]) AS x
-    ), updated_at = now() WHERE id = ANY($2::bigint[])`, []int64{taskID}, ids)
-	if err != nil {
-		return 0, err
-	}
-	n, _ := res.RowsAffected()
-	if n > 0 {
-		if _, err := q.Exec(`
-INSERT INTO task_component_links(task_id, component_id, source, source_summary)
-SELECT $1, unnest($2::bigint[]), 'manual', $3
-ON CONFLICT (task_id, component_id) DO UPDATE SET source_summary = EXCLUDED.source_summary`,
-			taskID, ids, sourceSummary); err != nil {
-			return n, err
-		}
-	}
-	return n, nil
-}
-
-// DetachComponentFromTask removes one component from a task.
-func (s *ComponentStore) DetachComponentFromTask(taskID, componentID int64) (bool, error) {
-	q := s.q()
-	res, err := q.Exec(`UPDATE components SET task_ids = array_remove(task_ids, $1), updated_at = now()
-WHERE id = $2 AND $1 = ANY(task_ids)`, taskID, componentID)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return false, nil
-	}
-	if _, err := q.Exec(`DELETE FROM task_component_links WHERE task_id=$1 AND component_id=$2`, taskID, componentID); err != nil {
-		return true, err
-	}
-	return true, nil
-}
-
 // SetTaskComponentSource records how a task↔component association was obtained.
 func (s *ComponentStore) SetTaskComponentSource(taskID, componentID int64, source, summary string, nodeID *int64) error {
+	return s.SetTaskComponentSources(taskID, []int64{componentID}, source, summary, nodeID)
+}
+
+// SetTaskComponentSources 批量写任务↔组件的来源行（一条 SQL，避免逐条往返）。
+// 只覆盖「自动来源」：components.task_ids 的触发器会先写一行 source='system'，
+// agent 登记时把它升级成 agent；而人工加入（manual）/ 组件 API（auto）等更可信的来源保持不动，
+// 否则 worker 每次登记（含更新已有组件）都会把人工标注改写掉。
+func (s *ComponentStore) SetTaskComponentSources(taskID int64, componentIDs []int64, source, summary string, nodeID *int64) error {
+	if taskID <= 0 || len(componentIDs) == 0 {
+		return nil
+	}
 	_, err := s.q().Exec(`
 INSERT INTO task_component_links(task_id, component_id, source, source_summary, source_node_id)
-VALUES ($1, $2, NULLIF($3,''), NULLIF($4,''), $5)
+SELECT $1, u.id, NULLIF($3,''), NULLIF($4,''), $5
+  FROM unnest($2::bigint[]) AS u(id)
+ WHERE u.id > 0
 ON CONFLICT (task_id, component_id) DO UPDATE
-   SET source = COALESCE(NULLIF(EXCLUDED.source,''), task_component_links.source),
-       source_summary = COALESCE(NULLIF(EXCLUDED.source_summary,''), task_component_links.source_summary),
-       source_node_id = COALESCE(EXCLUDED.source_node_id, task_component_links.source_node_id),
+   SET source = CASE WHEN COALESCE(task_component_links.source,'') IN ('','agent','system')
+                     THEN COALESCE(EXCLUDED.source, task_component_links.source)
+                     ELSE task_component_links.source END,
+       source_summary = CASE WHEN COALESCE(task_component_links.source,'') IN ('','agent','system')
+                     THEN COALESCE(EXCLUDED.source_summary, task_component_links.source_summary)
+                     ELSE task_component_links.source_summary END,
+       source_node_id = CASE WHEN COALESCE(task_component_links.source,'') IN ('','agent','system')
+                     THEN COALESCE(EXCLUDED.source_node_id, task_component_links.source_node_id)
+                     ELSE task_component_links.source_node_id END,
        updated_at = now()`,
-		taskID, componentID, source, summary, nodeID)
+		taskID, componentIDs, source, summary, nodeID)
 	return err
 }
 
-// IntentComponent 是某意图（探索节点）锚定到的组件。
+// IntentComponent 是某条意图（探索节点）锚定到的组件。
+// 前端用它显示「当前 worker 意图正在挖哪些组件」，所以带 intent_id 与渲染好的 label。
 type IntentComponent struct {
-	ID            int64  `json:"id"`
+	IntentID      int64  `json:"intent_id"`
 	ComponentID   int64  `json:"component_id"`
 	Type          string `json:"type"`
 	ComponentName string `json:"component_name"`
 	Version       string `json:"version,omitempty"`
 	Status        string `json:"status"`
+	Label         string `json:"label"` // 组件名 + 版本（版本为空则只有名字）
 }
 
-// IntentComponents returns the components anchored to a task's exploration nodes.
+// IntentComponents returns the components each intent of a task is anchored to.
+// 一个意图可以锚定多个组件，一个组件也可能被多条意图锚定，按 (intent, component) 去重。
 func (s *ComponentStore) IntentComponents(taskID int64) ([]IntentComponent, error) {
 	rows, err := s.q().Query(`
-SELECT DISTINCT c.id, c.type, c.component_name, COALESCE(c.version,''), c.status
+SELECT DISTINCT n.id, c.id, c.type, c.component_name, COALESCE(c.version,''), c.status
 FROM exploration_anchors a
-JOIN components c ON c.id = a.component_id
 JOIN exploration_nodes n ON n.id = a.node_id
+JOIN components c ON c.id = a.component_id
 JOIN explorations e ON e.id = n.exploration_id
 JOIN tasks t ON t.exploration_id = e.id
-WHERE t.id = $1
-ORDER BY c.type, c.component_name`, taskID)
+WHERE t.id = $1 AND n.kind = 'intent'
+ORDER BY n.id, c.type, c.component_name`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -564,11 +510,66 @@ ORDER BY c.type, c.component_name`, taskID)
 	var out []IntentComponent
 	for rows.Next() {
 		var it IntentComponent
-		if err := rows.Scan(&it.ID, &it.Type, &it.ComponentName, &it.Version, &it.Status); err != nil {
+		if err := rows.Scan(&it.IntentID, &it.ComponentID, &it.Type, &it.ComponentName, &it.Version, &it.Status); err != nil {
 			return nil, err
 		}
-		it.ComponentID = it.ID
+		it.Label = it.ComponentName
+		if it.Version != "" {
+			it.Label = it.ComponentName + " " + it.Version
+		}
 		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// FirmwareCounts 按固件 sha256 汇总组件数（空 key = 未归属固件），供组件页的固件筛选。
+func (s *ComponentStore) FirmwareCounts(taskID int64) (map[string]int, error) {
+	query := `SELECT COALESCE(firmware_sha256,''), count(*) FROM components`
+	args := []any{}
+	if taskID > 0 {
+		args = append(args, taskID)
+		query += ` WHERE $1 = ANY(task_ids)`
+	}
+	query += ` GROUP BY 1`
+	rows, err := s.q().Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var sha string
+		var n int
+		if err := rows.Scan(&sha, &n); err != nil {
+			return nil, err
+		}
+		out[sha] = n
+	}
+	return out, rows.Err()
+}
+
+// StatusCounts 按挖掘状态汇总组件数（可限定任务），供任务详情「组件」页的进度按钮使用。
+func (s *ComponentStore) StatusCounts(taskID int64) (map[string]int, error) {
+	query := `SELECT status, count(*) FROM components`
+	args := []any{}
+	if taskID > 0 {
+		args = append(args, taskID)
+		query += ` WHERE $1 = ANY(task_ids)`
+	}
+	query += ` GROUP BY status`
+	rows, err := s.q().Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{"pending": 0, "running": 0, "completed": 0, "ignored": 0}
+	for rows.Next() {
+		var st string
+		var n int
+		if err := rows.Scan(&st, &n); err != nil {
+			return nil, err
+		}
+		out[st] = n
 	}
 	return out, rows.Err()
 }

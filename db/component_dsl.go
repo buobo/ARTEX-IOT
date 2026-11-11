@@ -481,7 +481,7 @@ target AS (
 )`
 
 // CountDSL 返回匹配 DSL 的组件总数（分页用）。taskID>0 时只统计该任务内的组件。
-func (s *ComponentStore) CountDSL(dsl, typ string, taskID int64) (int, error) {
+func (s *ComponentStore) CountDSL(dsl, typ, status string, taskID int64) (int, error) {
 	node, err := ParseDSL(dsl)
 	if err != nil {
 		return 0, err
@@ -494,6 +494,10 @@ func (s *ComponentStore) CountDSL(dsl, typ string, taskID int64) (int, error) {
 		args = append(args, typ)
 		where += fmt.Sprintf(" AND type = $%d", len(args))
 	}
+	if status != "" {
+		args = append(args, status)
+		where += fmt.Sprintf(" AND status = $%d", len(args))
+	}
 	if taskID > 0 {
 		args = append(args, taskID)
 		where += fmt.Sprintf(" AND $%d = ANY(task_ids)", len(args))
@@ -504,7 +508,7 @@ func (s *ComponentStore) CountDSL(dsl, typ string, taskID int64) (int, error) {
 }
 
 // QueryDSL 执行 DSL 查询。typ 为可选的组件类型过滤；taskID>0 时限定在该任务内。
-func (s *ComponentStore) QueryDSL(dsl, typ string, taskID int64, limit, offset int) ([]*Component, error) {
+func (s *ComponentStore) QueryDSL(dsl, typ, status string, taskID int64, limit, offset int) ([]*Component, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -522,6 +526,10 @@ func (s *ComponentStore) QueryDSL(dsl, typ string, taskID int64, limit, offset i
 	if typ != "" {
 		args = append(args, typ)
 		where += fmt.Sprintf(" AND type = $%d", len(args))
+	}
+	if status != "" {
+		args = append(args, status)
+		where += fmt.Sprintf(" AND status = $%d", len(args))
 	}
 	if taskID > 0 {
 		args = append(args, taskID)
@@ -548,9 +556,9 @@ func (s *ComponentStore) QueryDSL(dsl, typ string, taskID int64, limit, offset i
 
 // QueryDSLInScope 是限定在「本任务组件」内的 QueryDSL（成员判定 = task_ids 含该任务）。
 // taskID<=0 时退化为全局查询。
-func (s *ComponentStore) QueryDSLInScope(dsl, typ string, taskID int64, limit, offset int) ([]*Component, error) {
+func (s *ComponentStore) QueryDSLInScope(dsl, typ, status string, taskID int64, limit, offset int) ([]*Component, error) {
 	if taskID <= 0 {
-		return s.QueryDSL(dsl, typ, 0, limit, offset)
+		return s.QueryDSL(dsl, typ, status, 0, limit, offset)
 	}
 	if limit <= 0 {
 		limit = 50
@@ -571,6 +579,10 @@ func (s *ComponentStore) QueryDSLInScope(dsl, typ string, taskID int64, limit, o
 	if typ != "" {
 		args = append(args, typ)
 		where += fmt.Sprintf(" AND type = $%d", len(args))
+	}
+	if status != "" {
+		args = append(args, status)
+		where += fmt.Sprintf(" AND status = $%d", len(args))
 	}
 	args = append(args, limit, offset)
 	q := `WITH ` + componentScopeTargetCTE + ` ` + componentSelectCols +

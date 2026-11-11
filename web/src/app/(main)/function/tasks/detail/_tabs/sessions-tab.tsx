@@ -54,11 +54,11 @@ import { api, sseUrl } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { MOCK } from "@/lib/mock/enabled";
 import { isBtwCommand } from "@/lib/side-questions";
-import { taskAssetSourceLabel, taskAssetTypeLabel } from "@/lib/task-assets";
+import { COMPONENT_STATUS_LABELS, componentTypeLabel } from "@/lib/task-components";
 import type {
   Activity,
   ChatAttachment,
-  IntentAsset,
+  IntentComponent,
   InterceptApprovalRow,
   Session,
   SessionStatus,
@@ -437,39 +437,39 @@ function SessionItem({
   );
 }
 
-function truncateWorkerAssetLabel(value: string, maxChars = 30): string {
+function truncateWorkerComponentLabel(value: string, maxChars = 30): string {
   const chars = Array.from(value.trim());
   if (chars.length <= maxChars) return chars.join("");
   return `${chars.slice(0, Math.max(0, maxChars - 1)).join("")}…`;
 }
 
-function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
-  const displayAssets = assets.filter(
-    (asset) => asset.type === "root_domain" || asset.type === "subdomain" || asset.type === "ip",
-  );
-  if (displayAssets.length === 0) return null;
+function WorkerComponentBadge({ components }: { components: IntentComponent[] }) {
+  // 只展示「具体组件」这一层；类型分组不占位。
+  const displayComponents = components;
+  if (displayComponents.length === 0) return null;
 
-  const first = displayAssets[0];
-  const firstRawLabel = first.label.trim() || `#${first.asset_id}`;
-  const firstLabel = truncateWorkerAssetLabel(firstRawLabel);
+  const first = displayComponents[0];
+  const firstRawLabel = (first.label || first.component_name || `#${first.component_id}`).trim();
+  const firstLabel = truncateWorkerComponentLabel(firstRawLabel);
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <Badge variant="outline" className="max-w-60 shrink-0 font-normal" title={firstRawLabel}>
-          <span className="truncate">当前资产：{firstLabel}</span>
-          {displayAssets.length > 1 && <span className="shrink-0 tabular-nums">+{displayAssets.length - 1}</span>}
+          <span className="truncate">当前组件：{firstLabel}</span>
+          {displayComponents.length > 1 && <span className="shrink-0 tabular-nums">+{displayComponents.length - 1}</span>}
         </Badge>
       </TooltipTrigger>
       <TooltipContent side="right" align="start" className="max-w-sm">
         <div className="flex flex-col gap-2">
-          {displayAssets.map((asset) => (
-            <div key={`${asset.intent_id}-${asset.asset_id}`} className="min-w-0">
-              <div className="break-all font-mono text-xs">{asset.label.trim() || `#${asset.asset_id}`}</div>
-              <div className="mt-0.5 text-xs text-muted-foreground">
-                {taskAssetTypeLabel(asset.type)} · {taskAssetSourceLabel(asset.source)}
-                {asset.inherited ? ` · 来源任务 #${asset.source_task_id}` : ""}
+          {displayComponents.map((component) => (
+            <div key={`${component.intent_id}-${component.component_id}`} className="min-w-0">
+              <div className="break-all font-mono text-xs">
+                {(component.label || component.component_name || `#${component.component_id}`).trim()}
               </div>
-              <div className="mt-0.5 [overflow-wrap:anywhere] text-xs">{asset.source_summary}</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                {componentTypeLabel(component.type)}
+                {component.status ? ` · ${COMPONENT_STATUS_LABELS[component.status] ?? component.status}` : ""}
+              </div>
             </div>
           ))}
         </div>
@@ -523,7 +523,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [store, setStore] = React.useState<SessionStore>({});
   // Worker sessions derived from exploration intents (paged past the old 300 cap).
   const [intents, setIntents] = React.useState<TaskNode[]>([]);
-  const [intentAssets, setIntentAssets] = React.useState<IntentAsset[]>([]);
+  const [intentComponents, setIntentComponents] = React.useState<IntentComponent[]>([]);
   const [olderIntents, setOlderIntents] = React.useState<TaskNode[]>([]);
   const [firstIntentsHasMore, setFirstIntentsHasMore] = React.useState(false);
   const [olderIntentsHasMore, setOlderIntentsHasMore] = React.useState(false);
@@ -561,7 +561,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   }
 
   // Start a fresh main-agent session: only the segment counter advances — the task's
-  // graph/assets/goal are untouched, so the agent continues over the same task with a
+  // graph/components/goal are untouched, so the agent continues over the same task with a
   // clean context. The old segment stays as read-only history you can switch back to.
   async function createMainSession() {
     if (creatingMain) return;
@@ -878,7 +878,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   React.useEffect(() => {
     setStore({});
     setIntents([]);
-    setIntentAssets([]);
+    setIntentComponents([]);
     setOlderIntents([]);
     setFirstIntentsHasMore(false);
     setOlderIntentsHasMore(false);
@@ -1051,9 +1051,9 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     let active = true;
     const load = () =>
       api
-        .taskIntentAssets(taskId)
-        .then((assets) => {
-          if (active) setIntentAssets(assets);
+        .taskIntentComponents(taskId)
+        .then((components) => {
+          if (active) setIntentComponents(components);
         })
         .catch(() => {
           // The next poll retries; Worker controls and transcripts remain available.
@@ -1135,16 +1135,16 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     for (const n of intents) byId.set(n.id, n); // fresh poll wins over older snapshot
     return [...byId.values()].sort((a, b) => Number(b.id) - Number(a.id));
   }, [intents, olderIntents]);
-  const intentAssetsByID = React.useMemo(() => {
-    const grouped = new Map<string, IntentAsset[]>();
-    for (const asset of intentAssets) {
-      const key = String(asset.intent_id);
+  const intentComponentsByID = React.useMemo(() => {
+    const grouped = new Map<string, IntentComponent[]>();
+    for (const component of intentComponents) {
+      const key = String(component.intent_id);
       const current = grouped.get(key);
-      if (current) current.push(asset);
-      else grouped.set(key, [asset]);
+      if (current) current.push(component);
+      else grouped.set(key, [component]);
     }
     return grouped;
-  }, [intentAssets]);
+  }, [intentComponents]);
 
   const workerSessions = React.useMemo(() => allIntents.map(intentToSession), [allIntents]);
   const intentsHasMore = hasLoadedOlderIntentsPage ? olderIntentsHasMore : firstIntentsHasMore;
@@ -1558,8 +1558,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     return llmResolutions.worker;
   };
   const activeResolution = resolutionForSession(active);
-  const activeAssets =
-    active.role === "worker" && active.intent_id ? intentAssetsByID.get(active.intent_id) : undefined;
+  const activeComponents =
+    active.role === "worker" && active.intent_id ? intentComponentsByID.get(active.intent_id) : undefined;
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -1778,7 +1778,9 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   </TooltipContent>
                 </Tooltip>
               )}
-              {activeAssets && activeAssets.length > 0 && <WorkerAssetBadge assets={activeAssets} />}
+              {activeComponents && activeComponents.length > 0 && (
+                <WorkerComponentBadge components={activeComponents} />
+              )}
               {active.inherited && active.source_task_id && (
                 <Badge variant="outline">来源任务 #{active.source_task_id} · 只读历史</Badge>
               )}
@@ -1946,7 +1948,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     rows={1}
                     aria-label="给主 Agent 发消息"
                     placeholder={
-                      mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用漏洞、资产等…"
+                      mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用漏洞、组件等…"
                     }
                     value={input}
                     disabled={sending}
@@ -2188,7 +2190,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             <AlertDialogHeader>
               <AlertDialogTitle>开启新会话？</AlertDialogTitle>
               <AlertDialogDescription className="break-words whitespace-normal">
-                当前会话会被归档（可随时切回），主 Agent 将以干净的上下文继续。任务的图谱、资产、目标不受影响。
+                当前会话会被归档（可随时切回），主 Agent 将以干净的上下文继续。任务的图谱、组件、目标不受影响。
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

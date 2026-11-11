@@ -75,9 +75,9 @@ function Row({
           </div>
         </button>
         <Badge variant="outline">流量证据 {f.traffic_count ?? 0} 条</Badge>
-        {f.assets && f.assets.length > 0 && (
+        {f.components && f.components.length > 0 && (
           <div className="hidden shrink-0 flex-wrap justify-end gap-1 sm:flex">
-            {f.assets.slice(0, 2).map((a) => (
+            {f.components.slice(0, 2).map((a) => (
               <code
                 key={a.id}
                 className="max-w-[10rem] truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
@@ -86,7 +86,7 @@ function Row({
                 {a.label}
               </code>
             ))}
-            {f.assets.length > 2 && <span className="text-xs text-muted-foreground">+{f.assets.length - 2}</span>}
+            {f.components.length > 2 && <span className="text-xs text-muted-foreground">+{f.components.length - 2}</span>}
           </div>
         )}
         {f.finding_id && !f.inherited ? (

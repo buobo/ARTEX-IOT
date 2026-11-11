@@ -11,7 +11,7 @@ import {
 import type {
   Activity,
   ArchiveBatchItem,
-  Asset,
+  Component,
   BatchControlItem,
   Company,
   CompanyScopeRule,
@@ -20,12 +20,12 @@ import type {
   FindingRetest,
   FindingTraffic,
   FindingTrafficBinding,
-  IntentAsset,
+  IntentComponent,
   ScopeRow,
   Task,
   TaskArchive,
-  TaskAssetMutation,
-  TaskAssetScopeMutation,
+  TaskComponentMutation,
+  TaskComponentScopeMutation,
   TaskCategory,
   TaskLLMResolution,
   TaskScopeRow,
@@ -203,21 +203,24 @@ function stopMockRetest(conversationID: number) {
 }
 const mockIntents = structuredClone(D.intents);
 const mockCompanies = structuredClone(D.companies);
-const mockAssets = structuredClone(D.assets);
+const mockComponents = structuredClone(D.components);
 const mockActivity = structuredClone(D.activity);
 type MockTaskArchiveSnapshot = {
   task: Task;
   numericTaskID: number;
   assetIDs: number[];
-  assetSources: Array<[number, MockTaskAssetSource]>;
+  assetSources: Array<[number, MockTaskComponentSource]>;
 };
 type MockTaskArchive = TaskArchive & { snapshot: MockTaskArchiveSnapshot };
 const mockTaskArchives: MockTaskArchive[] = [];
 let nextMockTaskArchiveID = 1;
 const mockTaskAssetIDs = new Map(D.tasks.map((task, index) => [task.id, index + 1]));
 const mockTaskScopes = new Map<string, TaskScopeRow[]>();
-type MockTaskAssetSource = Pick<Asset, "task_source" | "task_source_summary" | "task_source_node_id">;
-const mockTaskAssetSources = new Map<string, MockTaskAssetSource>();
+type MockTaskComponentSource = Pick<
+  Component,
+  "task_source" | "task_source_summary" | "task_source_node_id"
+>;
+const mockTaskAssetSources = new Map<string, MockTaskComponentSource>();
 let nextMockTaskAssetID = D.tasks.length + 1;
 let mockActiveTask = D.ACTIVE_TASK;
 
@@ -278,8 +281,8 @@ function mockArchiveTask(taskID: string): MockTaskArchive {
   if (dependent) throw new Error(`任务被未归档任务 #${dependent.id} 直接继承，暂不能归档`);
 
   const numericTaskID = mockArchiveTaskID(taskID);
-  const assetIDs = mockAssets.filter((asset) => asset.task_ids.includes(numericTaskID)).map((asset) => asset.id);
-  const assetSources: Array<[number, MockTaskAssetSource]> = [];
+  const assetIDs = mockComponents.filter((asset) => asset.task_ids.includes(numericTaskID)).map((asset) => asset.id);
+  const assetSources: Array<[number, MockTaskComponentSource]> = [];
   for (const assetID of assetIDs) {
     const source = mockTaskAssetSources.get(mockTaskAssetSourceKey(taskID, assetID));
     if (source) assetSources.push([assetID, structuredClone(source)]);
@@ -306,7 +309,7 @@ function mockArchiveTask(taskID: string): MockTaskArchive {
     source_task_ids: (task.source_task_ids ?? []).map(mockArchiveTaskID).filter((id) => id > 0),
     remaining_timeout_seconds: 0,
     data_counts: {
-      assets: assetIDs.length,
+      components: assetIDs.length,
       findings: findings.length,
       llm_records: llmRecords.length,
     },
@@ -347,8 +350,8 @@ function mockArchiveTask(taskID: string): MockTaskArchive {
     archive.compressed_size = Math.max(1024, Math.round(archive.original_size * 0.32));
     const index = mockTasks.findIndex((item) => item.id === taskID);
     if (index >= 0) mockTasks.splice(index, 1);
-    for (const asset of mockAssets) asset.task_ids = asset.task_ids.filter((id) => id !== numericTaskID);
-    deleteMockTaskAssetSources(taskID);
+    for (const asset of mockComponents) asset.task_ids = asset.task_ids.filter((id) => id !== numericTaskID);
+    deleteMockTaskComponentSources(taskID);
     if (mockActiveTask === taskID) {
       mockActiveTask = mockTasks[0]?.id ?? "";
       for (const item of mockTasks) item.active = item.id === mockActiveTask;
@@ -379,12 +382,12 @@ function mockRestoreArchive(archive: MockTaskArchive): void {
     if (!mockTasks.some((task) => task.id === restored.id)) mockTasks.push(restored);
     mockTaskAssetIDs.set(restored.id, archive.snapshot.numericTaskID);
     for (const assetID of archive.snapshot.assetIDs) {
-      const asset = mockAssets.find((candidate) => candidate.id === assetID);
+      const asset = mockComponents.find((candidate) => candidate.id === assetID);
       if (asset && !asset.task_ids.includes(archive.snapshot.numericTaskID)) {
         asset.task_ids.push(archive.snapshot.numericTaskID);
       }
     }
-    for (const [assetID, source] of archive.snapshot.assetSources) setMockTaskAssetSource(restored.id, assetID, source);
+    for (const [assetID, source] of archive.snapshot.assetSources) setMockTaskComponentSource(restored.id, assetID, source);
     const index = mockTaskArchives.indexOf(archive);
     if (index >= 0) mockTaskArchives.splice(index, 1);
     sortMockTasks();
@@ -414,16 +417,16 @@ function mockDeleteArchive(archive: MockTaskArchive): void {
   }, 450);
 }
 
-function setMockTaskAssetSource(taskID: string, assetID: number, source: MockTaskAssetSource) {
+function setMockTaskComponentSource(taskID: string, assetID: number, source: MockTaskComponentSource) {
   mockTaskAssetSources.set(mockTaskAssetSourceKey(taskID, assetID), source);
 }
 
-function mockAssetForTask(taskID: string, asset: Asset): Asset {
-  const source = mockTaskAssetSources.get(mockTaskAssetSourceKey(taskID, asset.id));
-  return source ? { ...asset, ...source } : asset;
+function mockComponentForTask(taskID: string, component: Component): Component {
+  const source = mockTaskAssetSources.get(mockTaskAssetSourceKey(taskID, component.id));
+  return source ? { ...component, ...source } : component;
 }
 
-function deleteMockTaskAssetSources(taskID: string, assetID?: number) {
+function deleteMockTaskComponentSources(taskID: string, assetID?: number) {
   if (assetID !== undefined) {
     mockTaskAssetSources.delete(mockTaskAssetSourceKey(taskID, assetID));
     return;
@@ -440,16 +443,16 @@ function mockTaskAssetID(taskID: string): number | undefined {
   return mockTaskAssetIDs.get(taskID);
 }
 
-function mockAssetCounts(taskID?: string | null): Record<string, number> {
+function mockComponentCounts(taskID?: string | null): Record<string, number> {
   const numericTaskID = taskID ? mockTaskAssetID(taskID) : undefined;
-  return mockAssets.reduce<Record<string, number>>((counts, asset) => {
+  return mockComponents.reduce<Record<string, number>>((counts, asset) => {
     if (taskID && (numericTaskID === undefined || !asset.task_ids.includes(numericTaskID))) return counts;
     counts[asset.type] = (counts[asset.type] ?? 0) + 1;
     return counts;
   }, {});
 }
 
-function mockAssetMatchesDSL(asset: Asset, dsl: string): boolean {
+function mockComponentMatchesDSL(component: Component, dsl: string): boolean {
   const query = dsl
     .replaceAll(/[()"]/g, " ")
     .replaceAll(/\b(?:AND|OR)\b/gi, " ")
@@ -457,12 +460,12 @@ function mockAssetMatchesDSL(asset: Asset, dsl: string): boolean {
     .trim()
     .toLowerCase();
   if (!query) return true;
-  const haystack = JSON.stringify(asset).toLowerCase();
+  const haystack = JSON.stringify(component).toLowerCase();
   return query.split(/\s+/).every((term) => haystack.includes(term));
 }
 
-// mockFilterFindings 应用发现页的公共筛选(严重度/状态/类型/任务/关键词),资产
-// 子树筛选另走 mockApplyAssetScope —— 与后端 FindingFilter.where() 的分工一致。
+// mockFilterFindings 应用发现页的公共筛选(严重度/状态/类型/任务/关键词),组件
+// 子树筛选另走 mockApplyComponentScope —— 与后端 FindingFilter.where() 的分工一致。
 function mockFilterFindings(q: URLSearchParams): (typeof mockFindings)[number][] {
   let list = mockFindings.filter((finding) => mockFindingMatchesQuery(finding, q.get("q")));
   const severity = q.get("severity");
@@ -487,264 +490,101 @@ function mockFindingMatchesQuery(finding: (typeof mockFindings)[number], query: 
   );
 }
 
-// ── 「按资产」视图 ────────────────────────────────────────────────────────────
-// 后端把树建在 db/finding_assets.go 里(只收有发现的资产 + 逐层补齐祖先,计数沿
-// 祖先链去重累加)。这里用同一套父子优先级在内存里重放一遍,让 demo 模式的层级、
-// 计数、子树筛选与真后端保持一致。
+// ── 「按组件」视图 ────────────────────────────────────────────────────────────
+// 后端把树建在 db/finding_assets.go 里：两层，组件类型 → 组件，只收有发现的组件。
+// 这里用同一口径在内存里重放一遍，让 demo 模式的层级与计数跟真后端一致。
 
-const UNASSIGNED_ASSET = "__none__";
+const UNASSIGNED_COMPONENT = "__none__";
 
-function mockAssetLabel(asset: (typeof mockAssets)[number]): string {
-  // 没有 URL 的服务补端口,否则标签会和宿主 IP/域名那行完全一样(与后端一致)。
-  if (asset.type === "service" && !asset.url) {
-    const host = asset.domain || asset.ip;
-    if (host && asset.port) return `${host}:${asset.port}`;
-  }
-  return asset.url || asset.domain || asset.ip || asset.app_name || `#${asset.id}`;
-}
-
-// mockAssetHost 与后端 hostPortOf 一致:优先 domain,其次 URL 里的 host,最后 ip。
-function mockAssetHost(asset: (typeof mockAssets)[number]): { host: string; port: number } {
-  let host = asset.domain ?? "";
-  let port = asset.port ?? 0;
-  if (!host && asset.url) {
-    try {
-      const url = new URL(asset.url);
-      host = url.hostname.replace(/^\[|\]$/g, "");
-      if (!port) port = Number(url.port) || (url.protocol === "https:" ? 443 : 80);
-    } catch {
-      // 非法 URL 就退回 ip。
-    }
-  }
-  if (!host) host = asset.ip ?? "";
-  return { host, port };
-}
-
-interface MockAssetTreeNode {
+interface MockComponentTreeNode {
   key: string;
-  parent?: string;
-  kind: string;
+  kind: string; // 分组节点=组件类型名（web/mqtt/…），叶子="component"，未关联="none"
   label: string;
-  asset_id?: number;
-  company_id?: number;
-  self: number;
-  total: number;
-  critical: number;
-  high: number;
-  medium: number;
-  low: number;
-  last_found_at: string;
+  component_id?: number;
+  finding_count: number;
+  children?: MockComponentTreeNode[];
 }
 
-// mockBuildAssetTree 从一批(已按其它条件筛过的)发现构建资产树。
-function mockBuildAssetTree(list: (typeof mockFindings)[number][]): MockAssetTreeNode[] {
-  const hit = new Set<number>();
+// mockBuildComponentTree 从一批(已按其它条件筛过的)发现构建组件树。
+function mockBuildComponentTree(list: (typeof mockFindings)[number][]): MockComponentTreeNode[] {
+  const hit = new Map<number, number>(); // component id → 命中漏洞数
+  let unassigned = 0;
   for (const finding of list) {
-    for (const ref of finding.assets ?? []) hit.add(Number(ref.id));
+    const refs = finding.components ?? [];
+    if (refs.length === 0) unassigned += 1;
+    for (const ref of refs) hit.set(Number(ref.id), (hit.get(Number(ref.id)) ?? 0) + 1);
   }
 
-  // 收集命中的资产 + 逐层补齐祖先(宿主 service / 子域名 / IP / 根域名)。
-  const picked = new Map<number, (typeof mockAssets)[number]>();
-  for (const asset of mockAssets) if (hit.has(asset.id)) picked.set(asset.id, asset);
-  for (let round = 0; round < 4; round++) {
-    const before = picked.size;
-    for (const asset of [...picked.values()]) {
-      const { host } = mockAssetHost(asset);
-      const wanted = mockAssets.filter((candidate) => {
-        if (picked.has(candidate.id)) return false;
-        if (asset.type === "endpoint" && candidate.type === "service") {
-          return mockAssetHost(candidate).host === host;
-        }
-        if (asset.type === "service" || asset.type === "endpoint") {
-          return (
-            (candidate.type === "subdomain" && candidate.domain === host) ||
-            (candidate.type === "ip" && candidate.ip === host)
-          );
-        }
-        if (asset.type === "subdomain") {
-          return candidate.type === "root_domain" && candidate.domain === asset.root_domain;
-        }
-        return false;
-      });
-      for (const candidate of wanted) picked.set(candidate.id, candidate);
-    }
-    if (picked.size === before) break;
+  const byType = new Map<string, MockComponentTreeNode[]>();
+  for (const [id, count] of hit) {
+    const component = mockComponents.find((candidate) => candidate.id === id);
+    if (!component) continue;
+    const leaf: MockComponentTreeNode = {
+      key: `a:${id}`,
+      kind: "component",
+      label: component.version ? `${component.component_name} ${component.version}` : component.component_name,
+      component_id: id,
+      finding_count: count,
+    };
+    byType.set(component.type, [...(byType.get(component.type) ?? []), leaf]);
   }
 
-  const nodes = new Map<string, MockAssetTreeNode>();
-  const parentOf = new Map<string, string>();
-  const key = (id: number) => `a:${id}`;
-  for (const asset of picked.values()) {
-    nodes.set(key(asset.id), {
-      key: key(asset.id),
-      kind: asset.type,
-      label: mockAssetLabel(asset),
-      asset_id: asset.id,
-      company_id: asset.company_id,
-      self: 0,
-      total: 0,
-      critical: 0,
-      high: 0,
-      medium: 0,
-      low: 0,
-      last_found_at: "",
+  const nodes: MockComponentTreeNode[] = [];
+  for (const [type, leaves] of byType) {
+    leaves.sort((a, b) => b.finding_count - a.finding_count);
+    nodes.push({
+      key: `t:${type}`,
+      kind: type,
+      label: type,
+      finding_count: leaves.reduce((sum, leaf) => sum + leaf.finding_count, 0),
+      children: leaves,
     });
   }
-
-  // 父子关系:与 db/finding_assets.go 的 firstOf 优先级顺序一致。
-  const find = (predicate: (a: (typeof mockAssets)[number]) => boolean) => {
-    const asset = [...picked.values()].find(predicate);
-    return asset ? key(asset.id) : "";
-  };
-  for (const asset of picked.values()) {
-    const { host, port } = mockAssetHost(asset);
-    let parent = "";
-    if (asset.type === "subdomain") {
-      parent = find((a) => a.type === "root_domain" && a.domain === asset.root_domain);
-    } else if (asset.type === "service") {
-      parent =
-        find((a) => a.type === "subdomain" && (a.domain === asset.domain || a.domain === host)) ||
-        find((a) => a.type === "ip" && (a.ip === asset.ip || a.ip === host)) ||
-        find((a) => a.type === "root_domain" && a.domain === asset.root_domain);
-    } else if (asset.type === "endpoint") {
-      parent =
-        find((a) => {
-          if (a.type !== "service") return false;
-          const svc = mockAssetHost(a);
-          return svc.host === host && svc.port === port;
-        }) ||
-        find((a) => a.type === "service" && mockAssetHost(a).host === host) ||
-        find((a) => a.type === "subdomain" && (a.domain === host || a.domain === asset.domain)) ||
-        find((a) => a.type === "ip" && (a.ip === host || a.ip === asset.ip)) ||
-        find((a) => a.type === "root_domain" && a.domain === asset.root_domain);
-    }
-    if (parent && parent !== key(asset.id)) {
-      parentOf.set(key(asset.id), parent);
-      const node = nodes.get(key(asset.id));
-      if (node) node.parent = parent;
-    }
+  nodes.sort((a, b) => b.finding_count - a.finding_count);
+  if (unassigned > 0) {
+    nodes.push({
+      key: UNASSIGNED_COMPONENT,
+      kind: "none",
+      label: "未关联",
+      finding_count: unassigned,
+    });
   }
-
-  // 企业层:只给确实有归属的顶层资产(根域名 / IP / 应用)补,没有归属就自己是顶层。
-  for (const node of [...nodes.values()]) {
-    if (node.parent || !node.company_id) continue;
-    if (!["root_domain", "ip", "app"].includes(node.kind)) continue;
-    const company = mockCompanies.find((candidate) => candidate.id === node.company_id);
-    if (!company) continue;
-    const companyKey = `c:${company.id}`;
-    if (!nodes.has(companyKey)) {
-      nodes.set(companyKey, {
-        key: companyKey,
-        kind: "company",
-        label: company.name,
-        company_id: company.id,
-        self: 0,
-        total: 0,
-        critical: 0,
-        high: 0,
-        medium: 0,
-        low: 0,
-        last_found_at: "",
-      });
-    }
-    node.parent = companyKey;
-    parentOf.set(node.key, companyKey);
-  }
-
-  // 计数:一条发现沿它每个资产的祖先链向上,收集去重后的 key 集合再逐个 +1。
-  const unassigned: MockAssetTreeNode = {
-    key: UNASSIGNED_ASSET,
-    kind: "none",
-    label: "未关联资产",
-    self: 0,
-    total: 0,
-    critical: 0,
-    high: 0,
-    medium: 0,
-    low: 0,
-    last_found_at: "",
-  };
-  const bump = (node: MockAssetTreeNode, finding: (typeof mockFindings)[number]) => {
-    node.total++;
-    if (finding.severity === "critical") node.critical++;
-    else if (finding.severity === "high") node.high++;
-    else if (finding.severity === "medium") node.medium++;
-    else if (finding.severity === "low") node.low++;
-    if (finding.ts > node.last_found_at) node.last_found_at = finding.ts;
-  };
-  for (const finding of list) {
-    const direct = (finding.assets ?? []).map((ref) => nodes.get(`a:${ref.id}`)).filter((n) => n !== undefined);
-    if (direct.length === 0) {
-      bump(unassigned, finding);
-      unassigned.self++;
-      continue;
-    }
-    const touched = new Set<string>();
-    for (const node of direct) {
-      node.self++;
-      for (let cur: string | undefined = node.key; cur; cur = parentOf.get(cur)) touched.add(cur);
-    }
-    for (const k of touched) {
-      const node = nodes.get(k);
-      if (node) bump(node, finding);
-    }
-  }
-
-  const out = [...nodes.values()].filter((node) => node.total > 0);
-  if (unassigned.total > 0) out.push(unassigned);
-  out.sort((left, right) => {
-    if ((left.kind === "none") !== (right.kind === "none")) return left.kind === "none" ? 1 : -1;
-    return right.total - left.total || left.label.localeCompare(right.label);
-  });
-  return out;
+  return nodes;
 }
 
-// mockAssetScopeIds 把资产树节点 key 展开成整棵子树的资产 id 集合,与后端
-// applyAssetScope 同义。miss=true 表示该节点在当前筛选下不存在 → 结果恒空。
-function mockAssetScopeIds(
-  scope: string,
-  list: (typeof mockFindings)[number][],
-): { ids: Set<string>; none: boolean; miss: boolean } {
-  if (scope === UNASSIGNED_ASSET) return { ids: new Set(), none: true, miss: false };
-  const nodes = mockBuildAssetTree(list);
-  if (!nodes.some((node) => node.key === scope)) return { ids: new Set(), none: false, miss: true };
-  const children = new Map<string, MockAssetTreeNode[]>();
-  for (const node of nodes) {
-    if (!node.parent) continue;
-    children.set(node.parent, [...(children.get(node.parent) ?? []), node]);
-  }
-  const ids = new Set<string>();
-  const queue = [scope];
-  const seen = new Set(queue);
-  while (queue.length > 0) {
-    const cur = queue.shift() as string;
-    const node = nodes.find((candidate) => candidate.key === cur);
-    if (node?.asset_id) ids.add(String(node.asset_id));
-    for (const child of children.get(cur) ?? []) {
-      if (seen.has(child.key)) continue;
-      seen.add(child.key);
-      queue.push(child.key);
+// mockComponentScopeIDs 把树节点 key 展开成子树里的组件 id 集合。
+function mockComponentScopeIDs(scope: string, list: (typeof mockFindings)[number][]): { ids: Set<string>; none: boolean; miss: boolean } {
+  if (scope === UNASSIGNED_COMPONENT) return { ids: new Set(), none: true, miss: false };
+  const nodes = mockBuildComponentTree(list);
+  const flat: MockComponentTreeNode[] = [];
+  const collect = (items: MockComponentTreeNode[]) => {
+    for (const item of items) {
+      flat.push(item);
+      if (item.children) collect(item.children);
     }
-  }
+  };
+  collect(nodes);
+  const target = flat.find((node) => node.key === scope);
+  if (!target) return { ids: new Set(), none: false, miss: true };
+  const ids = new Set<string>();
+  const collectIDs = (node: MockComponentTreeNode) => {
+    if (node.component_id) ids.add(String(node.component_id));
+    for (const child of node.children ?? []) collectIDs(child);
+  };
+  collectIDs(target);
   return { ids, none: false, miss: ids.size === 0 };
 }
 
-// mockApplyAssetScope 按 asset_scope 收窄一批发现。「未关联」同时收 assets 为空
-// 与指向已删资产的发现,和树上那个桶的口径一致。
-function mockApplyAssetScope(
+// mockApplyComponentScope 按 component_scope 收窄一批发现。「未关联」= 没有任何组件引用。
+function mockApplyComponentScope(
   list: (typeof mockFindings)[number][],
   scope: string | null,
 ): (typeof mockFindings)[number][] {
   if (!scope) return list;
-  const { ids, none, miss } = mockAssetScopeIds(scope, list);
-  if (none) {
-    return list.filter((finding) => {
-      const refs = finding.assets ?? [];
-      return refs.length === 0 || refs.every((ref) => !mockAssets.some((a) => String(a.id) === ref.id));
-    });
-  }
+  const { ids, none, miss } = mockComponentScopeIDs(scope, list);
+  if (none) return list.filter((finding) => (finding.components ?? []).length === 0);
   if (miss) return [];
-  return list.filter((finding) => (finding.assets ?? []).some((ref) => ids.has(ref.id)));
+  return list.filter((finding) => (finding.components ?? []).some((ref) => ids.has(ref.id)));
 }
 
 function mockTaskCategorySnapshot(): TaskCategory[] {
@@ -1023,14 +863,13 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         description: `${finding.severity} · ${finding.summary}`,
       })),
       ...D.companies.map((company) => ({ kind: "company", id: company.id, label: company.name, description: "企业" })),
-      ...D.assets.map((asset) => ({
-        kind: asset.type,
-        id: asset.id,
+      ...D.components.map((component) => ({
+        kind: "component",
+        id: component.id,
         label:
-          asset.type === "endpoint"
-            ? `${asset.method || "GET"} ${asset.url}`
-            : asset.app_name || asset.url || asset.domain || asset.ip || asset.bundle_id || `资产 #${asset.id}`,
-        description: [asset.type, asset.page_title, asset.service_name, asset.bundle_id, asset.ip]
+          component.component_name +
+          (component.version ? ` ${component.version}` : "") || `组件 #${component.id}`,
+        description: [component.type, component.binary_path, component.config_path]
           .filter(Boolean)
           .join(" · "),
       })),
@@ -1038,7 +877,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const filtered = candidates
       .filter(
         (item) =>
-          (!kind || kind === item.kind || (kind === "asset" && item.kind !== "finding" && item.kind !== "company")) &&
+          (!kind || kind === item.kind) &&
           (!query || String(item.id) === query || `${item.label} ${item.description}`.toLowerCase().includes(query)),
       )
       .sort(
@@ -1208,11 +1047,11 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const numericTaskID = nextMockTaskAssetID++;
     mockTaskAssetIDs.set(id, numericTaskID);
     const selectedCompanies = new Set(companyIDs);
-    for (const asset of mockAssets) {
+    for (const asset of mockComponents) {
       if (asset.company_id === undefined || !selectedCompanies.has(asset.company_id)) continue;
       if (!asset.task_ids.includes(numericTaskID)) asset.task_ids.push(numericTaskID);
       const company = mockCompanies.find((candidate) => candidate.id === asset.company_id);
-      setMockTaskAssetSource(id, asset.id, {
+      setMockTaskComponentSource(id, asset.id, {
         task_source: "company",
         task_source_summary: `任务创建时关联企业：${company?.name ?? `#${asset.company_id}`}`,
         task_source_node_id: undefined,
@@ -1370,9 +1209,9 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const index = mockTasks.findIndex((item) => item.id === id);
     if (index >= 0) mockTasks.splice(index, 1);
     mockTaskAssetIDs.delete(id);
-    deleteMockTaskAssetSources(id);
+    deleteMockTaskComponentSources(id);
     if (numericTaskID !== undefined) {
-      for (const asset of mockAssets) asset.task_ids = asset.task_ids.filter((taskID) => taskID !== numericTaskID);
+      for (const asset of mockComponents) asset.task_ids = asset.task_ids.filter((taskID) => taskID !== numericTaskID);
     }
 
     let findingsDeleted = 0;
@@ -1408,8 +1247,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     }
     return {
       deleted: id,
-      assets_deleted: b.delete_assets ? 1 : 0,
-      assets_detached: 0,
+      components_deleted: b.delete_components ? 1 : 0,
+      components_detached: 0,
       traffic_deleted: b.delete_traffic ? 1 : 0,
       files_deleted: Boolean(b.delete_files),
       findings_deleted: findingsDeleted,
@@ -1514,10 +1353,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     return { active: mockActiveTask };
   }
 
-  // ── 覆盖度 / 覆盖图 / 资产关联（任务维度）──
+  // ── 覆盖度 / 覆盖图 / 组件关联（任务维度）──
   if (seg[0] === "tasks" && seg[2] === "coverage" && seg.length === 3) return D.coverage;
   if (seg[0] === "tasks" && seg[2] === "coverage-graph") return D.coverageGraph;
-  if (seg[0] === "tasks" && seg[2] === "asset-refs") return D.assetRefsFor(Number(q.get("asset_id") ?? 0));
+  if (seg[0] === "tasks" && seg[2] === "component-refs") return D.componentRefsFor(Number(q.get("component_id") ?? 0));
 
   // ── 任务测试范围（增删查）──
   if (seg[0] === "tasks" && seg[2] === "scope" && seg.length === 3 && m === "GET") {
@@ -1619,34 +1458,68 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     return D.stats(task, { tasks: mockTasks, findings: mockFindings, activeTask: mockActiveTask });
   }
 
-  // ── assets ──
-  if (path === "/assets/counts") return mockAssetCounts(q.get("task_id"));
-  if (path === "/assets" && m === "GET") {
+  // ── components ──
+  if (path === "/components/counts") {
+    const taskID = q.get("task_id");
+    if (q.get("by") === "firmware") {
+      const numeric = taskID ? mockTaskAssetID(taskID) : undefined;
+      const acc: Record<string, number> = {};
+      for (const component of mockComponents) {
+        if (taskID && (numeric === undefined || !component.task_ids.includes(numeric))) continue;
+        const key = component.firmware_sha256 ?? "";
+        acc[key] = (acc[key] ?? 0) + 1;
+      }
+      return acc;
+    }
+    if (q.get("by") === "status") {
+      const numeric = taskID ? mockTaskAssetID(taskID) : undefined;
+      const acc: Record<string, number> = { pending: 0, running: 0, completed: 0, ignored: 0 };
+      for (const component of mockComponents) {
+        if (taskID && (numeric === undefined || !component.task_ids.includes(numeric))) continue;
+        acc[component.status] = (acc[component.status] ?? 0) + 1;
+      }
+      return acc;
+    }
+    return mockComponentCounts(taskID);
+  }
+  if (path === "/components" && m === "GET") {
     const type = q.get("type") ?? "";
     const taskID = q.get("task_id");
     const numericTaskID = taskID ? mockTaskAssetID(taskID) : undefined;
     const dsl = q.get("dsl") ?? "";
-    const list = mockAssets.filter((asset) => {
-      if (type && asset.type !== type) return false;
-      if (taskID && (numericTaskID === undefined || !asset.task_ids.includes(numericTaskID))) return false;
-      return !dsl || mockAssetMatchesDSL(asset, dsl);
+    const status = q.get("status") ?? "";
+    const firmware = q.get("firmware") ?? "";
+    const list = mockComponents.filter((component) => {
+      if (type && component.type !== type) return false;
+      if (status && component.status !== status) return false;
+      if (firmware && (component.firmware_sha256 ?? "") !== firmware) return false;
+      if (taskID && (numericTaskID === undefined || !component.task_ids.includes(numericTaskID))) return false;
+      return !dsl || mockComponentMatchesDSL(component, dsl);
     });
     const limit = Number(q.get("limit") ?? 50);
     const offset = Number(q.get("offset") ?? 0);
-    const page = list.slice(offset, offset + limit).map((asset) => (taskID ? mockAssetForTask(taskID, asset) : asset));
-    return { count: page.length, total: list.length, assets: page };
+    const page = list
+      .slice(offset, offset + limit)
+      .map((component) => (taskID ? mockComponentForTask(taskID, component) : component));
+    return { count: page.length, total: list.length, components: page };
   }
-  if (path === "/assets" && m === "DELETE") {
+  if (seg[0] === "components" && seg[2] === "status" && m === "POST") {
+    const component = mockComponents.find((item) => item.id === Number(seg[1]));
+    if (!component) throw new Error("组件不存在");
+    component.status = String(b.status ?? "pending") as Component["status"];
+    return { ok: true, status: component.status };
+  }
+  if (path === "/components" && m === "DELETE") {
     const ids = new Set(Array.isArray(b.ids) ? b.ids.map(Number) : []);
     let deleted = 0;
-    for (let index = mockAssets.length - 1; index >= 0; index--) {
-      if (!ids.has(mockAssets[index].id)) continue;
-      mockAssets.splice(index, 1);
+    for (let index = mockComponents.length - 1; index >= 0; index--) {
+      if (!ids.has(mockComponents[index].id)) continue;
+      mockComponents.splice(index, 1);
       deleted++;
     }
     return { deleted };
   }
-  if (seg[0] === "tasks" && seg[2] === "assets" && seg.length === 3 && m === "POST") {
+  if (seg[0] === "tasks" && seg[2] === "components" && seg.length === 3 && m === "POST") {
     const task = mockTasks.find((item) => item.id === seg[1]);
     const numericTaskID = mockTaskAssetID(seg[1]);
     if (!task || numericTaskID === undefined) throw new Error("任务不存在");
@@ -1668,10 +1541,10 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         if (!rule || error) throw new Error(`第 ${index + 1} 条范围无效：${error}`);
         return rule;
       });
-      const mutation: TaskAssetScopeMutation = {
+      const mutation: TaskComponentScopeMutation = {
         requested: rules.length,
-        assets_linked: 0,
-        assets_existing: 0,
+        components_linked: 0,
+        components_existing: 0,
         scopes_added: 0,
         scopes_existing: 0,
       };
@@ -1686,7 +1559,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
           task_id: numericTaskID,
           kind: rule.kind === "domain" ? "root_domain" : rule.kind,
           source: "manual",
-          reason: "用户在测试资产页手工新增",
+          reason: "用户在组件页手工新增",
         };
         if (rule.kind === "domain") scope.domain = normalized;
         else if (rule.kind === "ip") scope.net = `${normalized}/${normalized.includes(":") ? 128 : 32}`;
@@ -1699,54 +1572,25 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
           currentScopes.push(scope);
           mutation.scopes_added++;
         }
-
-        if (rule.kind !== "domain" && rule.kind !== "ip") continue;
-        const type = rule.kind === "domain" ? "root_domain" : "ip";
-        let asset = mockAssets.find((item) =>
-          type === "root_domain"
-            ? item.type === type && item.domain === normalized
-            : item.type === type && item.ip === normalized,
-        );
-        const alreadyLinked = asset?.task_ids.includes(numericTaskID) ?? false;
-        if (!asset) {
-          const nextID = mockAssets.reduce((max, item) => Math.max(max, item.id), 0) + 1;
-          asset = {
-            id: nextID,
-            type,
-            task_ids: [],
-            ...(type === "root_domain" ? { domain: normalized, root_domain: normalized } : { ip: normalized }),
-            last_seen: new Date().toISOString(),
-          };
-          mockAssets.push(asset);
-        }
-        if (alreadyLinked) mutation.assets_existing++;
-        else {
-          asset.task_ids.push(numericTaskID);
-          mutation.assets_linked++;
-        }
-        setMockTaskAssetSource(seg[1], asset.id, {
-          task_source: "manual",
-          task_source_summary: "用户在测试资产页手工新增",
-          task_source_node_id: undefined,
-        });
       }
+
       mockTaskScopes.set(seg[1], currentScopes);
       return mutation;
     }
-    const ids = [...new Set(Array.isArray(b.asset_ids) ? b.asset_ids.map(Number) : [])];
+    const ids = [...new Set(Array.isArray(b.component_ids) ? b.component_ids.map(Number) : [])];
     const sourceSummary = String(b.source_summary ?? "").trim();
-    if (ids.length === 0 || ids.length > 100 || !sourceSummary) throw new Error("请选择资产并填写来源说明");
-    const requestedAssets = ids.map((id) => mockAssets.find((asset) => asset.id === id));
-    if (requestedAssets.some((asset) => !asset)) throw new Error("资产不存在");
-    const mutation: TaskAssetMutation = { requested: ids.length, attached: 0, existing: 0 };
-    for (const asset of requestedAssets) {
-      if (!asset) continue;
-      if (asset.task_ids.includes(numericTaskID)) mutation.existing++;
+    if (ids.length === 0 || ids.length > 100 || !sourceSummary) throw new Error("请选择组件并填写来源说明");
+    const requestedComponents = ids.map((id) => mockComponents.find((component) => component.id === id));
+    if (requestedComponents.some((component) => !component)) throw new Error("组件不存在");
+    const mutation: TaskComponentMutation = { requested: ids.length, attached: 0, existing: 0 };
+    for (const component of requestedComponents) {
+      if (!component) continue;
+      if (component.task_ids.includes(numericTaskID)) mutation.existing++;
       else {
-        asset.task_ids.push(numericTaskID);
+        component.task_ids.push(numericTaskID);
         mutation.attached++;
       }
-      setMockTaskAssetSource(seg[1], asset.id, {
+      setMockTaskComponentSource(seg[1], component.id, {
         task_source: "manual",
         task_source_summary: sourceSummary,
         task_source_node_id: undefined,
@@ -1754,45 +1598,41 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     }
     return mutation;
   }
-  if (seg[0] === "tasks" && seg[2] === "assets" && seg.length === 4 && m === "DELETE") {
+  if (seg[0] === "tasks" && seg[2] === "components" && seg.length === 4 && m === "DELETE") {
     const numericTaskID = mockTaskAssetID(seg[1]);
-    const asset = mockAssets.find((item) => item.id === Number(seg[3]));
-    if (numericTaskID === undefined || !asset) throw new Error("任务或资产不存在");
-    if (!asset.task_ids.includes(numericTaskID)) throw new Error("资产未关联当前任务");
-    asset.task_ids = asset.task_ids.filter((id) => id !== numericTaskID);
-    deleteMockTaskAssetSources(seg[1], asset.id);
-    return { detached: asset.id };
+    const component = mockComponents.find((item) => item.id === Number(seg[3]));
+    if (numericTaskID === undefined || !component) throw new Error("任务或组件不存在");
+    if (!component.task_ids.includes(numericTaskID)) throw new Error("组件未关联当前任务");
+    component.task_ids = component.task_ids.filter((id) => id !== numericTaskID);
+    deleteMockTaskComponentSources(seg[1], component.id);
+    return { detached: component.id };
   }
-  if (seg[0] === "tasks" && seg[2] === "intent-assets" && seg.length === 3 && m === "GET") {
-    let mappings: Array<{ intentID: string; assetID: number; summary: string }> = [];
+  if (seg[0] === "tasks" && seg[2] === "intent-components" && seg.length === 3 && m === "GET") {
+    let mappings: Array<{ intentID: number; assetID: number; summary: string }> = [];
     if (seg[1] === "t-acme-web") {
       mappings = [
-        { intentID: "i3", assetID: 6, summary: "后台功能枚举意图从前序子域发现中选定" },
-        { intentID: "i5", assetID: 3, summary: "订单接口测试意图从 API 任务目标中选定" },
+        { intentID: 3, assetID: 6, summary: "后台功能枚举意图从前序子域发现中选定" },
+        { intentID: 5, assetID: 3, summary: "订单接口测试意图从 API 任务目标中选定" },
       ];
     } else if (seg[1] === "t-acme-api") {
-      mappings = [{ intentID: "i5", assetID: 3, summary: "订单接口测试意图从 API 任务目标中选定" }];
+      mappings = [{ intentID: 5, assetID: 3, summary: "订单接口测试意图从 API 任务目标中选定" }];
     }
-    const sourceTaskID = mockTaskAssetID(seg[1]) ?? 0;
-    const assets: IntentAsset[] = mappings.flatMap((mapping) => {
-      const storedAsset = mockAssets.find((item) => item.id === mapping.assetID);
-      if (!storedAsset) return [];
-      const asset = mockAssetForTask(seg[1], storedAsset);
+    const intentComponents: IntentComponent[] = mappings.flatMap((mapping) => {
+      const stored = mockComponents.find((item) => item.id === mapping.assetID);
+      if (!stored) return [];
       return [
         {
           intent_id: mapping.intentID,
-          asset_id: asset.id,
-          type: asset.type,
-          label: asset.domain ?? asset.ip ?? asset.app_name ?? asset.url ?? asset.service_name ?? `#${asset.id}`,
-          source: asset.task_source ?? "agent",
-          source_summary: asset.task_source_summary ?? mapping.summary,
-          source_node_id: asset.task_source_node_id,
-          source_task_id: sourceTaskID,
-          inherited: false,
+          component_id: stored.id,
+          type: stored.type,
+          component_name: stored.component_name,
+          version: stored.version,
+          status: stored.status,
+          label: stored.version ? `${stored.component_name} ${stored.version}` : stored.component_name,
         },
       ];
     });
-    return { assets };
+    return { components: intentComponents };
   }
 
   // ── companies ──
@@ -1805,7 +1645,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     }
     const id = mockCompanies.reduce((max, company) => Math.max(max, company.id), 0) + 1;
     const scopeResult = mockScopeRows(id, b.scope);
-    const company: Company = { id, name, asset_count: 0, scope: scopeResult.rows };
+    const company: Company = { id, name, component_count: 0, scope: scopeResult.rows };
     mockCompanies.push(company);
     return {
       id,
@@ -1829,18 +1669,18 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const index = mockCompanies.findIndex((item) => item.id === id);
     if (index < 0) throw new Error("企业不存在");
     mockCompanies.splice(index, 1);
-    let assetsDeleted = 0;
-    for (let assetIndex = mockAssets.length - 1; assetIndex >= 0; assetIndex--) {
-      const asset: Asset = mockAssets[assetIndex];
-      if (asset.company_id !== id) continue;
-      if (b.delete_assets === true) {
-        mockAssets.splice(assetIndex, 1);
-        assetsDeleted++;
+    let componentsDeleted = 0;
+    for (let assetIndex = mockComponents.length - 1; assetIndex >= 0; assetIndex--) {
+      const component: Component = mockComponents[assetIndex];
+      if (component.company_id !== id) continue;
+      if (b.delete_components === true) {
+        mockComponents.splice(assetIndex, 1);
+        componentsDeleted++;
       } else {
-        delete asset.company_id;
+        delete component.company_id;
       }
     }
-    return { deleted: 1, assets_deleted: assetsDeleted };
+    return { deleted: 1, components_deleted: componentsDeleted };
   }
 
   // ── exploration ──
@@ -1872,13 +1712,13 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       tasks,
     };
   }
-  if (path === "/exploration/findings/asset-tree") {
-    const list = mockApplyAssetScope(mockFilterFindings(q), null);
-    return { nodes: mockBuildAssetTree(list), finding_total: list.length, truncated: false };
+  if (path === "/exploration/findings/component-tree") {
+    const list = mockApplyComponentScope(mockFilterFindings(q), null);
+    return { nodes: mockBuildComponentTree(list), total: list.length, truncated: false };
   }
   if (path === "/exploration/findings/groups") {
     const severityOrder = { critical: 4, high: 3, medium: 2, low: 1 } as const;
-    const list = mockApplyAssetScope(mockFilterFindings(q), q.get("asset_scope"));
+    const list = mockApplyComponentScope(mockFilterFindings(q), q.get("component_scope"));
 
     const grouped = new Map<string, typeof list>();
     for (const finding of list) {
@@ -1913,7 +1753,6 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     return {
       items: groups.slice((page - 1) * pageSize, page * pageSize),
       total: groups.length,
-      finding_total: list.length,
       page,
       page_size: pageSize,
     };
@@ -2120,7 +1959,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     // 全局:带 page/limit → 分页对象;否则裸数组(dashboard)。
     if (!q.has("page") && !q.has("limit")) return mockFindings.map(withFid);
     const sev = { critical: 4, high: 3, medium: 2, low: 1 } as const;
-    const list = mockApplyAssetScope(mockFilterFindings(q), q.get("asset_scope"));
+    const list = mockApplyComponentScope(mockFilterFindings(q), q.get("component_scope"));
     list.sort((a, b) =>
       q.get("sort") === "severity"
         ? sev[b.severity] - sev[a.severity] || +new Date(b.ts) - +new Date(a.ts)
@@ -2190,13 +2029,13 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         if (node) refs[id] = node;
       }
     }
-    // 顺带带上本页节点(含邻居)锚定的资产,供展开时展示。
-    const assets: Record<string, ReturnType<typeof D.nodeAssetsFor>> = {};
+    // 顺带带上本页节点(含邻居)锚定的组件,供展开时展示。
+    const components: Record<string, ReturnType<typeof D.nodeComponentsFor>> = {};
     for (const id of new Set([...onPage, ...Object.keys(refs)])) {
-      const anchored = D.nodeAssetsFor(id);
-      if (anchored.length > 0) assets[id] = anchored;
+      const anchored = D.nodeComponentsFor(id);
+      if (anchored.length > 0) components[id] = anchored;
     }
-    return { items, total: matched.length, page, size, edges, refs, assets };
+    return { items, total: matched.length, page, size, edges, refs, components };
   }
   if (path === "/exploration/activity" && seg.length === 2) {
     const since = Number(q.get("since") ?? 0);
@@ -2377,13 +2216,6 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "mcp" && seg[2] === "tools") return { tools: D.mcpToolsById[Number(seg[1])] ?? [] };
   if (seg[0] === "mcp" && seg[2] === "refresh") return { tools: D.mcpToolsById[Number(seg[1])] ?? [] };
   if (seg[0] === "mcp" && seg.length === 2 && m === "DELETE") return { deleted: Number(seg[1]) };
-
-  // ── scopesentry（demo：未配置）──
-  if (path === "/sync/scopesentry/status")
-    return { exists: false, configured: false, enabled: false, reachable: false, tools: [] };
-  if (path === "/sync/scopesentry/projects") return { projects: [], tag: {} };
-  if (path === "/sync/scopesentry/tasks") return { tasks: [] };
-  if (path === "/sync/scopesentry/sync") return { synced: {}, companies: null, warnings: null, errors: null };
 
   // ── skills ──
   if (path === "/skills" && m === "GET") return { skills: D.skills };

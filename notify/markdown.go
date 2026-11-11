@@ -8,9 +8,9 @@ import (
 // 本文件是「Markdown 系」渠道（钉钉、企业微信）共用的消息渲染。
 // 飞书用卡片 JSON、Telegram 用 HTML、邮件用 HTML，各自在适配器里渲染。
 
-// maxAssetsShown 是消息里最多列出几个资产。一个漏洞可能锚定几十个资产，
+// maxComponentsShown 是消息里最多列出几个资产。一个漏洞可能锚定几十个资产，
 // 全列会挤爆消息且没有信息价值——第 4 个之后的域名没人会在 IM 里看。
-const maxAssetsShown = 3
+const maxComponentsShown = 3
 
 // maxSummaryRunes 是摘要被压缩到多少字符。IM 消息是「提示去看详情」，
 // 不是报告本体，完整内容在平台里。
@@ -169,7 +169,7 @@ func writeItem(b *strings.Builder, it Item, prefix string, single bool) {
 	if !single {
 		// 汇总模式：单行呈现，资产与摘要压缩后跟在后面。
 		var extras []string
-		if a := assetLine(it.Components, maxAssetsShown); a != "" {
+		if a := componentLine(it.Components, maxComponentsShown); a != "" {
 			extras = append(extras, markdownText(a, 0))
 		}
 		if it.Summary != "" {
@@ -189,8 +189,8 @@ func writeItem(b *strings.Builder, it Item, prefix string, single bool) {
 	if it.VulnClass != "" && it.VulnClass != it.Title() {
 		fmt.Fprintf(b, "**类型**：%s\n", markdownText(it.VulnClass, 0))
 	}
-	if a := assetLine(it.Components, maxAssetsShown); a != "" {
-		fmt.Fprintf(b, "**资产**：%s\n", markdownText(a, 0))
+	if a := componentLine(it.Components, maxComponentsShown); a != "" {
+		fmt.Fprintf(b, "**组件**：%s\n", markdownText(a, 0))
 	}
 	if it.Summary != "" {
 		if s := markdownText(it.Summary, maxSummaryRunes); s != "" {

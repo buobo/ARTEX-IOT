@@ -7,7 +7,7 @@ import type {
   Activity,
   Agent,
   AgentDetail,
-  Asset,
+  Component,
   Audit,
   Company,
   Conversation,
@@ -15,7 +15,7 @@ import type {
   DailyTokenBucket,
   Edge,
   Finding,
-  FindingAsset,
+  FindingComponent,
   InterceptApprovalRow,
   InterceptAudit,
   InterceptPending,
@@ -213,11 +213,11 @@ export function stats(
   const taskList = state.tasks ?? tasks;
   const findingList = state.findings ?? findings;
   const base: Stats = {
-    assets: assets.length,
     engine_mode: "exploring",
     llm_configured: true,
     roe_enabled: true,
     findings_confirmed: findingList.filter((f) => f.severity !== "low").length,
+    components: components.length,
   };
   const selectedTaskID = taskId ?? state.activeTask ?? ACTIVE_TASK;
   const t = taskList.find((item) => item.id === selectedTaskID);
@@ -243,7 +243,7 @@ export const companies: Company[] = [
     id: 1,
     name: "Acme Corp",
     logo: "",
-    asset_count: 18,
+    component_count: 12,
     scope: [
       { id: 1, company_id: 1, kind: "domain", domain: "acme.com", raw: "acme.com", reason: "主域" },
       { id: 2, company_id: 1, kind: "cidr", net: "203.0.113.0/24", raw: "203.0.113.0/24" },
@@ -252,333 +252,58 @@ export const companies: Company[] = [
   },
 ];
 
-export const assets: Asset[] = [
-  {
-    id: 1,
-    type: "root_domain",
-    company_id: 1,
-    task_ids: [1],
-    domain: "acme.com",
-    root_domain: "acme.com",
-    icp: "京ICP备2021xxxx号",
-    record_type: "A",
-    record_value: ["203.0.113.10"],
-    last_seen: T("2026-07-26T02:00:00Z"),
-  },
-  {
-    id: 2,
-    type: "subdomain",
-    company_id: 1,
-    task_ids: [1],
-    domain: "www.acme.com",
-    root_domain: "acme.com",
-    record_type: "CNAME",
-    record_value: "acme.com",
-    last_seen: T("2026-07-26T02:01:00Z"),
-  },
-  {
-    id: 3,
-    type: "subdomain",
-    company_id: 1,
-    task_ids: [2],
-    domain: "api.acme.com",
-    root_domain: "acme.com",
-    record_type: "A",
-    record_value: ["203.0.113.11"],
-    last_seen: T("2026-07-26T02:02:00Z"),
-  },
-  {
-    id: 4,
-    type: "subdomain",
-    company_id: 1,
-    task_ids: [3],
-    domain: "shop.acme.com",
-    root_domain: "acme.com",
-    record_type: "A",
-    record_value: ["203.0.113.12"],
-    last_seen: T("2026-07-26T02:03:00Z"),
-  },
-  {
-    id: 5,
-    type: "subdomain",
-    company_id: 1,
-    task_ids: [4],
-    domain: "vpn.acme.com",
-    root_domain: "acme.com",
-    record_type: "A",
-    record_value: ["198.51.100.20"],
-    last_seen: T("2026-07-20T02:00:00Z"),
-  },
-  {
-    id: 6,
-    type: "subdomain",
-    company_id: 1,
-    task_ids: [1],
-    domain: "admin.acme.com",
-    root_domain: "acme.com",
-    record_type: "A",
-    record_value: ["203.0.113.10"],
-    last_seen: T("2026-07-26T02:04:00Z"),
-  },
-  {
-    id: 7,
-    type: "ip",
-    company_id: 1,
-    task_ids: [1, 2],
-    ip: "203.0.113.10",
-    c_segment: "203.0.113.0",
-    open_ports: [
-      { port: 80, service: "http" },
-      { port: 443, service: "https" },
-      { port: 22, service: "ssh" },
-    ],
-    last_seen: T("2026-07-26T02:05:00Z"),
-  },
-  {
-    id: 8,
-    type: "ip",
-    company_id: 1,
-    task_ids: [2],
-    ip: "203.0.113.11",
-    c_segment: "203.0.113.0",
-    open_ports: [{ port: 443, service: "https" }],
-    last_seen: T("2026-07-26T02:06:00Z"),
-  },
-  {
-    id: 9,
-    type: "ip",
-    company_id: 1,
-    task_ids: [4],
-    ip: "198.51.100.20",
-    c_segment: "198.51.100.0",
-    open_ports: [
-      { port: 443, service: "https" },
-      { port: 500, service: " isakmp" },
-    ],
-    last_seen: T("2026-07-20T02:00:00Z"),
-  },
-  {
-    id: 10,
-    type: "service",
-    company_id: 1,
-    task_ids: [1],
-    ip: "203.0.113.10",
-    port: 443,
-    service_type: "https",
-    service_name: "nginx/1.24.0",
-    last_seen: T("2026-07-26T02:07:00Z"),
-  },
-  {
-    id: 11,
-    type: "service",
-    company_id: 1,
-    task_ids: [4],
-    ip: "198.51.100.20",
-    port: 22,
-    service_type: "ssh",
-    service_name: "OpenSSH 8.9p1",
-    last_seen: T("2026-07-20T02:00:00Z"),
-  },
-  {
-    id: 12,
-    type: "app",
-    company_id: 1,
-    task_ids: [1],
-    url: "https://www.acme.com",
-    app_name: "Acme 官网",
-    category: "corp",
-    status_code: 200,
-    content_length: 48213,
-    page_title: "Acme Corp — 企业官网",
-    technologies: ["Nginx", "React", "Cloudflare"],
-    favicon_mmh3: "-1580860059",
-    last_seen: T("2026-07-26T02:08:00Z"),
-  },
-  {
-    id: 13,
-    type: "app",
-    company_id: 1,
-    task_ids: [1],
-    url: "https://admin.acme.com",
-    app_name: "后台管理",
-    category: "admin",
-    status_code: 200,
-    content_length: 12044,
-    page_title: "Acme Admin 登录",
-    technologies: ["Nginx", "Vue", "Element-UI"],
-    last_seen: T("2026-07-26T02:09:00Z"),
-  },
-  {
-    id: 14,
-    type: "app",
-    company_id: 1,
-    task_ids: [2],
-    url: "https://api.acme.com",
-    app_name: "REST API",
-    category: "api",
-    status_code: 401,
-    content_length: 45,
-    page_title: "",
-    technologies: ["Kong", "Node.js"],
-    last_seen: T("2026-07-26T02:10:00Z"),
-  },
-  {
-    id: 15,
-    type: "endpoint",
-    company_id: 1,
-    task_ids: [2],
-    url: "https://api.acme.com/v1/orders",
-    method: "GET",
-    status_code: 200,
-    params: [
-      { name: "id", in: "query" },
-      { name: "page", in: "query" },
-    ],
-    last_seen: T("2026-07-26T02:11:00Z"),
-  },
-  {
-    id: 16,
-    type: "endpoint",
-    company_id: 1,
-    task_ids: [2],
-    url: "https://api.acme.com/v1/users/me",
-    method: "GET",
-    status_code: 200,
-    last_seen: T("2026-07-26T02:12:00Z"),
-  },
-  {
-    id: 17,
-    type: "endpoint",
-    company_id: 1,
-    task_ids: [1],
-    url: "https://admin.acme.com/login",
-    method: "POST",
-    status_code: 200,
-    params: [{ name: "username" }, { name: "password" }],
-    last_seen: T("2026-07-26T02:13:00Z"),
-  },
-  {
-    id: 18,
-    type: "endpoint",
-    company_id: 1,
-    task_ids: [1],
-    url: "https://www.acme.com/search",
-    method: "GET",
-    status_code: 200,
-    params: [{ name: "q", in: "query" }],
-    last_seen: T("2026-07-26T02:14:00Z"),
-  },
-  // 内网资产（DMZ→内网横向发现）
-  {
-    id: 19,
-    type: "ip",
-    company_id: 1,
-    task_ids: [1],
-    ip: "10.0.20.15",
-    c_segment: "10.0.20.0",
-    open_ports: [
-      { port: 80, service: "http" },
-      { port: 22, service: "ssh" },
-    ],
-    last_seen: T("2026-07-25T15:40:00Z"),
-  },
-  {
-    id: 20,
-    type: "ip",
-    company_id: 1,
-    task_ids: [1],
-    ip: "10.10.10.10",
-    c_segment: "10.10.10.0",
-    open_ports: [
-      { port: 88, service: "kerberos" },
-      { port: 389, service: "ldap" },
-      { port: 445, service: "smb" },
-    ],
-    last_seen: T("2026-07-25T21:00:00Z"),
-  },
-  {
-    id: 21,
-    type: "ip",
-    company_id: 1,
-    task_ids: [1],
-    ip: "10.10.10.5",
-    c_segment: "10.10.10.0",
-    open_ports: [{ port: 445, service: "smb" }],
-    last_seen: T("2026-07-25T21:00:00Z"),
-  },
-  {
-    id: 22,
-    type: "ip",
-    company_id: 1,
-    task_ids: [1],
-    ip: "10.10.10.20",
-    c_segment: "10.10.10.0",
-    open_ports: [{ port: 8080, service: "http-proxy" }],
-    last_seen: T("2026-07-25T21:00:00Z"),
-  },
-  {
-    id: 23,
-    type: "service",
-    company_id: 1,
-    task_ids: [1],
-    ip: "10.10.10.20",
-    port: 8080,
-    service_type: "http",
-    service_name: "Jenkins 2.289",
-    last_seen: T("2026-07-25T21:35:00Z"),
-  },
-  {
-    id: 24,
-    type: "service",
-    company_id: 1,
-    task_ids: [1],
-    ip: "10.10.10.10",
-    port: 445,
-    service_type: "smb",
-    service_name: "Windows Server 2019 DC",
-    last_seen: T("2026-07-25T23:55:00Z"),
-  },
-  {
-    id: 25,
-    type: "app",
-    company_id: 1,
-    task_ids: [1],
-    url: "http://10.10.10.20:8080",
-    app_name: "Jenkins (内部)",
-    category: "ci",
-    status_code: 200,
-    content_length: 14200,
-    page_title: "Jenkins Dashboard",
-    technologies: ["Jenkins", "Java"],
-    last_seen: T("2026-07-25T21:35:00Z"),
-  },
-  {
-    id: 26,
-    type: "endpoint",
-    company_id: 1,
-    task_ids: [1],
-    url: "http://10.10.10.20:8080/script",
-    method: "GET",
-    status_code: 200,
-    last_seen: T("2026-07-25T21:35:00Z"),
-  },
+// 组件夹具：与后端 components 表同形。id 固定，findings 里的引用按 id 对上。
+const COMPONENT_SEED: [number, string, string, string, string, string][] = [
+  [1, "web", "lighttpd", "1.4.59", "/usr/sbin/lighttpd", "/etc/lighttpd.conf"],
+  [2, "web", "uhttpd", "", "/usr/sbin/uhttpd", "/etc/config/uhttpd"],
+  [3, "web", "goahead", "3.6.5", "/usr/sbin/goahead", ""],
+  [4, "web", "nginx", "1.18.0", "/usr/sbin/nginx", "/etc/nginx/nginx.conf"],
+  [5, "ssh", "dropbear", "2020.81", "/usr/sbin/dropbear", ""],
+  [6, "telnet", "telnetd", "", "/usr/sbin/telnetd", ""],
+  [7, "mqtt", "mosquitto", "2.0.11", "/usr/sbin/mosquitto", "/etc/mosquitto/mosquitto.conf"],
+  [8, "upnp", "miniupnpd", "2.3.1", "/usr/sbin/miniupnpd", ""],
+  [9, "onvif", "onvif_srvd", "", "/usr/bin/onvif_srvd", ""],
+  [10, "rtsp", "mediamtx", "0.23.0", "/usr/bin/mediamtx", ""],
+  [11, "ftp", "vsftpd", "3.0.3", "/usr/sbin/vsftpd", "/etc/vsftpd.conf"],
+  [12, "ros", "roscore", "noetic", "/opt/ros/bin/roscore", ""],
+  [13, "web", "boa", "0.94", "/usr/sbin/boa", "/etc/boa/boa.conf"],
+  [14, "other", "busybox", "1.35.0", "/bin/busybox", ""],
+  [15, "web", "httpd", "", "/usr/sbin/httpd", "/etc/httpd.conf"],
+  [16, "web", "mini_httpd", "1.30", "/usr/sbin/mini_httpd", ""],
+  [17, "web", "cgi-bin", "", "/www/cgi-bin", ""],
+  [18, "web", "admin.cgi", "", "/www/cgi-bin/admin.cgi", ""],
+  [19, "other", "nvram", "", "/bin/nvram", ""],
+  [20, "ssh", "sshd", "8.4p1", "/usr/sbin/sshd", "/etc/ssh/sshd_config"],
+  [21, "other", "upgrade", "", "/usr/sbin/upgrade", ""],
+  [26, "other", "sysupgrade", "", "/sbin/sysupgrade", ""],
 ];
 
-export const assetCounts: Record<string, number> = assets.reduce<Record<string, number>>((m, a) => {
-  m[a.type] = (m[a.type] ?? 0) + 1;
+export const components: Component[] = COMPONENT_SEED.map(
+  ([id, type, name, version, binary, config]) => ({
+    id,
+    type,
+    component_name: name,
+    version,
+    binary_path: binary,
+    config_path: config,
+    status: id % 3 === 0 ? "completed" : id % 3 === 1 ? "pending" : "running",
+    task_ids: [1],
+  }),
+);
+
+export const componentCounts: Record<string, number> = components.reduce<Record<string, number>>((m, c) => {
+  m[c.type] = (m[c.type] ?? 0) + 1;
   return m;
 }, {});
 
-// assetRef 把资产 id 变成 finding 上挂的资产引用(label 与后端 coverageNodeLabel
-// 的取值顺序一致:URL > 域名 > IP > 应用名)。「按资产」视图的树就是靠这些引用
-// 把发现挂到资产上的。
-function assetRef(id: number): FindingAsset {
-  const asset = assets.find((candidate) => candidate.id === id);
-  if (!asset) throw new Error(`mock assetRef: unknown asset ${id}`);
+// componentRef 把组件 id 变成 finding 上挂的组件引用（label 与后端一致：名字 + 版本）。
+function componentRef(id: number): FindingComponent {
+  const component = components.find((candidate) => candidate.id === id);
+  if (!component) throw new Error(`mock componentRef: unknown component ${id}`);
   return {
     id: String(id),
-    type: asset.type,
-    label: asset.url || asset.domain || asset.ip || asset.app_name || String(id),
+    type: component.type,
+    label: component.version ? `${component.component_name} ${component.version}` : component.component_name,
   };
 }
 
@@ -586,7 +311,7 @@ function assetRef(id: number): FindingAsset {
 export const findings: Finding[] = [
   {
     id: "f-1",
-    assets: [assetRef(18)],
+    components: [componentRef(18)],
     vulnclass: "SQL Injection",
     name: "官网搜索接口报错型 SQL 注入",
     severity: "high",
@@ -602,7 +327,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-2",
-    assets: [assetRef(15)],
+    components: [componentRef(15)],
     vulnclass: "IDOR",
     severity: "high",
     status: "pending",
@@ -615,7 +340,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-3",
-    assets: [assetRef(3)],
+    components: [componentRef(3)],
     vulnclass: "Weak JWT",
     severity: "high",
     status: "pending",
@@ -627,7 +352,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-4",
-    assets: [assetRef(18)],
+    components: [componentRef(18)],
     vulnclass: "Reflected XSS",
     severity: "medium",
     status: "pending",
@@ -639,7 +364,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-5",
-    assets: [assetRef(2)],
+    components: [componentRef(2)],
     vulnclass: "Exposed .git",
     severity: "medium",
     status: "pending",
@@ -651,7 +376,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-6",
-    assets: [assetRef(17)],
+    components: [componentRef(17)],
     vulnclass: "Default Credentials",
     severity: "high",
     status: "pending",
@@ -664,7 +389,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-7",
-    assets: [assetRef(17)],
+    components: [componentRef(17)],
     vulnclass: "Open Redirect",
     severity: "low",
     status: "pending",
@@ -676,7 +401,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-8",
-    assets: [assetRef(17)],
+    components: [componentRef(17)],
     vulnclass: "Missing Rate Limit",
     severity: "medium",
     status: "pending",
@@ -688,7 +413,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-9",
-    assets: [assetRef(16)],
+    components: [componentRef(16)],
     vulnclass: "Verbose Error",
     severity: "low",
     status: "pending",
@@ -700,7 +425,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-10",
-    assets: [assetRef(4)],
+    components: [componentRef(4)],
     vulnclass: "Outdated Component",
     severity: "medium",
     status: "pending",
@@ -725,7 +450,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-12",
-    assets: [assetRef(4)],
+    components: [componentRef(4)],
     vulnclass: "Deserialization RCE",
     name: "shop 商城 Fastjson 反序列化远程命令执行",
     severity: "critical",
@@ -742,7 +467,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-13",
-    assets: [assetRef(19)],
+    components: [componentRef(19)],
     vulnclass: "Privilege Escalation",
     severity: "high",
     status: "pending",
@@ -756,7 +481,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-14",
-    assets: [assetRef(19), assetRef(21)],
+    components: [componentRef(19), componentRef(21)],
     vulnclass: "Network Segmentation",
     severity: "medium",
     status: "pending",
@@ -769,7 +494,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-15",
-    assets: [assetRef(26)],
+    components: [componentRef(26)],
     vulnclass: "Unauthenticated RCE",
     severity: "high",
     status: "pending",
@@ -783,7 +508,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-16",
-    assets: [assetRef(21)],
+    components: [componentRef(21)],
     vulnclass: "Kerberoasting",
     severity: "high",
     status: "pending",
@@ -796,7 +521,7 @@ export const findings: Finding[] = [
   },
   {
     id: "f-17",
-    assets: [assetRef(20)],
+    components: [componentRef(20)],
     vulnclass: "Domain Compromise",
     name: "内网域控 DC01 完全控制（Domain Admin）",
     severity: "critical",
@@ -1337,7 +1062,7 @@ export const activity: Activity[] = [
     tool_use_id: "p0-ai",
     summary: "add_intent × 4（批量派首批探索方向）",
     detail:
-      "intents=[\n  { summary: 'acme.com 全量子域枚举 + 存活主机端口/服务识别，摸清攻击面', asset_ids: [acme.com], priority: 6 },\n  { summary: 'admin.acme.com 后台默认口令/弱口令测试（Element-UI 登录，无验证码）', asset_ids: [admin], priority: 9 },\n  { summary: 'www.acme.com/search q 参数 SQL 注入探测', asset_ids: [www], priority: 8 },\n  { summary: 'api.acme.com 订单接口越权(IDOR)测试', asset_ids: [api], priority: 8 },\n]\nparent_ids 均空（顶层全新方向，兜底连 origin fact）。",
+      "intents=[\n  { summary: 'acme.com 全量子域枚举 + 存活主机端口/服务识别，摸清攻击面', component_ids: [acme.com], priority: 6 },\n  { summary: 'admin.acme.com 后台默认口令/弱口令测试（Element-UI 登录，无验证码）', component_ids: [admin], priority: 9 },\n  { summary: 'www.acme.com/search q 参数 SQL 注入探测', component_ids: [www], priority: 8 },\n  { summary: 'api.acme.com 订单接口越权(IDOR)测试', component_ids: [api], priority: 8 },\n]\nparent_ids 均空（顶层全新方向，兜底连 origin fact）。",
   },
   {
     seq: 1005,
@@ -1355,7 +1080,7 @@ export const activity: Activity[] = [
     ts: T("2026-07-24T09:13:05Z"),
     kind: "text",
     summary:
-      "本轮派生首批 4 条意图：i1 资产侦察、i2 后台口令、i4 注入、i5 API 越权。g1 走 i2、g2 走 i4/i5，双目标各有独立入口在推进。等 worker 产出事实后再据血缘加码。",
+      "本轮派生首批 4 条意图：i1 组件侦察、i2 后台口令、i4 注入、i5 API 越权。g1 走 i2、g2 走 i4/i5，双目标各有独立入口在推进。等 worker 产出事实后再据血缘加码。",
   },
 
   // ── 第 1 轮 · 攻击面加码（2026-07-25 14:12）──
@@ -1398,7 +1123,7 @@ export const activity: Activity[] = [
     tool_use_id: "p1-ai",
     summary: "add_intent × 2（Fastjson 突破链，串行分步先派可执行一步）",
     detail:
-      "intents=[\n  { summary: 'shop.acme.com 组件指纹深挖 + Fastjson 1.2.24 CVE 精确关联(确认 gadget 链)', asset_ids: [shop], parent_ids: [fa3], priority: 7 },\n  { summary: '构造 Fastjson 反序列化 payload 触发 shop RCE，获取反弹 shell', asset_ids: [shop], parent_ids: [fa3], priority: 9 },\n]\n注：这是强依赖串行链，已 TodoWrite 记『指纹→RCE→立足点提权』三步，本轮只派前两步（提权依赖 shell 产出，下轮再派）。",
+      "intents=[\n  { summary: 'shop.acme.com 组件指纹深挖 + Fastjson 1.2.24 CVE 精确关联(确认 gadget 链)', component_ids: [shop], parent_ids: [fa3], priority: 7 },\n  { summary: '构造 Fastjson 反序列化 payload 触发 shop RCE，获取反弹 shell', component_ids: [shop], parent_ids: [fa3], priority: 9 },\n]\n注：这是强依赖串行链，已 TodoWrite 记『指纹→RCE→立足点提权』三步，本轮只派前两步（提权依赖 shell 产出，下轮再派）。",
   },
   {
     seq: 1105,
@@ -1481,7 +1206,7 @@ export const activity: Activity[] = [
     tool_use_id: "p2-ai",
     summary: "add_intent × 4（以立足点为 pivot 展开内网横向）",
     detail:
-      "intents=[\n  { summary: '以 dmz-web01 为 pivot 做内网 10.10.10.0/24 主机发现与端口识别', asset_ids: [dmz-web01], parent_ids: [fa6], priority: 8 },\n  { summary: '内网横向：复用硬编码口令 sa/Acme@2021 做凭据复用与密码喷洒', parent_ids: [faCreds], priority: 8 },\n  { summary: '内部 Jenkins(10.10.10.20) 未授权 /script Groovy 执行(RCE)', parent_ids: [fa6], priority: 9 },\n  { summary: '对域服务账号做 Kerberoasting 并离线破解', parent_ids: [fa6], priority: 8 },\n]\n主机发现是前置(先派)，其余三条是并行的横向探索维度。",
+      "intents=[\n  { summary: '以 dmz-web01 为 pivot 做内网 10.10.10.0/24 主机发现与端口识别', component_ids: [dmz-web01], parent_ids: [fa6], priority: 8 },\n  { summary: '内网横向：复用硬编码口令 sa/Acme@2021 做凭据复用与密码喷洒', parent_ids: [faCreds], priority: 8 },\n  { summary: '内部 Jenkins(10.10.10.20) 未授权 /script Groovy 执行(RCE)', parent_ids: [fa6], priority: 9 },\n  { summary: '对域服务账号做 Kerberoasting 并离线破解', parent_ids: [fa6], priority: 8 },\n]\n主机发现是前置(先派)，其余三条是并行的横向探索维度。",
   },
   {
     seq: 1207,
@@ -1612,7 +1337,7 @@ export const activity: Activity[] = [
     tool_use_id: "p4-ai",
     summary: "add_intent × 2（收敛 g2 取数，提高优先级）",
     detail:
-      "intents=[\n  { summary: '已登入 admin 后台，枚举用户管理/导出接口并批量拉取用户敏感字段', asset_ids: [admin], parent_ids: [fa1], priority: 9 },\n  { summary: 'api.acme.com 订单 IDOR 遍历 order_id 批量拉取用户订单/PII', asset_ids: [api], parent_ids: [fa2], priority: 9 },\n]\n注：i3/i5 已在 running，本轮以更精准的取数描述 + 提优先级(→9)加码，不重复派同义意图。",
+      "intents=[\n  { summary: '已登入 admin 后台，枚举用户管理/导出接口并批量拉取用户敏感字段', component_ids: [admin], parent_ids: [fa1], priority: 9 },\n  { summary: 'api.acme.com 订单 IDOR 遍历 order_id 批量拉取用户订单/PII', component_ids: [api], parent_ids: [fa2], priority: 9 },\n]\n注：i3/i5 已在 running，本轮以更精准的取数描述 + 提优先级(→9)加码，不重复派同义意图。",
   },
   {
     seq: 1406,
@@ -1702,7 +1427,7 @@ export const activity: Activity[] = [
     kind: "tool_result",
     tool: "upsert_asset",
     tool_use_id: "t13",
-    summary: "6 assets upserted",
+    summary: "6 components upserted",
   },
   {
     seq: 17,
@@ -1710,7 +1435,7 @@ export const activity: Activity[] = [
     intent_id: "i1",
     ts: T("2026-07-24T09:40:00Z"),
     kind: "result",
-    summary: "资产侦察完成，发现后台 admin.acme.com，交回图。",
+    summary: "组件侦察完成，发现后台 admin.acme.com，交回图。",
     input_tokens: 96000,
     output_tokens: 6100,
     cache_read_tokens: 61000,
@@ -3137,7 +2862,7 @@ export const agents: Agent[] = [
     role: "custom",
     builtin: false,
     enabled: true,
-    description: "定时对新资产做被动侦察",
+    description: "定时对新组件做被动侦察",
     max_turns: 12,
     mcp_count: 1,
     skill_count: 1,
@@ -3147,7 +2872,7 @@ export const agents: Agent[] = [
 
 const promptVars: PromptVar[] = [
   { name: "Goal", description: "当前任务目标", example: "拿到 acme.com 后台管理权限", source: "runtime" },
-  { name: "AssetSummary", description: "资产图概览", example: "6 子域 / 3 IP / 4 应用 / 4 端点", source: "distilled" },
+  { name: "ComponentSummary", description: "组件计数/类型分布", example: "web 3 / mqtt 2 / ssh 1", source: "distilled" },
   { name: "RouteHint", description: "探索路线提示", example: "优先后台与 API 越权面", source: "exploration" },
 ];
 
@@ -3160,7 +2885,7 @@ export function agentDetail(key: string): AgentDetail {
   const a = agents.find((x) => x.key === key) ?? agents[1];
   return {
     agent: a,
-    prompt: `你是 ARTEX 的「${a.name}」。\n目标：{{.Goal}}\n资产概览：{{.AssetSummary}}\n路线提示：{{.RouteHint}}\n请基于以上信息推进探索，并通过工具把结果写回图。`,
+    prompt: `你是 ARTEX 的「${a.name}」。\n目标：{{.Goal}}\n组件概览：{{.ComponentSummary}}\n路线提示：{{.RouteHint}}\n请基于以上信息推进探索，并通过工具把结果写回图。`,
     variables: promptVars,
     versions: promptVersions,
     visibility: { mcp: [1, 2], skill: ["api-recon", "playwright-cli"] },
@@ -3286,14 +3011,66 @@ export const tools: Tool[] = [
     calls: 96,
   },
   {
-    key: "upsert_asset",
+    key: "insert_components",
     system: true,
-    description: "写入/更新资产节点",
-    schema: { type: "object", properties: { type: { type: "string" }, value: { type: "string" } } },
-    agents: ["worker"],
+    description: "写入/更新组件",
+    schema: {
+      type: "object",
+      properties: { type: { type: "string" }, component_name: { type: "string" } },
+    },
+    agents: ["worker", "planner", "auto"],
     enabled: true,
     kind: "builtin",
     calls: 417,
+  },
+  {
+    key: "list_components",
+    system: true,
+    description: "查询组件库（DSL / id / ids，只返回本任务范围内）",
+    schema: {
+      type: "object",
+      properties: {
+        dsl: { type: "string" },
+        type: { type: "string" },
+        id: { type: "integer" },
+        limit: { type: "integer" },
+      },
+    },
+    agents: ["worker", "planner", "auto"],
+    enabled: true,
+    kind: "builtin",
+    calls: 623,
+  },
+  {
+    key: "list_untested_components",
+    system: true,
+    description: "按类型分页列出还没挖完的组件（待挖 backlog）",
+    schema: {
+      type: "object",
+      properties: { type: { type: "string" }, page: { type: "integer" }, page_size: { type: "integer" } },
+    },
+    agents: ["planner", "auto"],
+    enabled: true,
+    kind: "builtin",
+    calls: 74,
+  },
+  {
+    key: "set_component_status",
+    system: true,
+    description: "更新组件挖掘状态：pending / running / completed / ignored",
+    schema: {
+      type: "object",
+      properties: {
+        id: { type: "integer" },
+        ids: { type: "array", items: { type: "integer" } },
+        status: { type: "string" },
+      },
+      required: ["status"],
+    },
+    agents: ["worker", "auto"],
+    enabled: true,
+    kind: "builtin",
+    calls: 388,
   },
   {
     key: "list_goals",
@@ -3794,151 +3571,64 @@ export const conversationMessages: Record<number, Activity[]> = {
   ],
 };
 
-// ── 资产测试覆盖度（/tasks/{id}/coverage）──
-export const coverage = {
-  enabled: true,
-  scope_rows: 4,
-  denominator: 26,
-  tested: 11,
-  pct: 11 / 26,
-  by_type: [
-    { type: "subdomain", total: 6, tested: 4 },
-    { type: "service", total: 9, tested: 4 },
-    { type: "endpoint", total: 8, tested: 2 },
-    { type: "ip", total: 3, tested: 1 },
-  ],
-};
+// ── 组件测试覆盖度（/tasks/{id}/coverage）──
+export const coverage = (() => {
+  const total = components.filter((c) => c.status !== "ignored");
+  const tested = total.filter((c) => c.status === "completed");
+  const byType = new Map<string, { total: number; tested: number }>();
+  for (const component of total) {
+    const row = byType.get(component.type) ?? { total: 0, tested: 0 };
+    row.total += 1;
+    if (component.status === "completed") row.tested += 1;
+    byType.set(component.type, row);
+  }
+  return {
+    enabled: true,
+    denominator: total.length,
+    tested: tested.length,
+    pct: total.length ? tested.length / total.length : null,
+    by_type: Array.from(byType, ([type, row]) => ({ type, ...row })),
+  };
+})();
 
-// ── 资产覆盖图（/tasks/{id}/coverage-graph）──
-export const coverageGraph = {
-  nodes: [
-    { key: "c:1", kind: "company", label: "Acme Corp", tested: false, in_scope: false, company_id: 1 },
-    {
-      key: "a:1",
-      kind: "root_domain",
-      label: "acme.com",
-      tested: false,
-      in_scope: false,
-      asset_id: 1,
-      domain: "acme.com",
-      company_id: 1,
-    },
-    {
-      key: "a:2",
-      kind: "subdomain",
-      label: "www.acme.com",
-      tested: true,
-      in_scope: true,
-      asset_id: 2,
-      domain: "www.acme.com",
-      root_domain: "acme.com",
-    },
-    {
-      key: "a:3",
-      kind: "subdomain",
-      label: "api.acme.com",
-      tested: true,
-      in_scope: true,
-      asset_id: 3,
-      domain: "api.acme.com",
-      root_domain: "acme.com",
-    },
-    {
-      key: "a:4",
-      kind: "subdomain",
-      label: "admin.acme.com",
-      tested: false,
-      in_scope: true,
-      asset_id: 4,
-      domain: "admin.acme.com",
-      root_domain: "acme.com",
-    },
-    {
-      key: "a:5",
-      kind: "service",
-      label: "www.acme.com",
-      tested: true,
-      in_scope: true,
-      asset_id: 5,
-      domain: "www.acme.com",
-      url: "https://www.acme.com",
-      port: 443,
-      page_title: "Acme 首页",
-      status_code: 200,
-    },
-    {
-      key: "a:6",
-      kind: "endpoint",
-      label: "https://www.acme.com/search",
-      tested: true,
-      in_scope: true,
-      asset_id: 6,
-      url: "https://www.acme.com/search?q=",
-      domain: "www.acme.com",
-    },
-    {
-      key: "a:7",
-      kind: "service",
-      label: "api.acme.com",
-      tested: true,
-      in_scope: true,
-      asset_id: 7,
-      domain: "api.acme.com",
-      url: "https://api.acme.com",
-      port: 443,
-      page_title: "API Gateway",
-      status_code: 401,
-    },
-    {
-      key: "a:8",
-      kind: "endpoint",
-      label: "https://api.acme.com/v1/orders",
-      tested: false,
-      in_scope: true,
-      asset_id: 8,
-      url: "https://api.acme.com/v1/orders?id=",
-      domain: "api.acme.com",
-    },
-    {
-      key: "a:9",
-      kind: "service",
-      label: "admin.acme.com",
-      tested: false,
-      in_scope: true,
-      asset_id: 9,
-      domain: "admin.acme.com",
-      url: "https://admin.acme.com",
-      port: 443,
-      page_title: "后台登录",
-      status_code: 200,
-    },
-    {
-      key: "a:10",
-      kind: "ip",
-      label: "203.0.113.10",
-      tested: true,
-      in_scope: true,
-      asset_id: 10,
-      ip: "203.0.113.10",
-      company_id: 1,
-    },
-  ],
-  edges: [
-    { src: "a:1", dst: "c:1" },
-    { src: "a:2", dst: "a:1" },
-    { src: "a:3", dst: "a:1" },
-    { src: "a:4", dst: "a:1" },
-    { src: "a:5", dst: "a:2" },
-    { src: "a:6", dst: "a:5" },
-    { src: "a:7", dst: "a:3" },
-    { src: "a:8", dst: "a:7" },
-    { src: "a:9", dst: "a:4" },
-    { src: "a:10", dst: "c:1" },
-  ],
-};
+// ── 组件覆盖图（/tasks/{id}/coverage-graph）──
+// 与后端 BuildCoverageGraph 同形：两层，分组节点的 kind 是组件类型名。
+export const coverageGraph = (() => {
+  const nodes: {
+    key: string;
+    kind: string;
+    label: string;
+    tested: boolean;
+    in_scope: boolean;
+    component_id?: number;
+    status?: string;
+    version?: string;
+  }[] = [];
+  const edges: { src: string; dst: string }[] = [];
+  const groups = new Set<string>();
+  for (const component of components) {
+    if (!groups.has(component.type)) {
+      groups.add(component.type);
+      const tested = components.some((c) => c.type === component.type && c.status === "completed");
+      nodes.push({ key: `t:${component.type}`, kind: component.type, label: component.type, tested, in_scope: true });
+    }
+    nodes.push({
+      key: `a:${component.id}`,
+      kind: "component",
+      label: component.version ? `${component.component_name} ${component.version}` : component.component_name,
+      tested: component.status === "completed",
+      in_scope: component.status !== "ignored",
+      component_id: component.id,
+      status: component.status,
+      version: component.version,
+    });
+    edges.push({ src: `a:${component.id}`, dst: `t:${component.type}` });
+  }
+  return { nodes, edges };
+})();
 
-// ── 资产在本任务关联的意图/事实/发现（/tasks/{id}/asset-refs）──
-// 播报板 demo:探索节点 → 其锚定资产。真实后端读 exploration_anchors,mock 里静态给几条。
+// ── 组件在本任务关联的意图/事实/发现（/tasks/{id}/component-refs）──
+// 播报板 demo:探索节点 → 其锚定组件。真实后端读 exploration_anchors,mock 里静态给几条。
 const NODE_ASSETS: Record<string, number[]> = {
   fi1: [3],
   fi2: [2, 4],
@@ -3950,14 +3640,14 @@ const NODE_ASSETS: Record<string, number[]> = {
   i7: [4],
 };
 
-export function nodeAssetsFor(nodeId: string): FindingAsset[] {
+export function nodeComponentsFor(nodeId: string): FindingComponent[] {
   return (NODE_ASSETS[nodeId] ?? []).flatMap((id) => {
-    const asset = assets.find((candidate) => candidate.id === id);
-    return asset ? [assetRef(id)] : [];
+    const component = components.find((candidate) => candidate.id === id);
+    return component ? [componentRef(id)] : [];
   });
 }
 
-export function assetRefsFor(_assetId: number) {
+export function componentRefsFor(_componentId: number) {
   return {
     intents: [
       { id: 12, kind: "intent", state: "done", summary: "对 www.acme.com 搜索接口做 SQL 注入探测" },

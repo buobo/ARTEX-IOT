@@ -101,14 +101,14 @@ func TestTruncateHTMLNeverCutsTagInHalf(t *testing.T) {
 }
 
 func TestAssetLineOmitsExcess(t *testing.T) {
-	if got := assetLine(nil, 3); got != "" {
+	if got := componentLine(nil, 3); got != "" {
 		t.Fatalf("无资产应返回空串，得到 %q", got)
 	}
-	if got := assetLine([]string{"a", "b"}, 3); got != "a、b" {
+	if got := componentLine([]string{"a", "b"}, 3); got != "a、b" {
 		t.Fatalf("未超限应全列，得到 %q", got)
 	}
 	// 超出上限时必须标注总数，否则读者不知道还有多少资产没列出来。
-	got := assetLine([]string{"a", "b", "c", "d", "e"}, 2)
+	got := componentLine([]string{"a", "b", "c", "d", "e"}, 2)
 	if !strings.Contains(got, "等 5 个") {
 		t.Fatalf("应标注总数 5，得到 %q", got)
 	}

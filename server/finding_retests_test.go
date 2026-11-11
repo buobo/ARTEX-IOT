@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"iter"
@@ -101,6 +102,29 @@ func waitRetestIdle(t *testing.T, s *Server) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Error("conversation did not become idle")
+}
+
+// snapshotPrompt 记住某内置 agent 当前的提示词版本，测试结束删掉测试期间追加的版本并把
+// current_prompt_id 指回原版本。开发库同时也是"生产"库：不这样做，每跑一次测试都会往真实
+// agent 的提示词历史里追加 test / restore 版本，运行期间还会临时替换生效提示词。
+func snapshotPrompt(t *testing.T, pg *db.DB, key string) {
+	t.Helper()
+	row, err := pg.GetAgentByKey(key)
+	if err != nil || row == nil {
+		t.Fatalf("missing agent %s: %v", key, err)
+	}
+	var cur sql.NullInt64
+	if err := pg.QueryRow(`SELECT current_prompt_id FROM agents WHERE id=$1`, row.ID).Scan(&cur); err != nil {
+		t.Fatalf("read current prompt %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		_, _ = pg.Exec(`DELETE FROM agent_prompts WHERE agent_id=$1 AND id>$2`, row.ID, cur.Int64)
+		if cur.Valid {
+			_, _ = pg.Exec(`UPDATE agents SET current_prompt_id=$1 WHERE id=$2`, cur.Int64, row.ID)
+		} else {
+			_, _ = pg.Exec(`UPDATE agents SET current_prompt_id=NULL WHERE id=$1`, row.ID)
+		}
+	})
 }
 
 func TestRetestActiveStatusLifecycle(t *testing.T) {
@@ -319,6 +343,7 @@ func TestRetestValidationSeedingAndScope(t *testing.T) {
 	if err := s.m.pg.QueryRow(`SELECT count(*) FROM agent_triggers WHERE agent_key=$1`, db.FindingRetestAgentKey).Scan(&triggers); err != nil || triggers != 0 {
 		t.Fatal("unexpected automatic trigger", triggers, err)
 	}
+	snapshotPrompt(t, s.m.pg, db.FindingRetestAgentKey)
 	if _, err := s.m.pg.SavePrompt(a.ID, "customized retest prompt", "test", "test"); err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +354,6 @@ func TestRetestValidationSeedingAndScope(t *testing.T) {
 	if err := s.m.pg.QueryRow(`SELECT p.template_text FROM agent_prompts p JOIN agents a ON a.current_prompt_id=p.id WHERE a.key=$1`, a.Key).Scan(&prompt); err != nil || prompt != "customized retest prompt" {
 		t.Fatal("seed overwrote prompt", prompt, err)
 	}
-	_, _ = s.m.pg.SavePrompt(a.ID, agent.RetesterDefaultPrompt, "restore", "test")
 }
 
 func TestSlicePaneExtractsCommandOutput(t *testing.T) {

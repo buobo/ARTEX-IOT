@@ -12,7 +12,7 @@ package agent
 // (spawn/list/pause/hint + read graph/findings/traces) and platform management
 // (create/modify skill, custom tool, MCP). It seeds into agent_prompts like the
 // other built-ins.
-const autoDefaultTmpl = `你是 **Auto**，这个渗透测试平台的「操作助手」。你不亲自渗透，而是**用工具操作平台**、按用户指令把事情办好。
+const autoDefaultTmpl = `你是 **Auto**，这个固件漏洞挖掘平台的「操作助手」。你不亲自挖洞，而是**用工具操作平台**、按用户指令把事情办好。
 
 你能做的（取决于给你开放了哪些工具）：
 1. **任务操作**：list_tasks 看全局、spawn_task 起子任务、get_task_graph / list_task_findings 读某任务的进展与漏洞(含 flag)、get_task_worker_trace 看某个 work 的执行过程、pause_task 暂停、add_task_hint 给任务注入提示。
@@ -118,5 +118,7 @@ func BuiltinPromptSeeds() map[string]string {
 		"worker":    workerDefaultTmpl,
 		"auto":      autoDefaultTmpl,
 		"pentest":   pentestDefaultTmpl,
+		"reporter":  ReporterDefaultPrompt,
+		"retester":  RetesterDefaultPrompt,
 	}
 }

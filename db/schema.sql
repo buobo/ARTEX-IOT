@@ -62,7 +62,6 @@ CREATE TABLE IF NOT EXISTS components (
     task_ids        BIGINT[] NOT NULL DEFAULT '{}',
     component_name  TEXT,
     port            INTEGER CHECK (port BETWEEN 1 AND 65535),
-    open_ports      JSONB[] NOT NULL DEFAULT '{}',
     technologies    TEXT[] NOT NULL DEFAULT '{}',
     firmware_sha256 TEXT,
     version         TEXT,
@@ -72,7 +71,6 @@ CREATE TABLE IF NOT EXISTS components (
     started_by      TEXT,
     status          TEXT NOT NULL DEFAULT 'pending',
     notes           TEXT NOT NULL DEFAULT '',
-    extra           JSONB   NOT NULL DEFAULT '{}',
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -144,18 +142,6 @@ BEGIN
         ALTER TABLE components RENAME COLUMN service_name TO component_name;
     END IF;
 END $$;
-
--- 把老数据里已写进 extra 的组件信息迁成正式列
-UPDATE components SET
-    type = CASE WHEN extra->>'component_kind' IN
-                     ('web','mqtt','ros','ssh','telnet','upnp','onvif','rtsp','ftp')
-                THEN extra->>'component_kind' ELSE 'other' END,
-    component_name = COALESCE(NULLIF(component_name,''), NULLIF(extra->>'name',''),
-                              NULLIF(extra->>'component_name',''), 'unknown'),
-    version      = COALESCE(NULLIF(version,''), NULLIF(extra->>'version','')),
-    binary_path  = COALESCE(NULLIF(binary_path,''),  NULLIF(extra->>'binary','')),
-    started_by   = COALESCE(NULLIF(started_by,''), NULLIF(extra->>'started_by',''))
-WHERE extra ? 'component_kind';
 
 -- 剩下的网络资产行（域名/IP/子域/APP/端点）没有组件语义，删除
 DELETE FROM components
@@ -986,12 +972,8 @@ DROP TRIGGER IF EXISTS trg_mcp_upd ON mcp_servers;
 CREATE TRIGGER trg_mcp_upd BEFORE UPDATE ON mcp_servers
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- 默认数据源占位：ScopeSentry 资产同步 MCP（地址与认证均留空、未启用）。
--- 供「资产同步」页检测数据源是否已配置；用户在页面填入 url 与 X-API-Key 后再启用。
--- 仅在缺失时插入，绝不覆盖用户已配置/已启用的服务器（schema.sql 每次启动都会 Exec）。
-INSERT INTO mcp_servers (name, transport, url, env, enabled)
-VALUES ('ScopeSentry', 'http', NULL, '{"X-API-Key":""}', false)
-ON CONFLICT (name) DO NOTHING;
+-- 旧版会在这里播种一个 ScopeSentry 资产同步 MCP 占位；资产同步整块下线后不再播种。
+-- 老库里遗留的那一条（disabled、url 为空）可手工删除，不影响任何功能。
 
 CREATE TABLE IF NOT EXISTS mcp_tools_cache (
     id            BIGSERIAL PRIMARY KEY,

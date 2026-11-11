@@ -19,13 +19,13 @@ import (
 func singleMsg() Message {
 	return Message{
 		Items: []Item{{
-			FindingID: 42,
-			Name:      `登录处 "SQL注入" 风险`,
-			VulnClass: "SQL注入",
-			Severity:  "high",
-			Summary:   "参数 id\n未过滤 导致注入",
-			Components:    []string{"a.example.com", "b.example.com"},
-			DetailURL: "https://artex.local/function/findings/detail?id=42",
+			FindingID:  42,
+			Name:       `登录处 "SQL注入" 风险`,
+			VulnClass:  "SQL注入",
+			Severity:   "high",
+			Summary:    "参数 id\n未过滤 导致注入",
+			Components: []string{"a.example.com", "b.example.com"},
+			DetailURL:  "https://artex.local/function/findings/detail?id=42",
 		}},
 	}
 }
@@ -35,12 +35,12 @@ func batchMsg(n int) Message {
 	m := Message{Batch: true, WindowMinutes: 30, HomeURL: "https://artex.local/function/findings"}
 	for i := 0; i < n; i++ {
 		m.Items = append(m.Items, Item{
-			FindingID: int64(i + 1),
-			Name:      "漏洞" + itoa(i+1),
-			VulnClass: "XSS",
-			Severity:  "medium",
-			Summary:   "反射型跨站脚本",
-			Components:    []string{"target.example.com"},
+			FindingID:  int64(i + 1),
+			Name:       "漏洞" + itoa(i+1),
+			VulnClass:  "XSS",
+			Severity:   "medium",
+			Summary:    "反射型跨站脚本",
+			Components: []string{"target.example.com"},
 		})
 	}
 	return m

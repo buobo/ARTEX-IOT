@@ -428,7 +428,7 @@ func (n *Notifier) itemFor(ctx context.Context, snap notify.Snapshot, baseURL st
 	if err != nil {
 		// 资产名解析失败不该阻止推送：读不到名字比收不到通知轻得多，
 		// 消息里少一行资产而已。
-		log.Printf("[notify] 解析资产名失败 finding=%d: %v", snap.FindingID, err)
+		log.Printf("[notify] 解析组件名失败 finding=%d: %v", snap.FindingID, err)
 	}
 	item := notify.Item{
 		FindingID:  snap.FindingID,

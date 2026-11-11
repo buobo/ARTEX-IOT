@@ -52,8 +52,8 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
 	findingRecorder FindingRecorder
-	as              *db.ComponentStore   // component store (optional; nil = component tools not available)
-	cs              *db.CompanyStore // company store (optional)
+	as              *db.ComponentStore // component store (optional; nil = component tools not available)
+	cs              *db.CompanyStore   // company store (optional)
 	ts              *db.ExplorationStore
 	worker          string
 	taskID          int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
@@ -77,9 +77,6 @@ type ToolSet struct {
 	// intent id (engine callback, wired by the planner): the worker injects it before
 	// its next tool call and re-plans, without being killed. nil = tool unavailable.
 	steerWork func(intentID int64, msg string) error
-	// enrich, if set, receives async auto-completion triggers (DNS resolve for a
-	// domain, HTTP probe for a site). nil = no engine enrichment.
-	enrich EnrichTrigger
 	// notify, if set, wakes the task's planner after a graph change that should be
 	// re-planned promptly (currently: a new hint). nil = no wake (the hint is still
 	// stored and read on the next round triggered by other events). debounced.
@@ -129,21 +126,14 @@ func (t *ToolSet) SetNotify(fn func()) { t.notify = fn }
 // SetNotifyFinding wires the finding-wake callback (see ToolSet.notifyFinding).
 func (t *ToolSet) SetNotifyFinding(fn func(int64, string)) { t.notifyFinding = fn }
 
-// EnrichTrigger is the enrichment engine seen from the tool layer (see package
-// enrich). Kept as an interface here to avoid coupling agent → enrich.
-type EnrichTrigger interface {
-	ResolveDomain(id int64, host string)
-	ProbeSite(id int64, url string)
-}
-
 // WriteCounts breaks down what a worker persisted this run, by node kind, so the
 // engine can log an accurate "wrote back" summary instead of lumping components and
 // findings under "facts" (record_fact → Facts, insert_components → Components,
 // report_finding → Findings; each element of a batch counts once).
 type WriteCounts struct {
-	Facts    int
-	Components   int
-	Findings int
+	Facts      int
+	Components int
+	Findings   int
 }
 
 // Total is every node persisted this run, regardless of kind — the
@@ -217,22 +207,10 @@ func (t *ToolSet) SearchWorkerTracesTool() actool.CoreTool { return t.searchAllW
 func (t *ToolSet) NodeDetailTool() actool.CoreTool         { return t.nodeDetail() }
 func (t *ToolSet) AddHintTool() actool.CoreTool            { return t.addHint() }
 
-// SetEnrich wires the async enrichment engine (DNS/HTTP auto-completion).
-func (t *ToolSet) SetEnrich(e EnrichTrigger) { t.enrich = e }
-
 // SetOwnerNode sets the exploration node that writes anchor to (worker: its
 // intent node; planner/main: the begin root). Components created/referenced while
 // ownerNode is set are anchored to it as lineage (not visibility).
 func (t *ToolSet) SetOwnerNode(id int64) { t.ownerNode = id }
-
-// anchorOwner records a lineage edge from this run's owner node to an component
-// (no-op if unset). Provenance only — the component graph is global and shared, so
-// this no longer affects which components a task can read.
-func (t *ToolSet) anchorOwner(componentID int64) {
-	if t.ts != nil && t.ownerNode > 0 && componentID > 0 {
-		_ = t.ts.Anchor(t.ownerNode, componentID)
-	}
-}
 
 // pid parses an id that may arrive as a JSON number or string ("" / 0 → 0).
 func pid(raw json.RawMessage) int64 {
@@ -1031,10 +1009,10 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 
 // intentItem 是 add_intent 批量/单条的一条探索方向。
 type intentItem struct {
-	Summary   string            `json:"summary"`
-	ComponentIDs  []json.RawMessage `json:"component_ids"`
-	ParentIDs []json.RawMessage `json:"parent_ids"`
-	Priority  int               `json:"priority"`
+	Summary      string            `json:"summary"`
+	ComponentIDs []json.RawMessage `json:"component_ids"`
+	ParentIDs    []json.RawMessage `json:"parent_ids"`
+	Priority     int               `json:"priority"`
 }
 
 // addOneIntent 创建一条意图节点并连上游血缘，返回 id。
@@ -1089,11 +1067,11 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
-			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/component_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖组件 id。"),
-			"component_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标组件 id】（**尽量传**，0/1/多个；是 list_components 返回的组件 id，不是探索节点 id）：这条探索方向针对哪些组件（服务/二进制/配置/接口等）。只要方向围绕某些具体组件就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入组件链路。仅当纯固件级摸底、确实没有具体组件时才留空。"},
-			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
-			"priority":   intp("优先级 0-10，默认5"),
+			"intents":       map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/component_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"summary":       str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖组件 id。"),
+			"component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标组件 id】（**尽量传**，0/1/多个；是 list_components 返回的组件 id，不是探索节点 id）：这条探索方向针对哪些组件（服务/二进制/配置/接口等）。只要方向围绕某些具体组件就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入组件链路。仅当纯固件级摸底、确实没有具体组件时才留空。"},
+			"parent_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
+			"priority":      intp("优先级 0-10，默认5"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -1225,7 +1203,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		var a struct {
 			VulnClass, Name, Severity, Summary, Evidence string
 			IntentID                                     json.RawMessage   `json:"intent_id"`
-			ComponentIDs                                     []json.RawMessage `json:"component_ids"`
+			ComponentIDs                                 []json.RawMessage `json:"component_ids"`
 			TrafficRefs                                  []db.TrafficRef   `json:"traffic_refs"`
 			EvidenceHintID                               json.RawMessage   `json:"evidence_hint_id"`
 		}
@@ -1301,12 +1279,12 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 // must NOT be stuffed into the component graph via upsert_component.
 // factItem 是 record_fact 批量/单条的一条事实。
 type factItem struct {
-	Summary    string            `json:"summary"`
-	Detail     string            `json:"detail"`
-	Evidence   string            `json:"evidence"`   // 一行关键证据（命令+关键输出行），支撑结论、便于事后核对
-	Confidence string            `json:"confidence"` // observed（直接看到）| inferred（据现象推断）
-	IntentID   json.RawMessage   `json:"intent_id"`
-	ComponentIDs   []json.RawMessage `json:"component_ids"`
+	Summary      string            `json:"summary"`
+	Detail       string            `json:"detail"`
+	Evidence     string            `json:"evidence"`   // 一行关键证据（命令+关键输出行），支撑结论、便于事后核对
+	Confidence   string            `json:"confidence"` // observed（直接看到）| inferred（据现象推断）
+	IntentID     json.RawMessage   `json:"intent_id"`
+	ComponentIDs []json.RawMessage `json:"component_ids"`
 }
 
 // recordOneFact 写一条 fact 节点并连到意图（intent→yields→fact）。defaultIntent 为
@@ -1356,13 +1334,13 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 		"  · confidence=observed（输出里直接看到）| inferred（据现象推断）。\n"+
 		"  · **否定类结论**（不可注入/端口关闭/未发现入口等）只写\"观察 + 试探性读法\"——陈述你实际看到什么，方向是否放弃由规划者综合全局定；务必给 evidence，手段没穷尽或证据弱（含只探一次、看起来像）标 inferred，确已穷尽且直接看到才标 observed。",
 		obj(map[string]any{
-			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/component_ids）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"summary":    str("对本次探索结论的【总结性一句话】（是对 detail 的概括）"),
-			"intent_id":  idp("产生本事实的意图 id（你领到的意图；批量时作为各条默认）"),
-			"detail":     str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
-			"evidence":   str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
-			"confidence": str("observed（输出里直接看到）| inferred（据现象推断）。否定结论务必如实标注。"),
-			"component_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关组件 id（可选，0/1/多个）：该事实涉及哪些组件"},
+			"facts":         map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/component_ids）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"summary":       str("对本次探索结论的【总结性一句话】（是对 detail 的概括）"),
+			"intent_id":     idp("产生本事实的意图 id（你领到的意图；批量时作为各条默认）"),
+			"detail":        str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
+			"evidence":      str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
+			"confidence":    str("observed（输出里直接看到）| inferred（据现象推断）。否定结论务必如实标注。"),
+			"component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关组件 id（可选，0/1/多个）：该事实涉及哪些组件"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -1403,9 +1381,9 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 }
 
 type hintItem struct {
-	Text        string            `json:"text"`
-	ComponentIDs    []json.RawMessage `json:"component_ids"`
-	TrafficRefs []db.TrafficRef   `json:"traffic_refs"`
+	Text         string            `json:"text"`
+	ComponentIDs []json.RawMessage `json:"component_ids"`
+	TrafficRefs  []db.TrafficRef   `json:"traffic_refs"`
 }
 
 // addOneHint 挂一条 hint 节点(active/human)到探索图,可锚定组件,返回 id。
@@ -1614,10 +1592,10 @@ func (t *ToolSet) addHint() actool.CoreTool {
 	return t.writeExpTool("add_hint", "把人类/主 agent 的战略提示挂到探索图，规划者下次生成意图时会读到它。\n"+
 		"★优先批量：多条提示放进 hints 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 hints 等长同序（失败项 id=0，详情见 errors）。单条则省略 hints 直接给顶层 text。",
 		obj(map[string]any{
-			"hints":        map[string]any{"type": "array", "description": "【优先用这个】要新增的提示数组，按顺序处理。每个元素字段同下方顶层字段（text/component_ids/traffic_refs）。返回 ids 与本数组等长、同序。", "items": obj(map[string]any{"text": str("提示内容"), "component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": HintTrafficSchema()})},
-			"text":         str("[单条] 提示内容，如'重点挖认证后接口'"),
-			"traffic_refs": HintTrafficSchema(),
-			"component_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的组件 id（可选，0/1/多个）"},
+			"hints":         map[string]any{"type": "array", "description": "【优先用这个】要新增的提示数组，按顺序处理。每个元素字段同下方顶层字段（text/component_ids/traffic_refs）。返回 ids 与本数组等长、同序。", "items": obj(map[string]any{"text": str("提示内容"), "component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": HintTrafficSchema()})},
+			"text":          str("[单条] 提示内容，如'重点挖认证后接口'"),
+			"traffic_refs":  HintTrafficSchema(),
+			"component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的组件 id（可选，0/1/多个）"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {

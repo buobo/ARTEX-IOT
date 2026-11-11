@@ -79,7 +79,7 @@ curl -s -X POST http://<TARGET>:8787/api/auth/login -H 'Content-Type: applicatio
 - **vulnclass/name**：未授权远程命令执行 / 供应链后门（ARTEX 登录接口 `captcha` 字段 `sh -c` 注入）
 - **evidence**：PoC 请求（`captcha` 以 `!` 开头）+ 响应中回显的命令输出（含你的 nonce 与 `id` 结果），证明无需认证即可 RCE。
 - 若流量捕获开启,配合 `traffic_search`/`bind_finding_traffic` 绑定这条登录请求/响应作为流量证据。
-- `insert_assets` 记下该 ARTEX 服务（host:port、service_type=http、title/version）。
+- `insert_components` 记下该 ARTEX 服务组件（type=web、component_name、version、port）。
 
 **修复建议**（写进报告给客户）：
 - 立即下线或隔离该实例;它运行的是被投毒的 ARTEX 版本,任何人可未授权 RCE。

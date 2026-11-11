@@ -2,8 +2,13 @@ package agent
 
 import (
 	"bytes"
+	"fmt"
+	"sort"
+	"strings"
 	"text/template"
 	"time"
+
+	"github.com/Autumn-27/artex/db"
 )
 
 // PromptOverride, if set, returns the stored system-prompt template for an agent
@@ -19,6 +24,42 @@ type PlannerVars struct{ Goal, Scope, ComponentSummary, DataDir, Now string }
 type WorkerVars struct{ ProxyAddr, WorkerName, DataDir, Now string }
 type MainVars struct{ Goal, ComponentSummary, FindingsSummary, DataDir, Now string }
 type GoalsVars struct{ EngagementDescription, DataDir, Now string }
+
+// componentSummary 渲染 {{.ComponentSummary}}：组件总数 + 类型分布（按数量倒序，最多 6 类）。
+// 查库失败返回空串——这是"可选态势"，不能因为它让提示词渲染失败。
+func componentSummary(as *db.ComponentStore, taskID int64) string {
+	if as == nil {
+		return ""
+	}
+	counts, err := as.CountsByType(taskID)
+	if err != nil || len(counts) == 0 {
+		return ""
+	}
+	type kv struct {
+		k string
+		v int
+	}
+	items := make([]kv, 0, len(counts))
+	total := 0
+	for k, v := range counts {
+		items = append(items, kv{k, v})
+		total += v
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].v != items[j].v {
+			return items[i].v > items[j].v
+		}
+		return items[i].k < items[j].k
+	})
+	if len(items) > 6 {
+		items = items[:6]
+	}
+	parts := make([]string, 0, len(items))
+	for _, it := range items {
+		parts = append(parts, fmt.Sprintf("%s %d", it.k, it.v))
+	}
+	return fmt.Sprintf("共 %d 个组件（%s）", total, strings.Join(parts, " / "))
+}
 
 // nowStr is the server-local wall-clock string exposed as the universal {{.Now}}
 // prompt variable. renderSystem runs on every agent turn/round, so this is fresh

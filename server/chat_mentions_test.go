@@ -19,9 +19,13 @@ import (
 )
 
 func TestChatMentionParsing(t *testing.T) {
-	refs, err := parseChatMentions("分析@[漏洞#12 同名] 与 @[接口#34 GET /api] @[漏洞#12 重复] user@example.com @漏洞")
-	if err != nil || len(refs) != 2 || refs[0].Kind != "finding" || refs[1].ID != 34 {
+	refs, err := parseChatMentions("分析@[漏洞#12 同名] 与 @[组件#34 httpd] @[漏洞#12 重复] user@example.com @漏洞")
+	if err != nil || len(refs) != 2 || refs[0].Kind != "finding" || refs[1].ID != 34 || refs[1].Kind != "component" {
 		t.Fatalf("refs=%+v err=%v", refs, err)
+	}
+	// 资产时代的旧标签（接口/服务/资产…）不再被识别：当普通文本忽略，不报错也不引用。
+	if legacy, err := parseChatMentions("@[接口#34 GET /api]"); err != nil || len(legacy) != 0 {
+		t.Fatalf("legacy label handled as ref: %+v %v", legacy, err)
 	}
 	for _, msg := range []string{"@[漏洞#0]", "@[漏洞#999999999999999999999999]"} {
 		if _, err := parseChatMentions(msg); err == nil {
@@ -245,7 +249,7 @@ func TestChatMentionCatalogAndContext(t *testing.T) {
 		t.Cleanup(func() { _, _ = pg.Exec(`DELETE FROM components WHERE id=$1`, id) })
 		fmt.Fprintf(&refs, "@[组件#%d 条目] ", id)
 		items, err := pg.SearchChatMentions(t.Context(), "component", fmt.Sprint(id))
-		if err != nil || len(items) == 0 || items[0].ID != id || items[0].Kind != kind {
+		if err != nil || len(items) == 0 || items[0].ID != id || items[0].Kind != "component" {
 			t.Fatalf("search %s: %+v %v", kind, items, err)
 		}
 		if kind == "web" {

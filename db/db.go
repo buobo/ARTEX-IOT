@@ -190,17 +190,17 @@ func intp(v int) *int { return &v }
 // 块统一置 true（尊重后续 toggle）；这里的 interactiveShell 只给需要「建行即默认开」的新 agent。
 var builtinAgents = []builtinAgent{
 	{"goals", "目标拆解", "goals", "把渗透任务目标拆解成若干独立、可验证的子目标。", []promptVar{
-		{"EngagementDescription", "任务描述（测试对象/背景）", "测试 example.com 站点", "exploration"},
+		{"EngagementDescription", "任务描述（测试对象/背景）", "审计 RP09 1.0.44 固件", "exploration"},
 		// Now 是全局 runtime 变量(见 server.globalPromptVars),不再在各 agent 目录里
 		// 重复定义,否则 withGlobalVars 追加时会与全局项撞名。
 	}, false, nil},
 	{"planner", "规划", "planner", "读取态势、判定目标，只在确有未覆盖的新方向时补充探索意图（每任务一个规划循环）。", []promptVar{
-		{"Goal", "任务总目标", "拿下 example.com 的管理员权限", "exploration"},
-		{"ComponentSummary", "资产计数/类型分布摘要(可选)", "domain:3 ip:5 site:2", "distilled"},
+		{"Goal", "任务总目标", "只审计 RP09 1.0.44 固件，找出可复现漏洞并给出 PoC", "exploration"},
+		{"ComponentSummary", "组件计数/类型分布摘要(可选)", "共 3 个组件（web 2 / mqtt 1）", "distilled"},
 	}, false, nil},
 	{"mainagent", "主", "main", "人机接口：观察进展，把人的意图落成 hint 或高优先级意图。", []promptVar{
-		{"Goal", "当前任务目标", "拿下 example.com 的管理员权限", "exploration"},
-		{"ComponentSummary", "开局态势摘要(可选)", "domain:3 ip:5", "distilled"},
+		{"Goal", "当前任务目标", "只审计 RP09 1.0.44 固件，找出可复现漏洞并给出 PoC", "exploration"},
+		{"ComponentSummary", "开局组件态势摘要(可选)", "共 3 个组件（web 2 / mqtt 1）", "distilled"},
 		{"FindingsSummary", "已确认漏洞摘要(可选)", "high:1 medium:2", "distilled"},
 	}, false, nil},
 	{"worker", "执行", "worker", "领取一条意图执行，把发现的事实/漏洞写回知识图谱后停止。", []promptVar{
@@ -208,7 +208,7 @@ var builtinAgents = []builtinAgent{
 		{"WorkerName", "worker 自我标识(可选)", "worker-1", "runtime"},
 	}, false, nil},
 	// Auto:内置「平台操作」agent。不参与渗透编排循环,经对话页驱动,用工具操作平台。
-	{"auto", "Auto", "assistant", "平台操作助手：用工具管理任务(建/看/暂停/给提示)与资产，并可创建/修改 skill、自定义工具、MCP。", nil, false, nil},
+	{"auto", "Auto", "assistant", "平台操作助手：用工具管理任务(建/看/暂停/给提示)与组件，并可创建/修改 skill、自定义工具、MCP。", nil, false, nil},
 	// 渗透测试:内置「独立渗透」agent。经对话页驱动,一人从侦察到收尾走完整条渗透链,自己规划自己执行自己验证。默认开启交互式 shell。
 	{"pentest", "渗透测试", "assistant", "独立渗透 agent：一人从侦察→找攻击面→深入利用→验证→收尾走完整条链，自己规划、自己执行、自己对抗式验证。", nil, true, intp(0)},
 }
@@ -240,7 +240,7 @@ ON CONFLICT (agent_id, var_name) DO UPDATE
 	// longer advertises a name templates can't resolve (EngagementTitle→Description).
 	// 'Now' 从各 agent 目录提升为全局 runtime 变量后,旧库里 goals 仍残留一条 'Now'
 	// 会与全局项撞名(前端变量列表 key 重复);一并清掉。
-	if _, err := d.Exec(`DELETE FROM agent_prompt_vars WHERE var_name IN ('EngagementTitle', 'CoverageGaps', 'Now')`); err != nil {
+	if _, err := d.Exec(`DELETE FROM agent_prompt_vars WHERE var_name IN ('EngagementTitle', 'CoverageGaps', 'Now', 'AssetSummary')`); err != nil {
 		return fmt.Errorf("cleanup renamed vars: %w", err)
 	}
 	// Default-on interactive_shell for the runtime agents (planner/worker/mainagent/auto)
@@ -264,9 +264,6 @@ ON CONFLICT (name) DO NOTHING`,
 		`["@playwright/mcp","--headless"]`); err != nil {
 		return fmt.Errorf("seed browser mcp: %w", err)
 	}
-	// NOTE: the placeholder ScopeSentry data-source MCP (empty URL + empty X-API-Key,
-	// disabled) is seeded directly in schema.sql §F so a raw `psql < schema.sql` init
-	// also gets it. schema.sql is Exec'd on every startup, so it stays idempotent.
 	if err := d.seedBuiltinSkillVisibility(); err != nil {
 		return fmt.Errorf("seed skill visibility: %w", err)
 	}
@@ -288,10 +285,8 @@ ON CONFLICT (name) DO NOTHING`,
 // builtinSkillVisibility maps a shipped skill's directory name → the built-in
 // agent keys that should see it by default. The skill FILES themselves live on the
 // filesystem (SkillDir, loaded by norma at runtime); DB only carries this visibility
-// binding. Skills omitted here (e.g. playwright-cli, scopesentry) ship invisible by
-// default — the user turns them on per-agent when needed. scopesentry additionally
-// declares `mcps: ScopeSentry`, which only takes effect once it's made visible and
-// that MCP is enabled/configured.
+// binding. Skills omitted here (e.g. playwright-cli) ship invisible by default —
+// the user turns them on per-agent when needed.
 var builtinSkillVisibility = map[string][]string{
 	"api-recon": {"auto", "pentest", "worker"},
 	// IoT / 非 Web 协议测试 skill：默认绑给执行类 agent，与 api-recon 一致。

@@ -45,7 +45,6 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { AssetInterceptRulesEditor } from "@/components/asset-intercept-rules-editor";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
@@ -123,9 +122,7 @@ import { api } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
 import type {
-  AssetInterceptRuleInput,
   ChatAttachment,
-  Collection,
   Company,
   DeleteTaskOptions,
   DeleteTaskResult,
@@ -223,8 +220,9 @@ type DeleteCounts = Omit<DeleteTaskResult, "deleted" | "cleanup_warning">;
 
 function deleteDetails(result: DeleteCounts): string[] {
   const details: string[] = [];
-  if (result.assets_deleted > 0) details.push(`删除资产 ${result.assets_deleted} 条`);
-  if (result.assets_detached > 0) details.push(`解除共享资产关联 ${result.assets_detached} 条`);
+  if (result.components_deleted > 0) details.push(`删除组件 ${result.components_deleted} 条`);
+  if (result.components_detached > 0)
+    details.push(`解除共享组件关联 ${result.components_detached} 条`);
   if (result.traffic_deleted > 0) details.push(`删除流量 ${result.traffic_deleted} 条`);
   if (result.files_deleted) details.push("删除任务文件");
   if (result.findings_deleted > 0) details.push(`删除漏洞 ${result.findings_deleted} 条`);
@@ -629,13 +627,13 @@ export default function TasksPage() {
     [load],
   );
 
-  // deleteTasks 逐个删除所选任务:后端没有批量接口,且单次删除会连带清理资产/流量/文件,
+  // deleteTasks 逐个删除所选任务:后端没有批量接口,且单次删除会连带清理组件关联/流量/文件,
   // 串行执行以免一次性打爆后端;成功的从选中集移除,失败的保留以便重试。
   const deleteTasks = React.useCallback(
     async (ids: string[], options: DeleteTaskOptions, onProgress: (done: number) => void) => {
       const total: DeleteCounts = {
-        assets_deleted: 0,
-        assets_detached: 0,
+        components_deleted: 0,
+        components_detached: 0,
         traffic_deleted: 0,
         files_deleted: false,
         findings_deleted: 0,
@@ -648,8 +646,8 @@ export default function TasksPage() {
       for (const id of ids) {
         try {
           const r = await api.deleteTask(id, options);
-          total.assets_deleted += r.assets_deleted;
-          total.assets_detached += r.assets_detached;
+          total.components_deleted += r.components_deleted;
+          total.components_detached += r.components_detached;
           total.traffic_deleted += r.traffic_deleted;
           total.files_deleted = total.files_deleted || r.files_deleted;
           total.findings_deleted += r.findings_deleted;
@@ -1509,7 +1507,7 @@ function ArchiveConfirmDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>{count === 1 ? "归档任务" : `归档 ${count} 个任务`}</AlertDialogTitle>
           <AlertDialogDescription className="[overflow-wrap:anywhere]">
-            归档会停止任务调度，将图谱、LLM 历史、文件以及独占资产和流量压缩到本地冷存储。归档完成后可从“已归档”中还原。
+            归档会停止任务调度，将图谱、LLM 历史、文件以及本任务组件和流量压缩到本地冷存储。归档完成后可从“已归档”中还原。
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -2030,7 +2028,7 @@ function TaskArchivesPanel({ onChanged }: { onChanged: () => void }) {
 }
 
 const emptyDeleteOptions = (): DeleteTaskOptions => ({
-  delete_assets: false,
+  delete_components: false,
   delete_traffic: false,
   delete_files: false,
   delete_findings: false,
@@ -2038,7 +2036,7 @@ const emptyDeleteOptions = (): DeleteTaskOptions => ({
 });
 
 const deleteOptionKeys: (keyof DeleteTaskOptions)[] = [
-  "delete_assets",
+  "delete_components",
   "delete_traffic",
   "delete_files",
   "delete_findings",
@@ -2073,7 +2071,7 @@ function DeleteOptionFields({
 
   const updateAllOptions = (checked: boolean) => {
     onOptionsChange({
-      delete_assets: checked,
+      delete_components: checked,
       delete_traffic: checked,
       delete_files: checked,
       delete_findings: checked,
@@ -2093,18 +2091,18 @@ function DeleteOptionFields({
           />
           <FieldContent>
             <FieldLabel htmlFor={`delete-all-${idPrefix}`}>全部删除</FieldLabel>
-            <FieldDescription>选中下方全部关联数据，包括资产、流量、文件、漏洞和 LLM 请求/响应记录。</FieldDescription>
+            <FieldDescription>选中下方全部关联数据，包括组件关联、流量、文件、漏洞和 LLM 请求/响应记录。</FieldDescription>
           </FieldContent>
         </Field>
         <Field orientation="horizontal">
           <Checkbox
-            id={`delete-assets-${idPrefix}`}
-            checked={options.delete_assets}
-            onCheckedChange={(checked) => updateOption("delete_assets", checked === true)}
+            id={`delete-components-${idPrefix}`}
+            checked={options.delete_components}
+            onCheckedChange={(checked) => updateOption("delete_components", checked === true)}
           />
           <FieldContent>
-            <FieldLabel htmlFor={`delete-assets-${idPrefix}`}>关联资产</FieldLabel>
-            <FieldDescription>删除仅属于该任务的资产；共享资产只解除当前任务关联。</FieldDescription>
+            <FieldLabel htmlFor={`delete-components-${idPrefix}`}>关联组件</FieldLabel>
+            <FieldDescription>删除仅属于该任务的组件；共享组件只解除当前任务关联。</FieldDescription>
           </FieldContent>
         </Field>
         <Field orientation="horizontal">
@@ -2115,7 +2113,7 @@ function DeleteOptionFields({
           />
           <FieldContent>
             <FieldLabel htmlFor={`delete-traffic-${idPrefix}`}>关联流量</FieldLabel>
-            <FieldDescription>按关联资产的精确主机名删除；仍被其他任务引用的共享主机流量会保留。</FieldDescription>
+            <FieldDescription>按关联流量的主机名删除；仍被其他任务引用的共享主机流量会保留。</FieldDescription>
           </FieldContent>
         </Field>
         <Field orientation="horizontal">
@@ -2585,7 +2583,7 @@ const COMPANY_SCOPE_LABELS: Record<string, string> = {
 
 function companyScopeSummary(company: Company): string {
   const rows = company.scope ?? [];
-  if (rows.length === 0) return "未配置资产范围";
+  if (rows.length === 0) return "未配置范围";
   const preview = rows.slice(0, 3).map((row) => {
     const value = row.raw || row.value || row.domain || row.net || "";
     return `${COMPANY_SCOPE_LABELS[row.kind] ?? row.kind}：${value}`;
@@ -2628,7 +2626,7 @@ function CompanyPicker({
             <ComboboxChip key={companyID}>{companiesByID.get(companyID)?.name ?? `企业 #${companyID}`}</ComboboxChip>
           ))}
         </ComboboxValue>
-        <ComboboxChipsInput id="task-companies" placeholder="搜索企业名称或资产范围" />
+        <ComboboxChipsInput id="task-companies" placeholder="搜索企业名称或范围" />
       </ComboboxChips>
       <ComboboxContent portalContainer={portalContainer}>
         <ComboboxEmpty>没有匹配的企业</ComboboxEmpty>
@@ -2641,7 +2639,7 @@ function CompanyPicker({
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="min-w-0 flex-1 truncate font-medium">{company?.name ?? `企业 #${companyID}`}</span>
                     <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
-                      {company?.asset_count ?? 0} 个资产
+                      {company?.component_count ?? 0} 个组件
                     </span>
                   </div>
                   {company && (
@@ -2659,68 +2657,6 @@ function CompanyPicker({
   );
 }
 
-function CollectionPicker({
-  collections,
-  value,
-  onValueChange,
-  portalContainer,
-}: {
-  collections: Collection[];
-  value: number[];
-  onValueChange: (value: number[]) => void;
-  portalContainer?: React.RefObject<HTMLElement | null>;
-}) {
-  const byID = React.useMemo(() => new Map(collections.map((c) => [String(c.id), c])), [collections]);
-  const ids = React.useMemo(() => collections.map((c) => String(c.id)), [collections]);
-  const selectedIDs = React.useMemo(() => value.map(String), [value]);
-
-  return (
-    <Combobox
-      items={ids}
-      itemToStringValue={(id) => {
-        const c = byID.get(id);
-        return c ? `${c.name} ${c.query}` : id;
-      }}
-      multiple
-      value={selectedIDs}
-      onValueChange={(next) => onValueChange(next.map(Number).filter(Number.isFinite))}
-    >
-      <ComboboxChips>
-        <ComboboxValue>
-          {selectedIDs.map((id) => (
-            <ComboboxChip key={id}>{byID.get(id)?.name ?? `合集 #${id}`}</ComboboxChip>
-          ))}
-        </ComboboxValue>
-        <ComboboxChipsInput id="task-collections" placeholder="搜索合集名称或查询语法" />
-      </ComboboxChips>
-      <ComboboxContent portalContainer={portalContainer}>
-        <ComboboxEmpty>没有匹配的合集</ComboboxEmpty>
-        <ComboboxList>
-          {(id) => {
-            const c = byID.get(id);
-            return (
-              <ComboboxItem key={id} value={id}>
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate font-medium">{c?.name ?? `合集 #${id}`}</span>
-                    <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
-                      {c?.member_count ?? 0} 个资产
-                    </span>
-                  </div>
-                  {c?.query && (
-                    <span className="text-muted-foreground truncate font-mono text-xs" title={c.query}>
-                      {c.query}
-                    </span>
-                  )}
-                </div>
-              </ComboboxItem>
-            );
-          }}
-        </ComboboxList>
-      </ComboboxContent>
-    </Combobox>
-  );
-}
 
 type CategoryManagementView = number | "uncategorized" | "new";
 
@@ -3161,17 +3097,14 @@ function CreateTaskSheet({
   const [selectedTemplateID, setSelectedTemplateID] = React.useState<number | null>(null);
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
   const [companies, setCompanies] = React.useState<Company[]>([]);
-  const [collections, setCollections] = React.useState<Collection[]>([]);
   const [sourceTaskIDs, setSourceTaskIDs] = React.useState<string[]>([]);
   const [companyIDs, setCompanyIDs] = React.useState<number[]>([]);
-  const [collectionIDs, setCollectionIDs] = React.useState<number[]>([]);
   const [llmProfileIDs, setLLMProfileIDs] = React.useState<string[]>([]);
   const [creating, setCreating] = React.useState(false);
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
-  const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
-  const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
+  const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 组件覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
   const [uploading, setUploading] = React.useState(false);
   const [uploadCount, setUploadCount] = React.useState(0);
@@ -3192,10 +3125,6 @@ function CreateTaskSheet({
       .companies()
       .then(setCompanies)
       .catch(() => setCompanies([]));
-    api
-      .collections()
-      .then(setCollections)
-      .catch(() => setCollections([]));
   }, []);
 
   // pickFiles uploads the chosen files into this draft's staging dir and appends their
@@ -3243,14 +3172,10 @@ function CreateTaskSheet({
         llmProfileIds: llmProfileIDs.map(Number),
         sourceTaskIds: sourceTaskIDs,
         companyIds: companyIDs,
-        collectionIds: collectionIDs,
         timeoutSeconds: timeoutSec,
         seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
         coverageEnabled,
-        interceptRules: interceptRules
-          .map((r) => ({ ...r, pattern: r.pattern.trim() }))
-          .filter((r) => r.pattern !== ""),
       });
       // 固件：任务已建好，再把独立选中的固件直接传到 tasks/<id>/firmware/（后端算 sha256 并登记范围）。
       // 失败不删任务——任务本身有效，固件之后可以在范围卡片里手动补。
@@ -3270,13 +3195,11 @@ function CreateTaskSheet({
       setSelectedTemplateID(null);
       setSourceTaskIDs([]);
       setCompanyIDs([]);
-      setCollectionIDs([]);
       setLLMProfileIDs([]);
       setTimeoutMin("");
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
       setCoverageEnabled(true);
-      setInterceptRules([]);
       setUploadCount(0);
       setFirmwareFile(null);
       draftIdRef.current = "";
@@ -3314,14 +3237,12 @@ function CreateTaskSheet({
               description={description}
               goal={goal}
               categoryID={categoryID}
-              interceptRules={interceptRules}
               selectedTemplateID={selectedTemplateID}
               onSelectedTemplateIDChange={setSelectedTemplateID}
               onApply={(template) => {
                 setDescription(template.description);
                 setGoal(template.goal);
                 setCategoryID(template.category_id ?? undefined);
-                setInterceptRules(template.intercept_rules ?? []);
                 setUploadCount(0);
               }}
               portalContainer={sheetContentRef}
@@ -3456,11 +3377,11 @@ function CreateTaskSheet({
               />
               <FieldDescription>
                 最多关联 {MAX_SOURCE_TASKS}{" "}
-                个任务。实时只读继承所选任务的持久化黑板、资产范围及相关流量；新任务写入独立黑板。
+                个任务。实时只读继承所选任务的持久化黑板、测试范围及相关流量；新任务写入独立黑板。
               </FieldDescription>
             </Field>
             <Field>
-              <FieldLabel htmlFor="task-companies">关联企业资产范围</FieldLabel>
+              <FieldLabel htmlFor="task-companies">关联企业范围</FieldLabel>
               <CompanyPicker
                 companies={companies}
                 value={companyIDs}
@@ -3468,28 +3389,8 @@ function CreateTaskSheet({
                 portalContainer={sheetContentRef}
               />
               <FieldDescription>
-                创建任务时会将所选企业当前已有资产加入“测试资产”，并将域名、IP、CIDR、ICP 和企业关键词提供给 Agent
-                作为范围上下文；不会自动生成意图或强制改变执行目标。
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="task-collections">关联资产合集</FieldLabel>
-              <CollectionPicker
-                collections={collections}
-                value={collectionIDs}
-                onValueChange={setCollectionIDs}
-                portalContainer={sheetContentRef}
-              />
-              <FieldDescription>
-                FOFA 等收集到的资产合集。所选合集里的资产会作为本任务的测试目标（覆盖度分母 + 授权边界），
-                并加入“测试资产”。在「资产同步 → FOFA」里查询导入即可生成合集。
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="task-intercept-rules">任务级资产拦截 / 允许规则（可选）</FieldLabel>
-              <AssetInterceptRulesEditor value={interceptRules} onChange={setInterceptRules} />
-              <FieldDescription>
-                仅对本任务生效，不写入全局规则。判定顺序：先按「拦截」规则（含全局）匹配，命中即禁止测试；未命中且本任务配置了「允许」规则时，须命中某条允许规则才放行，否则同样不允许测试；未配置任何允许规则则不启用白名单。
+                创建任务时会把所选企业的域名、IP、CIDR、ICP 和企业关键词提供给 Agent 作为范围上下文；
+                不会自动生成意图或强制改变执行目标。
               </FieldDescription>
             </Field>
             <Field>
@@ -3564,11 +3465,11 @@ function CreateTaskSheet({
                       checked={coverageEnabled}
                       onCheckedChange={(v) => setCoverageEnabled(!!v)}
                     />
-                    资产覆盖度功能
+                    组件覆盖度功能
                   </label>
                   <p className="text-muted-foreground text-xs">
                     默认开启：计算并展示测试覆盖度、态势图显示测试进度、自动累积测试范围。关闭后不再计算/展示覆盖度，
-                    态势图仅展示资产不显示进度，agent 也不再获得范围类工具。关闭不影响「关联企业资产范围」。
+                    态势图仅展示组件不显示进度，agent 也不再获得范围类工具。关闭不影响「关联企业范围」。
                   </p>
                 </div>
               </CollapsibleContent>

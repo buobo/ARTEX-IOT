@@ -141,9 +141,9 @@ func TestMarkdownEscapesUntrustedContent(t *testing.T) {
 		{
 			name: "资产名里的强调与引用",
 			item: Item{
-				Severity: "high",
-				Name:     "普通标题",
-				Components:   []string{"a.com/*注入*>引用"},
+				Severity:   "high",
+				Name:       "普通标题",
+				Components: []string{"a.com/*注入*>引用"},
 			},
 			must:  []string{`\*注入\*`, `\>`},
 			wrong: []string{"*注入*"},

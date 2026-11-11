@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -27,8 +28,8 @@ type TaskScope struct {
 	// image. value(filename) + sha256 are the firmware's identity, so two different
 	// images that share a filename stay distinct rows.
 	Sha256 string `json:"sha256,omitempty"`
-	Source      string `json:"source"`
-	Reason      string `json:"reason,omitempty"`
+	Source string `json:"source"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // stripHostPort drops a trailing :port from a host:port / ip:port / [ipv6]:port
@@ -227,6 +228,28 @@ func (s *ComponentStore) AddFirmwareScope(taskID int64, filename, sha256, reason
 	}
 	ts.Value = filename
 	ts.Sha256 = sha
+	// 同名固件只留一行：调用方没给 sha、或库里已有同名的无 sha 老行时，复用/升级那一行，
+	// 不再插新行（唯一键把 '' 和具体值当成两行，否则列表里会出现两条同名固件）。
+	var existingID int64
+	var existingSha string
+	qerr := s.q().QueryRow(`SELECT id, COALESCE(sha256,'') FROM task_scope
+ WHERE task_id=$1 AND kind='firmware' AND value=$2
+ ORDER BY (COALESCE(sha256,'') <> '') DESC, id LIMIT 1`, taskID, filename).Scan(&existingID, &existingSha)
+	switch {
+	case qerr == nil && existingSha == "" && sha != "":
+		if _, err := s.q().Exec(`UPDATE task_scope SET sha256=$2 WHERE id=$1`, existingID, sha); err != nil {
+			return ts, err
+		}
+		ts.ID = existingID
+		ts.Sha256 = sha
+		return ts, nil
+	case qerr == nil:
+		ts.ID = existingID
+		ts.Sha256 = existingSha
+		return ts, nil
+	case !errors.Is(qerr, sql.ErrNoRows):
+		return ts, qerr
+	}
 	if err := s.upsertTaskScope(ts); err != nil {
 		return ts, err
 	}
@@ -315,7 +338,6 @@ type CoverageByType struct {
 // 分子 = status='completed' 的组件数。是给 agent 和操作者的参考值，不是精确指标。
 type Coverage struct {
 	Enabled     bool             `json:"enabled"`     // 覆盖度功能是否开启
-	ScopeRows   int              `json:"scope_rows"`  // task_scope 行数
 	Denominator int              `json:"denominator"` // 本任务组件数（不含 ignored）
 	Tested      int              `json:"tested"`      // status=completed
 	Pct         *float64         `json:"pct"`         // 分母 0 时 null
@@ -374,18 +396,10 @@ ORDER BY type`, taskID)
 	return cov, nil
 }
 
-// TaskCoverageWithSources is TaskCoverage plus the task's scope row count.
+// TaskCoverageWithSources 保留旧调用名；scope_rows 字段随组件化下线后，
+// 它与 TaskCoverage 完全等价（调用点分布在 agent 工具与 HTTP 层，暂不改名）。
 func (s *ComponentStore) TaskCoverageWithSources(taskID int64) (*Coverage, error) {
-	cov, err := s.TaskCoverage(taskID, 0)
-	if err != nil {
-		return nil, err
-	}
-	scopes, err := s.ListTaskScope(taskID)
-	if err != nil {
-		return nil, err
-	}
-	cov.ScopeRows = len(scopes)
-	return cov, nil
+	return s.TaskCoverage(taskID, 0)
 }
 
 // ListTaskScopeWithSources returns the task's scope rows (source/reason included).
@@ -468,20 +482,47 @@ func (s *ComponentStore) BuildCoverageGraph(taskID, _ int64) (*CoverageGraphData
 		return nil, err
 	}
 	g := &CoverageGraphData{}
+	type groupStat struct {
+		total, tested int
+	}
+	stats := map[string]*groupStat{}
 	seen := map[string]bool{}
 	for _, c := range comps {
+		st, ok := stats[c.Type]
+		if !ok {
+			st = &groupStat{}
+			stats[c.Type] = st
+		}
+		st.total++
+		if c.Status == "completed" {
+			st.tested++
+		}
 		if !seen[c.Type] {
 			seen[c.Type] = true
 			g.Nodes = append(g.Nodes, CoverageGraphNode{
 				Key: "t:" + c.Type, Kind: c.Type, Label: c.Type, InScope: true,
 			})
 		}
+		label := c.ComponentName
+		if c.Version != "" {
+			label = strings.TrimSpace(label + " " + c.Version)
+		}
 		g.Nodes = append(g.Nodes, CoverageGraphNode{
-			Key: componentGraphKey(c.ID), Kind: "component", Label: c.ComponentName,
+			Key: componentGraphKey(c.ID), Kind: "component", Label: label,
 			Tested: c.Status == "completed", InScope: c.Status != "ignored",
 			ComponentID: c.ID, Status: c.Status, Version: c.Version,
 		})
 		g.Edges = append(g.Edges, CoverageGraphEdge{Src: componentGraphKey(c.ID), Dst: "t:" + c.Type})
+	}
+	// 分组节点「已测」= 该类型下组件全部 completed，前端据此给类型着色。
+	for i := range g.Nodes {
+		n := &g.Nodes[i]
+		if n.Kind == "component" {
+			continue
+		}
+		if st, ok := stats[n.Kind]; ok && st.total > 0 && st.tested == st.total {
+			n.Tested = true
+		}
 	}
 	return g, nil
 }

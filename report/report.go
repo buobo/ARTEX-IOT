@@ -48,14 +48,14 @@ var sevRank = map[string]int{"critical": 0, "high": 1, "medium": 2, "low": 3, ""
 // Markdown renders the report.
 func Markdown(in Input) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# 渗透测试报告 — %s\n\n", nz(in.Title, "未命名任务"))
+	fmt.Fprintf(&b, "# 漏洞挖掘报告 — %s\n\n", nz(in.Title, "未命名任务"))
 	fmt.Fprintf(&b, "- **任务目标**：%s\n", nz(in.Goal, "（未指定）"))
 	fmt.Fprintf(&b, "- **生成时间**：%s\n\n", in.GeneratedAt.Format("2006-01-02 15:04:05"))
 
 	// summary
 	fmt.Fprintf(&b, "## 摘要\n\n")
 	fmt.Fprintf(&b, "- 确认发现：**%d** 个\n", len(in.Findings))
-	fmt.Fprintf(&b, "- 资产：")
+	fmt.Fprintf(&b, "- 组件：")
 	var types []string
 	for t := range in.ComponentCounts {
 		types = append(types, t)

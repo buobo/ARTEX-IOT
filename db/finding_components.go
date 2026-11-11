@@ -34,51 +34,72 @@ type FindingComponentTree struct {
 
 // BuildFindingComponentTree 按筛选条件统计「漏洞 → 组件」分布。
 func (d *DB) BuildFindingComponentTree(f FindingFilter) (*FindingComponentTree, error) {
+	// where() 自带前缀 " WHERE ..."（无筛选时为空串），FROM 里必须给 findings 起别名 f，
+	// 因为筛选条件用的是 f.status / t.id 这类带别名的列。
 	where, args := f.where()
-	rows, err := d.Query(`SELECT component_ids, status FROM findings WHERE `+where, args...)
+	rows, err := d.Query(`SELECT f.component_ids FROM findings f
+LEFT JOIN tasks t ON t.id = f.task_id`+where, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	counts := map[int64]int{}
-	var total int
+	// 先收集每条漏洞的组件 id，等组件表查完再判定「未关联」——引用了已删除组件的
+	// 漏洞同样算未关联，跟列表页 component_none 筛选口径一致。
+	var perFinding [][]int64
 	for rows.Next() {
 		var raw []byte
-		var status string
-		if err := rows.Scan(&raw, &status); err != nil {
+		if err := rows.Scan(&raw); err != nil {
 			return nil, err
-		}
-		total++
-		if status == "ignored" || status == "false_positive" {
-			continue
 		}
 		var ids []int64
 		if len(raw) > 0 {
 			_ = json.Unmarshal(raw, &ids)
 		}
+		kept := make([]int64, 0, len(ids))
 		for _, id := range ids {
 			if id > 0 {
-				counts[id]++
+				kept = append(kept, id)
 			}
 		}
+		perFinding = append(perFinding, kept)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	tree := &FindingComponentTree{Total: total}
-	if len(counts) == 0 {
-		return tree, nil
+	tree := &FindingComponentTree{}
+	allIDs := map[int64]bool{}
+	for _, ids := range perFinding {
+		for _, id := range ids {
+			allIDs[id] = true
+		}
 	}
-
-	ids := make([]int64, 0, len(counts))
-	for id := range counts {
-		ids = append(ids, id)
+	var comps []*Component
+	if len(allIDs) > 0 {
+		comps, err = d.Components().GetByIDs(mapKeys(allIDs))
+		if err != nil {
+			return nil, err
+		}
 	}
-	comps, err := d.Components().GetByIDs(ids)
-	if err != nil {
-		return nil, err
+	live := make(map[int64]bool, len(comps))
+	for _, c := range comps {
+		live[c.ID] = true
+	}
+	counts := map[int64]int{}
+	unassigned := 0
+	for _, ids := range perFinding {
+		matched := false
+		for _, id := range ids {
+			if live[id] {
+				counts[id]++
+				matched = true
+			}
+		}
+		if !matched {
+			unassigned++
+		}
+		tree.Total++
 	}
 
 	groups := map[string]*FindingComponentNode{}
@@ -115,5 +136,22 @@ func (d *DB) BuildFindingComponentTree(f FindingFilter) (*FindingComponentTree, 
 		})
 		tree.Nodes = append(tree.Nodes, g)
 	}
+	if unassigned > 0 {
+		tree.Nodes = append(tree.Nodes, &FindingComponentNode{
+			Key:          "__none__",
+			Kind:         "none",
+			Label:        "未关联",
+			FindingCount: unassigned,
+		})
+	}
 	return tree, nil
+}
+
+// mapKeys 取 map[int64]bool 的键（给 GetByIDs 用）。
+func mapKeys(m map[int64]bool) []int64 {
+	out := make([]int64, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
