@@ -30,7 +30,7 @@ func TestChatMentionParsing(t *testing.T) {
 	}
 	var msg strings.Builder
 	for i := 1; i <= 11; i++ {
-		fmt.Fprintf(&msg, "@[资产#%d] ", i)
+		fmt.Fprintf(&msg, "@[组件#%d] ", i)
 	}
 	if _, err := parseChatMentions(msg.String()); err == nil {
 		t.Fatal("accepted more than 10 references")
@@ -51,15 +51,15 @@ func TestChatMentionPagination(t *testing.T) {
 		}
 		t.Cleanup(func() { _, _ = pg.DeleteFinding(id) })
 	}
-	var companyID, assetID int64
+	var companyID, componentID int64
 	if err := pg.QueryRow(`INSERT INTO companies(name,nkey) VALUES($1,$1) RETURNING id`, query).Scan(&companyID); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = pg.Exec(`DELETE FROM companies WHERE id=$1`, companyID) })
-	if err := pg.QueryRow(`INSERT INTO assets(type,app_name,bundle_id) VALUES('app',$1,$1) RETURNING id`, query).Scan(&assetID); err != nil {
+	if err := pg.QueryRow(`INSERT INTO components(type,component_name) VALUES('mqtt',$1) RETURNING id`, query).Scan(&componentID); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = pg.Exec(`DELETE FROM assets WHERE id=$1`, assetID) })
+	t.Cleanup(func() { _, _ = pg.Exec(`DELETE FROM components WHERE id=$1`, componentID) })
 	cursor := ""
 	seen := map[string]bool{}
 	for pageNum := 0; ; pageNum++ {
@@ -235,31 +235,22 @@ func TestChatMentionCatalogAndContext(t *testing.T) {
 	}
 	var refs strings.Builder
 	fmt.Fprintf(&refs, "分析 @[漏洞#%d 客户端伪造标题] @[企业#%d 公司] ", fid, cid)
-	for _, kind := range []string{"root_domain", "subdomain", "ip", "app", "service", "endpoint"} {
+	for _, kind := range []string{"web", "mqtt", "ros", "ssh"} {
 		var id int64
-		if err := pg.QueryRow(`INSERT INTO assets(type,company_id,domain,ip,app_name,url,method,extra)
-          VALUES($1,$2,$3,'192.0.2.81','引用测试应用',$4,'GET','{"note":"参数和扩展信息"}') RETURNING id`,
-			kind, cid, kind+".mention.example", "https://"+kind+".mention.example/path").Scan(&id); err != nil {
+		if err := pg.QueryRow(`INSERT INTO components(type,company_id,component_name,version,notes)
+          VALUES($1,$2,$3,'1.0','参数和扩展信息') RETURNING id`,
+			kind, cid, kind+"-mention.example").Scan(&id); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _, _ = pg.Exec(`DELETE FROM assets WHERE id=$1`, id) })
-		label := ""
-		for name, value := range chatMentionKinds {
-			if value == kind {
-				label = name
-			}
-		}
-		fmt.Fprintf(&refs, "@[%s#%d 条目] ", label, id)
-		items, err := pg.SearchChatMentions(t.Context(), kind, fmt.Sprint(id))
+		t.Cleanup(func() { _, _ = pg.Exec(`DELETE FROM components WHERE id=$1`, id) })
+		fmt.Fprintf(&refs, "@[组件#%d 条目] ", id)
+		items, err := pg.SearchChatMentions(t.Context(), "component", fmt.Sprint(id))
 		if err != nil || len(items) == 0 || items[0].ID != id || items[0].Kind != kind {
 			t.Fatalf("search %s: %+v %v", kind, items, err)
 		}
-		if kind == "ip" {
-			if _, err := composeChatMentionMessage(pg, fmt.Sprintf("@[应用#%d]", id)); err == nil {
-				t.Fatal("accepted mismatched type")
-			}
-			if data, err := loadChatMention(pg, chatMentionRef{"asset", id, "资产"}); err != nil || data == nil {
-				t.Fatalf("generic asset: %v", err)
+		if kind == "web" {
+			if data, err := loadChatMention(pg, chatMentionRef{"component", id, "组件"}); err != nil || data == nil {
+				t.Fatalf("generic component: %v", err)
 			}
 		}
 	}
@@ -278,7 +269,7 @@ func TestChatMentionCatalogAndContext(t *testing.T) {
 	if _, err := composeChatMentionMessage(pg, "@[漏洞#9223372036854775807]"); err == nil {
 		t.Fatal("accepted missing record")
 	}
-	for _, kind := range []string{"finding", "company", "asset", ""} {
+	for _, kind := range []string{"finding", "company", "component", ""} {
 		r := httptest.NewRequest("GET", "/api/chat/mentions?kind="+kind+"&q="+url.QueryEscape("引用"), nil)
 		w := httptest.NewRecorder()
 		s.searchChatMentions(w, r)

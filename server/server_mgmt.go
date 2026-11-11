@@ -1544,7 +1544,7 @@ func skillRelPath(file string) (string, string) {
 }
 
 // walkSkillFiles returns all files under root (relative to root), sorted,
-// including files in subdirectories (scripts/, references/, assets/, etc.).
+// including files in subdirectories (scripts/, references/, components/, etc.).
 // walkSkillFiles returns all entries under root relative to root.
 // Directories are included with a trailing "/" so the frontend can distinguish
 // them from files and render empty folders in the tree.
@@ -1637,7 +1637,7 @@ func (s *Server) fsWriteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fullPath := filepath.Join(skillPath, file)
-	// create parent subdirectory if needed (e.g. scripts/, references/, assets/)
+	// create parent subdirectory if needed (e.g. scripts/, references/, components/)
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 		writeErr(w, 500, err.Error())
 		return

@@ -193,7 +193,7 @@ func (s *ExplorationStore) Root() (description, goal string, err error) {
 	return d.String, goal, err
 }
 
-// AddNode writes a typed reasoning node with optional anchors to asset ids.
+// AddNode writes a typed reasoning node with optional anchors to component ids.
 func (s *ExplorationStore) AddNode(kind string, payload map[string]any, priority int, state, origin string, anchors []int64) (int64, error) {
 	raw, _ := json.Marshal(payload)
 	tx, err := s.db.Begin()
@@ -209,7 +209,7 @@ VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
 		return 0, err
 	}
 	for _, a := range anchors {
-		if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id, asset_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, id, a); err != nil {
+		if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id, component_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, id, a); err != nil {
 			return 0, err
 		}
 	}
@@ -242,16 +242,16 @@ func (s *ExplorationStore) OriginFactID() (int64, error) {
 	return id, err
 }
 
-// Anchor records a node→asset reference edge (many-to-many): it captures which
-// global assets an exploration node touched, as lineage/provenance. The asset
+// Anchor records a node→component reference edge (many-to-many): it captures which
+// global components an exploration node touched, as lineage/provenance. The component
 // graph itself is global and shared — anchoring no longer gates visibility (any
-// task may read any asset via search); it only preserves the reasoning trail.
+// task may read any component via search); it only preserves the reasoning trail.
 // Idempotent.
-func (s *ExplorationStore) Anchor(nodeID, assetID int64) error {
-	if nodeID <= 0 || assetID <= 0 {
+func (s *ExplorationStore) Anchor(nodeID, componentID int64) error {
+	if nodeID <= 0 || componentID <= 0 {
 		return nil
 	}
-	_, err := s.db.Exec(`INSERT INTO exploration_anchors(node_id, asset_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, nodeID, assetID)
+	_, err := s.db.Exec(`INSERT INTO exploration_anchors(node_id, component_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, nodeID, componentID)
 	return err
 }
 
@@ -373,7 +373,7 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, state, id, s.
 }
 
 // IntentCleanup summarizes the blackboard records removed when a user cancels
-// one worker intent. Global assets and traffic are deliberately not part of this
+// one worker intent. Global components and traffic are deliberately not part of this
 // operation; exploration anchors disappear only because their owning nodes do.
 type IntentCleanup struct {
 	Intents    int64 `json:"intents"`
@@ -1692,7 +1692,7 @@ func (s *ExplorationStore) ActivityMaxID() (int64, error) {
 // MainSession is one resettable main-agent conversation segment of a task. Segment 0
 // is the original session (implicit, never stored); further segments are created by
 // "新建会话" to start the main agent on a clean transcript while the task's graph,
-// assets and goal stay shared.
+// components and goal stay shared.
 type MainSession struct {
 	Seq       int       `json:"seq"`
 	CreatedAt time.Time `json:"created_at"`
@@ -1729,7 +1729,7 @@ func (s *ExplorationStore) ListMainSessions() ([]MainSession, error) {
 }
 
 // NewMainSession creates the next main-session segment (seq = current+1) and returns
-// it. It touches only main_sessions — the task's exploration graph/assets/goal are
+// it. It touches only main_sessions — the task's exploration graph/components/goal are
 // untouched, so the new session starts with a clean transcript over the same task.
 func (s *ExplorationStore) NewMainSession() (MainSession, error) {
 	var m MainSession
@@ -1876,9 +1876,9 @@ func (s *ExplorationStore) ActivityTraceSearchTerminalIntents(q string, limit in
 	return scanTrace(rows)
 }
 
-// AssetRef is a compact exploration node (intent/fact/finding) that references an
-// asset via an anchor — for the coverage graph's node drawer.
-type AssetRef struct {
+// ComponentRef is a compact exploration node (intent/fact/finding) that references an
+// component via an anchor — for the coverage graph's node drawer.
+type ComponentRef struct {
 	ID           int64  `json:"id"`
 	Kind         string `json:"kind"`
 	State        string `json:"state"`
@@ -1887,25 +1887,25 @@ type AssetRef struct {
 	Inherited    bool   `json:"inherited,omitempty"`
 }
 
-// AssetRefs returns the intents / facts / findings in THIS exploration anchored to
-// the given asset id (newest first) — what this task tested / concluded about it.
-func (s *ExplorationStore) AssetRefs(assetID int64) ([]AssetRef, error) {
-	if assetID <= 0 {
-		return []AssetRef{}, nil
+// ComponentRefs returns the intents / facts / findings in THIS exploration anchored to
+// the given component id (newest first) — what this task tested / concluded about it.
+func (s *ExplorationStore) ComponentRefs(componentID int64) ([]ComponentRef, error) {
+	if componentID <= 0 {
+		return []ComponentRef{}, nil
 	}
 	rows, err := s.db.Query(`
 SELECT en.id, en.kind, en.state, en.payload
 FROM exploration_anchors ea
 JOIN exploration_nodes en ON en.id = ea.node_id
-WHERE ea.asset_id = $1 AND en.exploration_id = $2 AND en.kind IN ('intent','fact','finding')
-ORDER BY en.id DESC`, assetID, s.expID)
+WHERE ea.component_id = $1 AND en.exploration_id = $2 AND en.kind IN ('intent','fact','finding')
+ORDER BY en.id DESC`, componentID, s.expID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []AssetRef{}
+	out := []ComponentRef{}
 	for rows.Next() {
-		var r AssetRef
+		var r ComponentRef
 		var payload []byte
 		if err := rows.Scan(&r.ID, &r.Kind, &r.State, &payload); err != nil {
 			return nil, err
@@ -2016,6 +2016,6 @@ func (s *ExplorationStore) ActivityByIDsForTerminalIntents(ids []int64) ([]Activ
 // AddStandaloneFinding writes a finding to the standalone findings table, which
 // persists across task deletion (task_id / node_id become NULL when the task or
 // exploration node is deleted). taskID and nodeID may be 0 (stored as NULL).
-func (s *ExplorationStore) AddStandaloneFinding(taskID, nodeID int64, vulnclass, name, severity, summary, evidence, worker string, assetIDs []int64) (int64, error) {
-	return s.db.AddFinding(taskID, nodeID, vulnclass, name, severity, summary, evidence, worker, assetIDs)
+func (s *ExplorationStore) AddStandaloneFinding(taskID, nodeID int64, vulnclass, name, severity, summary, evidence, worker string, componentIDs []int64) (int64, error) {
+	return s.db.AddFinding(taskID, nodeID, vulnclass, name, severity, summary, evidence, worker, componentIDs)
 }

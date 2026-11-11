@@ -163,8 +163,8 @@ func (s *Server) delegateToTask(ctx context.Context, in json.RawMessage, pick fu
 	delete(m, "task_id")
 	inner, _ := json.Marshal(m)
 	tsx := agent.NewToolSet(t.Store, "orchestrator")
-	if s.m.Assets() != nil {
-		tsx.SetAssetStore(s.m.Assets(), s.m.Assets().Companies())
+	if s.m.Components() != nil {
+		tsx.SetComponentStore(s.m.Components(), s.m.Components().Companies())
 	}
 	tsx.SetNotify(t.Notify)         // 通用唤醒（无专用回调的写操作走它；读工具为 no-op）
 	tsx.SetNotifyHint(t.NotifyHint) // add_hint → 记一条「人新增了 N 条战略提示：…」触发并唤醒 planner
@@ -368,10 +368,10 @@ func (s *Server) toolAddHint() actool.CoreTool {
 		"★优先批量：多条提示放进 hints 数组一次提交（返回 ids 数组，与 hints 等长同序，失败项 id=0）；单条则省略 hints 直接给顶层 text。",
 		objSchema(map[string]any{
 			"task_id":      strParam("任务 id"),
-			"hints":        map[string]any{"type": "array", "description": "【优先用这个】提示数组，每个元素字段同顶层（text/asset_ids/traffic_refs）。", "items": objSchema(map[string]any{"text": strParam("提示内容"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": agent.HintTrafficSchema()})},
+			"hints":        map[string]any{"type": "array", "description": "【优先用这个】提示数组，每个元素字段同顶层（text/component_ids/traffic_refs）。", "items": objSchema(map[string]any{"text": strParam("提示内容"), "component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": agent.HintTrafficSchema()})},
 			"text":         strParam("[单条] 提示内容"),
 			"traffic_refs": agent.HintTrafficSchema(),
-			"asset_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的资产 id（可选，0/1/多个；该任务内的资产 id）"},
+			"component_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的资产 id（可选，0/1/多个；该任务内的资产 id）"},
 		}, "task_id"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			return s.delegateToTask(ctx, in, (*agent.ToolSet).AddHintTool)
@@ -489,7 +489,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.refreshBuiltinToolSchemas()
 	s.seedAutoDefaultBindings()
 	s.seedPlannerDefaultBindings()
-	s.seedPlannerListAssetsBinding()
+	s.seedPlannerListComponentsBinding()
 	s.seedCompanyScopeRebind()
 	s.seedWorkerReadToolsUnbind() // list_facts/list_companies/list_worker_traces 从 worker 默认解绑(一次性)
 	s.seedWorkerReadbackRebind()  // 修复旧迁移误删：把 search_all_worker_traces/get_worker_trace/node_detail 补绑回 worker(一次性)
@@ -504,7 +504,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.seedFindingTrafficTools()       // 增加可选证据参数及只读证据工具，保留用户配置
 	s.seedFindingWorkflowTools()
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
-	// list_assets/insert_assets/report_finding/list_findings/list_companies 连同
+	// list_components/insert_components/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
 }
 
@@ -528,11 +528,11 @@ func (s *Server) refreshBuiltinToolSchemas() {
 	// 同时把部分内置 agent 工具刷成代码默认：
 	//   - goal_met：旧库 seed 的描述带“结束本轮规划”的误导，会让 planner 把它当成
 	//     “结束空轮”的手段、刚开跑就误判整个任务完成。
-	//   - insert_assets：新增 related 入参(标记资产是否与当前任务相关、决定是否入覆盖度)，
+	//   - insert_components：新增 related 入参(标记资产是否与当前任务相关、决定是否入覆盖度)，
 	//     SeedTool 首插入only，旧库已 seed 的 schema 否则收不到这个新参数。
 	//   - list_facts：改为分页，新增 limit/before/q 入参；旧库已 seed 的空 schema 否则
 	//     在工具管理页显示「无参数」，模型也拿不到这几个参数说明。
-	refreshBuiltin := map[string]bool{"goal_met": true, "insert_assets": true, "list_facts": true}
+	refreshBuiltin := map[string]bool{"goal_met": true, "insert_components": true, "list_facts": true}
 	for _, sd := range agent.BuiltinToolSeeds() {
 		if !refreshBuiltin[sd.Key] {
 			continue
@@ -681,7 +681,7 @@ func (s *Server) reseedWorkerPrompt() {
 		log.Printf("[prompts] worker 提示词重刷为新默认失败: %v", err)
 		return
 	}
-	log.Printf("[prompts] worker 提示词已追加新默认版本(查上下文段收敛为 list_assets/list_findings,去掉 list_facts/node_detail/asset_neighbors,一次性)")
+	log.Printf("[prompts] worker 提示词已追加新默认版本(查上下文段收敛为 list_components/list_findings,去掉 list_facts/node_detail/component_neighbors,一次性)")
 }
 
 // reporterToolCallMessage 必须无条件要求先读一次 get_finding_traffic 再写报告。
@@ -809,18 +809,18 @@ func (s *Server) seedPlannerDefaultBindings() {
 	_ = s.m.pg.SetSetting(flag, "true")
 }
 
-// seedPlannerListAssetsBinding adds "planner" to list_assets's binding ONCE
-// (guarded by a settings flag), so existing DBs — whose list_assets row was seeded
-// as auto/pentest-only — also let the planner query the asset store by DSL. Fresh
+// seedPlannerListComponentsBinding adds "planner" to list_components's binding ONCE
+// (guarded by a settings flag), so existing DBs — whose list_components row was seeded
+// as auto/pentest-only — also let the planner query the component store by DSL. Fresh
 // DBs already get it via PlannerTools(); this only backfills without overriding a
 // user unbind.
-func (s *Server) seedPlannerListAssetsBinding() {
-	const flag = "planner_list_assets_v1"
+func (s *Server) seedPlannerListComponentsBinding() {
+	const flag = "planner_list_components_v1"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
-	if err := s.m.pg.AddAgentToToolBinding("planner", []string{"list_assets"}); err != nil {
-		log.Printf("[planner] list_assets 默认绑定失败: %v", err)
+	if err := s.m.pg.AddAgentToToolBinding("planner", []string{"list_components"}); err != nil {
+		log.Printf("[planner] list_components 默认绑定失败: %v", err)
 		return
 	}
 	_ = s.m.pg.SetSetting(flag, "true")
@@ -828,7 +828,7 @@ func (s *Server) seedPlannerListAssetsBinding() {
 
 // seedCompanyScopeRebind changes add_company_scope's default binding ONCE on
 // existing DBs (guarded by a settings flag): the tool moves off worker and onto
-// planner — defining a company's asset scope is a planning/main/auto concern, not
+// planner — defining a company's component scope is a planning/main/auto concern, not
 // something a worker does mid-exploration. Fresh DBs already get planner via
 // PlannerTools() and lack worker via WorkerTools(); this only backfills old rows.
 // One-shot + flag-guarded so a user who later re-binds worker isn't overridden.
@@ -901,7 +901,7 @@ func (s *Server) seedWorkerReadbackRebind() {
 // before Auto existed still give Auto its default toolset — without re-adding it
 // after a user deliberately unbinds.
 func (s *Server) seedAutoDefaultBindings() {
-	const flag = "auto_default_bindings_v3" // v3: 替换旧资产工具名，加入 insert_assets/add_company_scope
+	const flag = "auto_default_bindings_v3" // v3: 替换旧资产工具名，加入 insert_components/add_company_scope
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -911,7 +911,7 @@ func (s *Server) seedAutoDefaultBindings() {
 	}
 	keys = append(keys, platformToolKeys...)
 	// 资产工具：Auto 操作平台常要看/登记资产、管理公司范围。
-	keys = append(keys, "insert_assets", "add_company_scope", "list_assets")
+	keys = append(keys, "insert_components", "add_company_scope", "list_components")
 	if err := s.m.pg.AddAgentToToolBinding("auto", keys); err != nil {
 		log.Printf("[auto] 默认绑定失败: %v", err)
 		return

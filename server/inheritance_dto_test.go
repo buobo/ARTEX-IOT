@@ -40,11 +40,11 @@ func TestInheritedDTOProvenance(t *testing.T) {
 	if !activity.Inherited || activity.SourceTaskID != "7" || activity.IntentID != "44" {
 		t.Fatalf("activity provenance lost: %+v", activity)
 	}
-	assetRef := coverageAssetRefDTO(db.AssetRef{
+	componentRef := coverageComponentRefDTO(db.ComponentRef{
 		ID: 46, Kind: db.KindFact, State: "confirmed", Summary: "source fact", SourceTaskID: 7, Inherited: true,
 	})
-	if !assetRef.Inherited || assetRef.SourceTaskID != "7" {
-		t.Fatalf("asset ref provenance lost: %+v", assetRef)
+	if !componentRef.Inherited || componentRef.SourceTaskID != "7" {
+		t.Fatalf("component ref provenance lost: %+v", componentRef)
 	}
 }
 

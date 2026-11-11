@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -13,378 +11,156 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
-// assetInterceptCandidates 提取一条待插入资产输入项的 域名/IP/URL 候选串，用于资产拦截匹配。
-// URL 的 host 会拆出归类，使「只带 URL」的服务/端点资产也能被 域名/IP 规则命中。
-func assetInterceptCandidates(item assetInputItem) (domains, ips, urls []string) {
-	add := func(dst *[]string, s string) {
-		if s = strings.TrimSpace(s); s != "" {
-			*dst = append(*dst, s)
-		}
-	}
-	add(&domains, item.Domain)
-	for _, d := range item.BoundDomains {
-		add(&domains, d)
-	}
-	add(&ips, item.IP)
-	add(&ips, item.ServiceIP)
-	add(&urls, item.URL)
-	if item.URL != "" {
-		if u, err := url.Parse(item.URL); err == nil {
-			if h := u.Hostname(); h != "" {
-				if net.ParseIP(h) != nil {
-					add(&ips, h)
-				} else {
-					add(&domains, h)
-				}
-			}
-		}
-	}
-	return domains, ips, urls
-}
-
-// assetInputLabel 返回一条待插入资产的简短标识，用于拦截说明消息。
-func assetInputLabel(item assetInputItem) string {
-	typ := strings.TrimSpace(item.Type)
-	var target string
-	switch {
-	case strings.TrimSpace(item.Domain) != "":
-		target = strings.TrimSpace(item.Domain)
-	case strings.TrimSpace(item.URL) != "":
-		target = strings.TrimSpace(item.URL)
-	case strings.TrimSpace(item.IP) != "":
-		target = strings.TrimSpace(item.IP)
-	case strings.TrimSpace(item.ServiceIP) != "":
-		target = strings.TrimSpace(item.ServiceIP)
-	default:
-		target = "(未知)"
-	}
-	if typ != "" {
-		return fmt.Sprintf("[%s] %s", typ, target)
-	}
-	return target
-}
-
 // =====================================================================
-// Unified asset insertion tools
+// insert_components：组件登记
 // =====================================================================
 
-// SetAssetStore wires the asset store and company store onto this ToolSet
-// so the insert_assets, add_company_scope, and list_assets tools are active.
-func (t *ToolSet) SetAssetStore(as *db.AssetStore, cs *db.CompanyStore) {
+// SetComponentStore wires the component store and company store onto this ToolSet
+// so the insert_components / add_company_scope / list_components tools are active.
+func (t *ToolSet) SetComponentStore(as *db.ComponentStore, cs *db.CompanyStore) {
 	t.as = as
 	t.cs = cs
 }
 
-// assetInputItem is one element of the insert_assets "assets" array.
-type assetInputItem struct {
-	Type string `json:"type"` // root_domain|ip|subdomain|app|service|endpoint
-
-	// ---- root_domain / subdomain ----
-	Domain      string   `json:"domain"`
-	ICP         string   `json:"icp"`
-	RecordType  string   `json:"record_type"`
-	RecordValue []string `json:"record_value"`
-
-	// ---- ip ----
-	IP           string           `json:"ip"`
-	BoundDomains []string         `json:"bound_domains"`
-	OpenPorts    []db.PortService `json:"open_ports"`
-
-	// ---- app ----
-	AppName     string `json:"app_name"`
-	BundleID    string `json:"bundle_id"`
-	Category    string `json:"category"`
-	Description string `json:"description"`
-	AppICP      string `json:"app_icp"`
-	CompanyID   *int64 `json:"company_id"` // explicit company link (app only; others auto-attribute via scope)
-
-	// ---- service (http) ----
-	URL           string           `json:"url"`
-	Technologies  []string         `json:"technologies"`
-	StatusCode    *int             `json:"status_code"`
-	ContentLength *int64           `json:"content_length"`
-	PageTitle     string           `json:"page_title"`
-	FaviconMMH3   string           `json:"favicon_mmh3"`
-	Auth          []map[string]any `json:"auth"`
-	ServiceName   string           `json:"service_name"`
-	ServiceIP     string           `json:"service_ip"` // optional enrichment IP
-
-	// ---- service (other) ----
-	Port  int    `json:"port"`
-	Proto string `json:"proto"`
-
-	// ---- endpoint ----
-	Method string           `json:"method"`
-	Params []map[string]any `json:"params"`
+// componentInputItem is one element of the insert_components "components" array.
+type componentInputItem struct {
+	Type           string   `json:"type"`
+	ComponentName  string   `json:"component_name"`
+	Version        string   `json:"version"`
+	Vendor         string   `json:"vendor"`
+	BinaryPath     string   `json:"binary_path"`
+	ConfigPath     string   `json:"config_path"`
+	StartedBy      string   `json:"started_by"`
+	FirmwareSha256 string   `json:"firmware_sha256"`
+	Port           int      `json:"port"`
+	Technologies   []string `json:"technologies"`
+	Notes          string   `json:"notes"`
+	Status         string   `json:"status"`
 }
 
-// insertAssets is the unified insert_assets agent tool.
-func (t *ToolSet) insertAssets() actool.CoreTool {
+// componentInputLabel 返回一条待登记组件的简短标识。
+func componentInputLabel(item componentInputItem) string {
+	name := strings.TrimSpace(item.ComponentName)
+	if name == "" {
+		return "(未命名组件)"
+	}
+	if v := strings.TrimSpace(item.Version); v != "" {
+		return name + " " + v
+	}
+	return name
+}
+
+// insertComponents is the unified insert_components agent tool.
+func (t *ToolSet) insertComponents() actool.CoreTool {
 	return writeTool(
-		"insert_assets",
-		"批量登记新发现的资产，一次可混合多种类型（type 见枚举）。\n"+
-			"各类型必填字段：root_domain→domain；ip→ip（须为 IPv4/IPv6，非主机名）；subdomain→domain；app→app_name；service(HTTP)→url；service(非HTTP)→service_name+port（ip/domain 至少填一个）；endpoint→url+method。其余字段含义见各自说明。\n"+
-			"auth/technologies/params 为追加合并(append)，不覆盖原值。\n"+
-			"返回：{results:[{index,id,type}], errors:[{index,error}]}",
+		"insert_components",
+		"登记固件里的组件（一行 = 一个组件，例如 lighttpd/mosquitto/roscore）。\n"+
+			"type 取值：web / mqtt / ros / ssh / telnet / upnp / onvif / rtsp / ftp / other；不确定就填 other。\n"+
+			"component_name 必填（可执行名或服务名，如 lighttpd）。version 只在确知时填，不要猜。\n"+
+			"可选：vendor 厂商、binary_path 可执行文件路径、config_path 配置文件、started_by 启动脚本(/etc/init.d/xxx)、\n"+
+			"      port 主监听端口、technologies 依赖库/特征、notes 备注（如「busybox telnetd，默认无认证」）。\n"+
+			"同一 (firmware_sha256, type, component_name, version) 只会有一行：重复登记会补齐空字段而不是新增。\n"+
+			"status 默认 pending（待挖）；开始分析某组件时用 set_component_status 置 running，分析完置 completed。\n"+
+			"返回：{inserted, updated, ids}",
 		obj(map[string]any{
-			// task_id 不暴露给模型：worker 归属哪个 task 由程序经 SetTaskID 权威赋值(见 handler)。
-			"assets": map[string]any{
+			"components": map[string]any{
 				"type":        "array",
-				"description": "资产数组，每个元素对应一条资产记录",
-				"items": obj(map[string]any{
-					"type": map[string]any{
-						"type":        "string",
-						"enum":        []string{"root_domain", "ip", "subdomain", "app", "service", "endpoint"},
-						"description": "资产类型",
-					},
-					// root_domain / subdomain
-					"domain":      str("根域名或子域名（root_domain/subdomain 必填）"),
-					"icp":         str("ICP 备案号（可选）"),
-					"record_type": str("DNS 解析类型：A/AAAA/CNAME/MX 等（subdomain 可选）"),
-					"record_value": map[string]any{
-						"type":        "array",
-						"items":       map[string]any{"type": "string"},
-						"description": "DNS 解析值列表（subdomain 可选，如 [\"1.2.3.4\",\"2.3.4.5\"]）",
-					},
-					// ip
-					"ip": str("IP 地址，必须是 IPv4/IPv6 地址，不能填主机名（主机名请用 type=subdomain 的 domain 字段）；ip 类型必填；service/endpoint 类型可填，用于关联 IP"),
-					"bound_domains": map[string]any{
-						"type":        "array",
-						"items":       map[string]any{"type": "string"},
-						"description": "该 IP 绑定的域名列表（ip 类型可选）",
-					},
-					"open_ports": map[string]any{
-						"type":        "array",
-						"description": "开放端口列表（ip 类型可选）",
-						"items": obj(map[string]any{
-							"port":    intp("端口号"),
-							"service": str("服务名称，如 http/ssh/mysql 等（可选）"),
-						}, "port"),
-					},
-					// app
-					"app_name":    str("应用名称（app 类型必填）"),
-					"bundle_id":   str("Bundle ID（app 类型可选）"),
-					"category":    str("应用分类（可选）"),
-					"description": str("应用描述（可选）"),
-					"app_icp":     str("应用 ICP 备案（可选）"),
-					"company_id":  intp("归属企业 id（app 类型可选；app 无法靠 scope 自动归因，需显式指定。id 由 add_company_scope 返回）"),
-					// service (http)
-					"url":         str("完整 URL，含协议和端口（HTTP 服务必填；service_type 自动设为 http）"),
-					"status_code": intp("HTTP 响应状态码，如 200/301/403/404（可选）"),
-					"content_length": map[string]any{
-						"type":        "integer",
-						"description": "HTTP 响应体字节数（可选）",
-					},
-					"page_title":   str("页面 <title> 内容（可选）"),
-					"favicon_mmh3": str("favicon MMH3 哈希（可选）"),
-					"technologies": map[string]any{
-						"type":        "array",
-						"items":       map[string]any{"type": "string"},
-						"description": "指纹/技术栈列表，如 [\"Nginx\",\"Vue\",\"Bootstrap\"]（可选）",
-					},
-					"auth": map[string]any{
-						"type":        "array",
-						"description": "发现的认证信息列表，每条含 type/username/password 等字段（可选，追加不覆盖）",
-						"items":       map[string]any{"type": "object"},
-					},
-					// service (other，非 HTTP)
-					"service_name": str("服务名称，如 ssh/mysql/redis（service 非 HTTP 时必填）"),
-					"port":         intp("端口号（service 非 HTTP 时必填）"),
-					// endpoint
-					"method": str("HTTP 方法：GET/POST/PUT/PATCH/DELETE 等（endpoint 必填）"),
-					"params": map[string]any{
-						"type":        "array",
-						"description": "请求参数列表，每条含 location(query/body/header/path)/name/value/type（可选，追加不覆盖）",
-						"items":       map[string]any{"type": "object"},
-					},
-				}, "type"),
+				"description": "批量：[{type, component_name, version?, vendor?, binary_path?, config_path?, started_by?, port?, technologies?, notes?}]",
+				"items":       map[string]any{"type": "object"},
 			},
-		}, "assets"),
+			"type":           str("[单条] web/mqtt/ros/ssh/telnet/upnp/onvif/rtsp/ftp/other"),
+			"component_name": str("[单条] 组件名（lighttpd / mosquitto / roscore）"),
+			"version":        str("[单条] 版本号，确知才填"),
+			"binary_path":    str("[单条] 可执行文件绝对路径"),
+			"config_path":    str("[单条] 配置文件路径"),
+			"started_by":     str("[单条] 启动脚本路径"),
+			"port":           intp("[单条] 主监听端口"),
+			"notes":          str("[单条] 备注"),
+		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.as == nil {
-				return actool.Errorf("insert_assets 未启用: AssetStore 未初始化"), nil
+				return actool.Errorf("insert_components 未启用: ComponentStore 未初始化"), nil
 			}
 			var a struct {
-				Assets []assetInputItem `json:"assets"`
+				Items []componentInputItem `json:"components"`
+				componentInputItem
+				FirmwareSha256 string `json:"firmware_sha256"`
 			}
 			if err := json.Unmarshal(in, &a); err != nil {
-				return actool.Errorf("invalid input: " + err.Error()), nil
+				return actool.Errorf(err.Error()), nil
 			}
-			// task_id 由程序权威赋值(worker: SetTaskID)，不接受模型传入——避免模型漏传/错传
-			// 导致资产未归任务或归错任务。无任务上下文的调用方(auto/pentest/chat)其 t.taskID=0。
-			taskID := t.taskID
-
-			type result struct {
-				Index int    `json:"index"`
-				ID    int64  `json:"id"`
-				Type  string `json:"type"`
+			items := a.Items
+			if len(items) == 0 {
+				items = []componentInputItem{a.componentInputItem}
 			}
-			type errEntry struct {
-				Index int    `json:"index"`
-				Error string `json:"error"`
+			if len(items) == 0 {
+				return actool.Errorf("components 不能为空"), nil
 			}
 
-			var results []result
-			var errs []errEntry
-
-			// 资产闸门规则一次性载入；读取失败则跳过判定（不阻断插入）。
-			// 拦截规则 = 全局 ∪ 任务级 block；允许规则 = 任务级 allow。
-			blockRules, _ := t.as.ListAssetInterceptRules()
-			var allowRules []db.AssetInterceptRule
-			if t.taskID > 0 {
-				if tb, ta, err := t.as.TaskInterceptRulesSplit(t.taskID); err == nil {
-					blockRules = append(blockRules, tb...)
-					allowRules = ta
-				}
-			}
-
-			for i, item := range a.Assets {
-				// 资产闸门：先拦截后允许，被拒的资产禁止插入（跳过 Upsert 及后续副作用）。
-				domains, ips, urls := assetInterceptCandidates(item)
-				if d := db.EvaluateAssetGate(blockRules, allowRules, domains, ips, urls); !d.Allowed {
-					errs = append(errs, errEntry{
-						Index: i,
-						Error: fmt.Sprintf("资产 %s %s，已禁止插入", assetInputLabel(item), d.Reason),
-					})
-					continue
-				}
-
-				typ := strings.TrimSpace(item.Type)
-				var id int64
-				var err error
-
-				switch typ {
-				case "root_domain":
-					id, err = t.as.UpsertRootDomain(db.UpsertRootDomainReq{
-						Domain: item.Domain,
-						ICP:    item.ICP,
-						TaskID: taskID,
-					})
-
-				case "ip":
-					id, err = t.as.UpsertIP(db.UpsertIPReq{
-						IP:           item.IP,
-						BoundDomains: item.BoundDomains,
-						OpenPorts:    item.OpenPorts,
-						TaskID:       taskID,
-					})
-
-				case "subdomain":
-					id, err = t.as.UpsertSubdomain(db.UpsertSubdomainReq{
-						Domain:      item.Domain,
-						RecordType:  item.RecordType,
-						RecordValue: item.RecordValue,
-						ICP:         item.ICP,
-						TaskID:      taskID,
-					})
-
-				case "app":
-					id, err = t.as.UpsertApp(db.UpsertAppReq{
-						Name:        item.AppName,
-						BundleID:    item.BundleID,
-						Category:    item.Category,
-						Description: item.Description,
-						ICP:         item.AppICP,
-						CompanyID:   item.CompanyID,
-						TaskID:      taskID,
-					})
-
-				case "service":
-					// distinguish HTTP vs other by presence of url
-					if item.URL != "" {
-						// agent may send "ip" or "service_ip" for the enrichment IP; accept both
-						svcIP := item.ServiceIP
-						if svcIP == "" {
-							svcIP = item.IP
+			// 固件 sha256：单条/批量都可显式指定，否则回落到任务范围里登记的固件。
+			sha := strings.TrimSpace(a.FirmwareSha256)
+			if sha == "" && t.taskID > 0 && t.as != nil {
+				if scopes, err := t.as.ListTaskScope(t.taskID); err == nil {
+					for _, sc := range scopes {
+						if sc.Kind == "firmware" && sc.Sha256 != "" {
+							sha = sc.Sha256
+							break
 						}
-						id, err = t.as.UpsertHTTPService(db.UpsertHTTPServiceReq{
-							URL:           item.URL,
-							Technologies:  item.Technologies,
-							StatusCode:    item.StatusCode,
-							ContentLength: item.ContentLength,
-							PageTitle:     item.PageTitle,
-							FaviconMMH3:   item.FaviconMMH3,
-							Auth:          item.Auth,
-							IP:            svcIP,
-							TaskID:        taskID,
-						})
-					} else {
-						id, err = t.as.UpsertOtherService(db.UpsertOtherServiceReq{
-							Domain:      item.Domain,
-							IP:          item.IP,
-							Port:        item.Port,
-							ServiceName: item.ServiceName,
-							Auth:        item.Auth,
-							TaskID:      taskID,
-						})
 					}
-
-				case "endpoint":
-					id, err = t.as.UpsertEndpoint(db.UpsertEndpointReq{
-						URL:    item.URL,
-						Method: item.Method,
-						Params: item.Params,
-						IP:     item.ServiceIP,
-						TaskID: taskID,
-					})
-
-				default:
-					errs = append(errs, errEntry{Index: i, Error: "unknown type: " + typ})
-					continue
-				}
-
-				if err != nil {
-					errs = append(errs, errEntry{Index: i, Error: err.Error()})
-					continue
-				}
-				results = append(results, result{Index: i, ID: id, Type: typ})
-				t.writes.Assets++
-				t.anchorOwner(id)
-				if taskID > 0 {
-					var sourceNodeID *int64
-					if t.ownerNode > 0 {
-						nodeID := t.ownerNode
-						sourceNodeID = &nodeID
-					}
-					summary := "Agent 通过 insert_assets 登记"
-					if t.ownerNode > 0 {
-						summary = fmt.Sprintf("Worker 意图 #%d 通过 insert_assets 登记", t.ownerNode)
-					}
-					_ = t.as.SetTaskAssetSource(taskID, id, "agent", summary, sourceNodeID)
-				}
-				// 自动入测试范围(source='auto')：只对 worker 顶层显式插入的这一项，按其
-				// 类型加保守范围；side-effect 派生的资产不经此处，故范围不盲目扩大。taskID=0 时无操作。
-				// 与覆盖度开关无关：task_scope 是任务的范围边界(list/查询的过滤基准)，
-				// 覆盖度开关只决定要不要把它当分母去算指标，不决定要不要累积范围本身。
-				{
-					svcIP := item.ServiceIP
-					if svcIP == "" {
-						svcIP = item.IP
-					}
-					_ = t.as.AddAutoScope(taskID, typ, item.Domain, item.URL, svcIP)
 				}
 			}
 
+			var inputs []db.ComponentInput
+			for i := range items {
+				it := items[i]
+				if it.FirmwareSha256 == "" {
+					it.FirmwareSha256 = sha
+				}
+				inputs = append(inputs, db.ComponentInput{
+					Type:           it.Type,
+					Name:           it.ComponentName,
+					Version:        it.Version,
+					Vendor:         it.Vendor,
+					BinaryPath:     it.BinaryPath,
+					ConfigPath:     it.ConfigPath,
+					StartedBy:      it.StartedBy,
+					FirmwareSha256: it.FirmwareSha256,
+					Port:           it.Port,
+					Technologies:   it.Technologies,
+					Notes:          it.Notes,
+					Status:         it.Status,
+				})
+			}
+
+			var taskIDs []int64
+			if t.taskID > 0 {
+				taskIDs = []int64{t.taskID}
+			}
+			inserted, updated, ids, err := t.as.UpsertComponents(taskIDs, inputs)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
 			return jsonResult(map[string]any{
-				"results": results,
-				"errors":  errs,
+				"inserted": inserted,
+				"updated":  updated,
+				"ids":      ids,
 			})
 		},
 	)
 }
 
-// addCompanyScope writes to company_scope table and triggers asset attribution.
+// addCompanyScope writes to company_scope table and triggers component attribution.
 func (t *ToolSet) addCompanyScope() actool.CoreTool {
 	return writeTool(
 		"add_company_scope",
-		"把域名/IP/CIDR/ICP备案/企业关键词加入某公司的【资产范围】——域名、网络和ICP会自动认领命中的资产，关键词只提供给Agent作为范围提示。\n"+
+		"把域名/IP/CIDR/ICP备案/企业关键词加入某公司的【范围】——域名、网络和ICP记录在该公司范围下，关键词只提供给Agent作为范围提示。\n"+
 			"公司名唯一：company 不存在则新建，已存在则复用(只把范围并进去)。\n"+
 			"scope 一行一条，系统自动识别：根域名 / URL / 单个 IP / CIDR 网段 / ICP备案 / 企业关键词。\n"+
 			"务必给 reason 说明归属依据(whois/证书/ASN 等)。\n"+
 			"护栏：拒绝裸 TLD 与过宽网段(IPv4前缀需为/16-/32、IPv6前缀需为/32-/128)，非法行会被跳过并在 errors 返回。",
 		obj(map[string]any{
 			"company": str("公司名(不存在则新建、存在则复用；名称唯一)"),
-			"scope":   str("资产范围，一行一条：域名 / URL / IP / CIDR / ICP备案 / 企业关键词"),
+			"scope":   str("范围，一行一条：域名 / URL / IP / CIDR / ICP备案 / 企业关键词"),
 			"reason":  str("归属依据(证据/来源)，务必填写"),
 			"logo":    str("公司图标 URL(可选；仅新建公司时生效)"),
 		}, "company", "scope"),
@@ -426,13 +202,13 @@ func (t *ToolSet) addCompanyScope() actool.CoreTool {
 
 // addTaskScope lets the plan agent add test scope to THE CURRENT TASK — the coverage
 // denominator and the task's authorization edge. Worker discoveries are auto-scoped
-// (precise host) by insertAssets; this tool is for DELIBERATELY WIDENING: pull a whole
+// (precise host) by insertComponents; this tool is for DELIBERATELY WIDENING: pull a whole
 // root domain or whole company into scope, or add a specific subdomain / ip.
 func (t *ToolSet) addTaskScope() actool.CoreTool {
 	return writeTool(
 		"add_task_scope",
-		"把测试范围加入【本任务】——这是本任务的授权边界，也是资产测试覆盖度的分母。\n"+
-			"kind 支持：company(整个公司名下资产) / root_domain(整个根域，含所有子域) / subdomain(单个精确子域) / ip / cidr / icp / keyword / firmware(本任务要审计的固件) / device(可选的靶机)。\n"+
+		"把测试范围加入【本任务】——这是本任务的授权边界，也是组件测试覆盖度的分母。\n"+
+			"kind 支持：company(整个公司) / root_domain(整个根域，含所有子域) / subdomain(单个精确子域) / ip / cidr / icp / keyword / firmware(本任务要审计的固件) / device(可选的靶机)。\n"+
 			"说明：worker 逐个碰到的主机会被系统【自动】加进范围(精确子域)；本工具用于【主动扩大】——把整个根域/整个公司纳入，或补充指定某子域/IP；固件类任务用 firmware 登记被审计的固件，有靶机时用 device 登记。\n"+
 			"value：company 传公司名或 id(公司须已存在)；root_domain/subdomain 传域名；ip/cidr 传 IP 或网段；icp/keyword 传备案号或企业关键词；firmware 传固件文件名；device 传「IP」或「IP 型号」。\n"+
 			"sha256：仅 firmware 用，传固件文件的 sha256(64 位十六进制)；算不出来就先不传，之后补。\n"+
@@ -446,7 +222,7 @@ func (t *ToolSet) addTaskScope() actool.CoreTool {
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.as == nil {
-				return actool.Errorf("add_task_scope 未启用: AssetStore 未初始化"), nil
+				return actool.Errorf("add_task_scope 未启用: ComponentStore 未初始化"), nil
 			}
 			if t.taskID <= 0 {
 				return actool.Errorf("add_task_scope 需要任务上下文(当前无 task)"), nil
@@ -495,25 +271,25 @@ func (t *ToolSet) addTaskScope() actool.CoreTool {
 	)
 }
 
-// listUntestedAssets lets the plan agent pull the current + directly inherited
-// scope's not-yet-tested assets on demand (filter by type, paginated).
-func (t *ToolSet) listUntestedAssets() actool.CoreTool {
+// listUntestedComponents lets the plan agent pull the current + directly inherited
+// scope's not-yet-tested components on demand (filter by type, paginated).
+func (t *ToolSet) listUntestedComponents() actool.CoreTool {
 	return readTool(
-		"list_untested_assets",
-		"查询【本任务及直接关联任务】范围内、还没被事实锚点覆盖的资产（关联范围只读，供你自己判断要不要补测，不代替你决策）。\n"+
-			"可选按资产类型过滤：root_domain/subdomain/service/app/endpoint/ip。\n"+
-			"分页：page 从 1 起、page_size 默认 10。返回 {assets:[{id,type,label}], total, page, page_size}。仅任务上下文可用。",
+		"list_untested_components",
+		"查询【本任务】范围内、还没被事实锚点覆盖的组件（关联范围只读，供你自己判断要不要补测，不代替你决策）。\n"+
+			"可选按组件类型过滤：web/mqtt/ros/ssh/telnet/upnp/onvif/rtsp/ftp/other。\n"+
+			"分页：page 从 1 起、page_size 默认 10。返回 {components:[{id,type,label}], total, page, page_size}。仅任务上下文可用。",
 		obj(map[string]any{
-			"type":      str("资产类型过滤（可选）：root_domain/subdomain/service/app/endpoint/ip"),
+			"type":      str("组件类型过滤（可选）：web/mqtt/ros/ssh/telnet/upnp/onvif/rtsp/ftp/other"),
 			"page":      intp("页码，从 1 起（默认 1）"),
 			"page_size": intp("每页数量（默认 10）"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.as == nil {
-				return actool.Errorf("list_untested_assets 未启用: AssetStore 未初始化"), nil
+				return actool.Errorf("list_untested_components 未启用: ComponentStore 未初始化"), nil
 			}
 			if t.taskID <= 0 || t.ts == nil {
-				return actool.Errorf("list_untested_assets 需要任务上下文"), nil
+				return actool.Errorf("list_untested_components 需要任务上下文"), nil
 			}
 			var a struct {
 				Type     string `json:"type"`
@@ -528,37 +304,37 @@ func (t *ToolSet) listUntestedAssets() actool.CoreTool {
 				a.PageSize = 10
 			}
 			offset := (a.Page - 1) * a.PageSize
-			assets, total, err := t.as.ListUntestedAssetsWithSources(t.taskID, strings.TrimSpace(a.Type), a.PageSize, offset)
+			components, total, err := t.as.ListUntestedComponentsWithSources(t.taskID, strings.TrimSpace(a.Type), a.PageSize, offset)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
 			return jsonResult(map[string]any{
-				"assets": assets, "total": total, "page": a.Page, "page_size": a.PageSize,
+				"components": components, "total": total, "page": a.Page, "page_size": a.PageSize,
 			})
 		},
 	)
 }
 
-// listAssets lets an agent query the asset table.
-func (t *ToolSet) listAssets() actool.CoreTool {
+// listComponents lets an agent query the component table.
+func (t *ToolSet) listComponents() actool.CoreTool {
 	return readTool(
-		"list_assets",
-		"查询资产库：DSL 表达式搜索，或按 id/ids 直取；支持分页。只返回【本任务及直接关联任务】测试范围内的资产。\n"+
-			"DSL：field=value 模糊(ILIKE) | field==value 精确 | field!=value 排除 | 数字字段支持 > >= < <= | 裸词=全文模糊；AND/OR 组合(AND 优先级高)，可用括号分组。资产类型用独立 type 参数，不写进 DSL。\n"+
+		"list_components",
+		"查询组件库：DSL 表达式搜索，或按 id/ids 直取；支持分页。只返回本任务范围内的组件。\n"+
+			"DSL：field=value 模糊(ILIKE) | field==value 精确 | field!=value 排除 | 数字字段支持 > >= < <= | 裸词=全文模糊；AND/OR 组合(AND 优先级高)，可用括号分组。组件类型用独立 type 参数，不写进 DSL。\n"+
 			"未传 id/ids 时 dsl 必须非空（不允许无条件全量查询）。\n"+
-			"可用字段：domain(根/子/服务域名)、root_domain、ip、url、page_title、icp、service_name、app_name、method(如 GET/POST)、service_type(http|other)、record_type(如 A/CNAME)、technology(数组，=模糊 ==精确)、port/status_code/company_id(整数)。\n"+
-			"示例：status_code>=400 AND technology=shiro ；(port==80 OR port==443) AND technology=nginx",
+			"可用字段：component_name(组件名)、version、vendor、binary_path、config_path、started_by、status(pending|running|completed|ignored)、firmware_sha256、technology(数组，=模糊 ==精确)、port(整数)。\n"+
+			"示例：status==pending AND type==web ；component_name=lighttpd ；port==1883",
 		obj(map[string]any{
 			"dsl":    str(`DSL 查询表达式（语法/字段见工具描述）。未传 id/ids 时必须非空。`),
-			"type":   str("资产类型过滤：root_domain|ip|subdomain|app|service|endpoint（独立字段，可与 dsl 叠加；单独 type 不足以查询，仍需 dsl）"),
-			"id":     intp("直接按单个资产 id 取（可选，与 dsl/type 互斥）"),
-			"ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "直接按多个资产 id 取（可选，与 dsl/type 互斥）"},
+			"type":   str("组件类型过滤：web|mqtt|ros|ssh|telnet|upnp|onvif|rtsp|ftp|other（独立字段，可与 dsl 叠加；单独 type 不足以查询，仍需 dsl）"),
+			"id":     intp("直接按单个组件 id 取（可选，与 dsl/type 互斥）"),
+			"ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "直接按多个组件 id 取（可选，与 dsl/type 互斥）"},
 			"limit":  intp("返回上限，默认 10（可选）"),
 			"offset": intp("分页偏移，默认 0（可选）"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.as == nil {
-				return actool.Errorf("list_assets 未启用: AssetStore 未初始化"), nil
+				return actool.Errorf("list_components 未启用: ComponentStore 未初始化"), nil
 			}
 			var a struct {
 				DSL    string  `json:"dsl"`
@@ -573,35 +349,34 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 				a.Limit = 10
 			}
 
-			var assets []*db.Asset
+			var components []*db.Component
 			var err error
 			switch {
 			case a.ID > 0:
-				assets, err = t.as.GetByIDsInScope(t.taskID, []int64{a.ID})
+				components, err = t.as.GetByIDsInScope(t.taskID, []int64{a.ID})
 			case len(a.IDs) > 0:
-				assets, err = t.as.GetByIDsInScope(t.taskID, a.IDs)
+				components, err = t.as.GetByIDsInScope(t.taskID, a.IDs)
 			case a.DSL != "":
-				assets, err = t.as.QueryDSLInScope(a.DSL, a.Type, t.taskID, a.Limit, a.Offset)
+				components, err = t.as.QueryDSLInScope(a.DSL, a.Type, t.taskID, a.Limit, a.Offset)
 			default:
-				return actool.Errorf("未传 id/ids 时 dsl 不能为空：不允许无条件查询全部资产，请提供查询条件"), nil
+				return actool.Errorf("未传 id/ids 时 dsl 不能为空：不允许无条件查询全部组件，请提供查询条件"), nil
 			}
 			if err != nil {
 				return actool.Errorf("DSL 错误: " + err.Error()), nil
 			}
 			return jsonResult(map[string]any{
-				"count":  len(assets),
-				"assets": assets,
+				"count":  len(components),
+				"components": components,
 			})
 		},
 	)
 }
 
-// listCompanies lets an agent enumerate companies (企业) with their scope + asset count.
+// listCompanies lets an agent enumerate companies (企业) with their scope + component count.
 func (t *ToolSet) listCompanies() actool.CoreTool {
 	return readTool(
 		"list_companies",
-		"列出资产库中的【企业/公司】及其资产范围(scope)与已归属资产数。用于查看有哪些公司、"+
-			"拿到 company_id（insert_assets 关联 app、list_assets 按 company_id 过滤时用）。"+
+		"列出【企业/公司】及其范围(scope)。企业模块仅作为组织维度保留，组件不按企业归属。"+
 			"可选 search 按公司名模糊过滤(不区分大小写)，留空返回全部。",
 		obj(map[string]any{
 			"search": str("按公司名模糊过滤(可选，不区分大小写)；留空返回全部"),
@@ -622,7 +397,7 @@ func (t *ToolSet) listCompanies() actool.CoreTool {
 			type companyOut struct {
 				ID         int64    `json:"id"`
 				Name       string   `json:"name"`
-				AssetCount int      `json:"asset_count"`
+				ComponentCount int      `json:"component_count"`
 				Scope      []string `json:"scope"`
 			}
 			out := make([]companyOut, 0, len(cos))
@@ -634,7 +409,7 @@ func (t *ToolSet) listCompanies() actool.CoreTool {
 				for _, r := range c.Scope {
 					scope = append(scope, r.Raw)
 				}
-				out = append(out, companyOut{ID: c.ID, Name: c.Name, AssetCount: c.AssetCount, Scope: scope})
+				out = append(out, companyOut{ID: c.ID, Name: c.Name, ComponentCount: c.ComponentCount, Scope: scope})
 			}
 			return jsonResult(map[string]any{"count": len(out), "companies": out})
 		},
@@ -659,9 +434,9 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		// list_findings 保留：报漏洞前先查本任务已确认漏洞，避免重复上报同一漏洞。
 		t.listFindings(),
 		t.addFinding(), t.recordFact(),
-		// asset management (handlers guard nil store internally)。
-		// add_company_scope 不给 worker：定义企业资产范围属规划/主控/Auto 的职责，worker 只执行探索。
-		t.insertAssets(), t.listAssets(),
+		// component management (handlers guard nil store internally)。
+		// add_company_scope 不给 worker：定义企业范围属规划/主控/Auto 的职责，worker 只执行探索。
+		t.insertComponents(), t.listComponents(), t.setComponentStatus(),
 		// 跨 work 回看：worker 也可复用其他 work 的观察，避免重复劳动。
 		// search_all_worker_traces：不必先知道 intent_id，按关键字全局捞命中步骤；
 		// get_worker_trace：锁定某条 work 后列步骤/就地搜/取完整内容。
@@ -685,12 +460,12 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		t.setGoals(),
 		// set_constraints：人可在运行时给本任务补/改操作约束（allow/deny），约束 planner/worker 的探索边界。
 		t.setConstraints(),
-		// asset management (handlers guard nil store internally)
-		t.insertAssets(), t.addCompanyScope(), t.listAssets(),
+		// component management (handlers guard nil store internally)
+		t.insertComponents(), t.addCompanyScope(), t.listComponents(), t.setComponentStatus(),
 		t.addFinding(), t.recordFact(),
 		t.addTaskScope(),
-		// list_untested_assets：按需查本任务范围内未测资产(类型+分页)，自行决定补测。
-		t.listUntestedAssets(),
+		// list_untested_components：按需查本任务范围内未测组件(类型+分页)，自行决定补测。
+		t.listUntestedComponents(),
 	}
 }
 
@@ -709,4 +484,50 @@ func (t *ToolSet) AllDomainTools() []actool.CoreTool {
 		}
 	}
 	return out
+}
+
+// setComponentStatus marks a component's mining progress so 覆盖度 reflects reality.
+func (t *ToolSet) setComponentStatus() actool.CoreTool {
+	return writeTool(
+		"set_component_status",
+		"更新组件挖掘状态（本任务范围内的组件才能改）。\n"+
+			"status 取值：pending(待挖，登记后的默认值) / running(正在挖) / completed(已挖完，计入覆盖度分子) / ignored(不挖，不计入分母)。\n"+
+			"开始分析某个组件时置 running；这条组件在本任务里挖完（该看的入口都看过）置 completed；判定不值得挖置 ignored。\n"+
+			"支持 ids 批量，或 id 单个。返回 {updated, errors}",
+		obj(map[string]any{
+			"id":     intp("[单个] 组件 id（来自 insert_components / list_components）"),
+			"ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "[批量] 组件 id 列表"},
+			"status": str("pending|running|completed|ignored"),
+		}, "status"),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			if t.as == nil {
+				return actool.Errorf("set_component_status 未启用: ComponentStore 未初始化"), nil
+			}
+			var a struct {
+				ID     int64   `json:"id"`
+				IDs    []int64 `json:"ids"`
+				Status string  `json:"status"`
+			}
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			ids := a.IDs
+			if a.ID > 0 {
+				ids = append(ids, a.ID)
+			}
+			if len(ids) == 0 {
+				return actool.Errorf("id 或 ids 至少给一个"), nil
+			}
+			var errs []string
+			updated := 0
+			for _, id := range ids {
+				if err := t.as.SetTaskComponentStatus(t.taskID, id, a.Status); err != nil {
+					errs = append(errs, fmt.Sprintf("%d: %v", id, err))
+					continue
+				}
+				updated++
+			}
+			return jsonResult(map[string]any{"updated": updated, "errors": errs})
+		},
+	)
 }

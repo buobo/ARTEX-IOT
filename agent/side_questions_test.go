@@ -59,7 +59,7 @@ func TestSideActualChatCheckpointToolResultAndTranscriptIsolation(t *testing.T) 
 	for _, streaming := range []bool{false, true} {
 		t.Run(map[bool]string{true: "stream", false: "atomic"}[streaming], func(t *testing.T) {
 			dir := t.TempDir()
-			file := filepath.Join(dir, "asset.txt")
+			file := filepath.Join(dir, "component.txt")
 			if err := os.WriteFile(file, []byte("controlled-homepage-result"), 0600); err != nil {
 				t.Fatal(err)
 			}

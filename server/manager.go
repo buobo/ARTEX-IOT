@@ -24,7 +24,7 @@ import (
 )
 
 // Task is one engagement: a description + goal + its own exploration store,
-// sharing the process-wide asset store. ID is the PG task id as a string; ExpID
+// sharing the process-wide component store. ID is the PG task id as a string; ExpID
 // is the exploration the task owns.
 type Task struct {
 	ID           string `json:"id"`
@@ -194,7 +194,7 @@ func (t *Task) setLLMState(profileID, activeID *int64, profileIDs []int64, revis
 // DeleteTaskOptions controls cleanup of data stored outside the task's own
 // exploration graph. All options default to false for backward compatibility.
 type DeleteTaskOptions struct {
-	DeleteAssets     bool `json:"delete_assets"`
+	DeleteComponents     bool `json:"delete_components"`
 	DeleteTraffic    bool `json:"delete_traffic"`
 	DeleteFiles      bool `json:"delete_files"`
 	DeleteFindings   bool `json:"delete_findings"`
@@ -204,8 +204,8 @@ type DeleteTaskOptions struct {
 // DeleteTaskResult makes destructive cleanup auditable to API callers.
 type DeleteTaskResult struct {
 	Deleted           string `json:"deleted"`
-	AssetsDeleted     int64  `json:"assets_deleted"`
-	AssetsDetached    int64  `json:"assets_detached"`
+	ComponentsDeleted     int64  `json:"components_deleted"`
+	ComponentsDetached    int64  `json:"components_detached"`
 	TrafficDeleted    int64  `json:"traffic_deleted"`
 	FilesDeleted      bool   `json:"files_deleted"`
 	FindingsDeleted   int64  `json:"findings_deleted"`
@@ -213,14 +213,14 @@ type DeleteTaskResult struct {
 	CleanupWarning    string `json:"cleanup_warning,omitempty"`
 }
 
-// Manager owns the PostgreSQL data source (asset graph + every task's exploration
+// Manager owns the PostgreSQL data source (component graph + every task's exploration
 // graph + config) and the in-memory set of task handles.
 type Manager struct {
 	dir         string
 	pg          *pgdb.DB
-	assets      *pgdb.AssetStore
+	components      *pgdb.ComponentStore
 	traffic     *traffic.Traffic       // process-wide recording proxy (may be nil)
-	enrich      *enrich.Engine         // engine-side asset auto-completion (DNS/HTTP)
+	enrich      *enrich.Engine         // engine-side component auto-completion (DNS/HTTP)
 	interceptor *intercept.Interceptor // user-configured tool-call interception rules
 
 	companyMu sync.Mutex // serializes task/company-scope commits with live handle registration
@@ -336,7 +336,7 @@ func (m *Manager) SetWorkers(n int) error {
 	return m.pg.SetSetting(settingWorkers, strconv.Itoa(n))
 }
 
-// Enrich returns the asset auto-completion engine (may be nil if init failed).
+// Enrich returns the component auto-completion engine (may be nil if init failed).
 func (m *Manager) Enrich() *enrich.Engine { return m.enrich }
 
 // NewManager connects to PostgreSQL and, if proxyAddr is non-empty, starts the
@@ -373,7 +373,7 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if err := pg.EnsureLLMUsageTable(); err != nil {
 		log.Printf("[llmusage] create table: %v", err)
 	}
-	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
+	m := &Manager{dir: dir, pg: pg, components: pg.Components(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
 	if proxyAddr != "" {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
 		if err != nil {
@@ -407,7 +407,7 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 			}()
 		}
 	}
-	// Asset auto-completion engine (§5): HTTP probes routed through the recording
+	// Component auto-completion engine (§5): HTTP probes routed through the recording
 	// proxy (via m.ProxyAddr, which honors the traffic-capture toggle).
 	m.trafficOn = pg.GetBool(settingTrafficCapture, false)
 	// LLM 录制开关（默认关）。录制器每次调用时读取此标志。
@@ -439,7 +439,7 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 			log.Printf("[proxy] 全局代理 %q 无效，已忽略: %v", m.globalProxy, err)
 		}
 	}
-	m.enrich = enrich.New(m.assets, m.ProxyAddr, 4)
+	m.enrich = enrich.New(m.components, m.ProxyAddr, 4)
 	// Reconcile the seeded browser MCP with the persisted capture state, so a
 	// restart with capture already on keeps Playwright routed through the proxy.
 	m.syncBrowserMCPProxy()
@@ -733,7 +733,7 @@ func (m *Manager) HostTools() []actool.CoreTool {
 	return m.traffic.Tools()
 }
 
-func (m *Manager) Assets() *pgdb.AssetStore  { return m.assets }
+func (m *Manager) Components() *pgdb.ComponentStore  { return m.components }
 func (m *Manager) PG() *pgdb.DB              { return m.pg }
 func (m *Manager) Traffic() *traffic.Traffic { return m.traffic }
 
@@ -1017,14 +1017,14 @@ func (m *Manager) SetTasksCategory(taskIDs []string, categoryID *int64) (map[str
 	return updated, category, nil
 }
 
-// DeleteCompanyWithAssets keeps the database cascade and live task handles in
+// DeleteCompanyWithComponents keeps the database cascade and live task handles in
 // one manager-level critical section. This closes the gap where a task could
 // commit its company scope immediately before registration and miss the
 // post-delete in-memory sweep.
-func (m *Manager) DeleteCompanyWithAssets(id int64, deleteAssets bool) (int64, error) {
+func (m *Manager) DeleteCompanyWithComponents(id int64, deleteComponents bool) (int64, error) {
 	m.companyMu.Lock()
 	defer m.companyMu.Unlock()
-	assetsDeleted, err := m.pg.Companies().DeleteCompanyWithAssets(id, deleteAssets)
+	componentsDeleted, err := m.pg.Companies().DeleteCompanyWithComponents(id, deleteComponents)
 	if err != nil {
 		return 0, err
 	}
@@ -1041,7 +1041,7 @@ func (m *Manager) DeleteCompanyWithAssets(id int64, deleteAssets bool) (int64, e
 		})
 	}
 	m.mu.Unlock()
-	return assetsDeleted, nil
+	return componentsDeleted, nil
 }
 
 // ReplaceTaskLLMProfiles resets a task's ordered provider chain and mirrors the
@@ -1436,8 +1436,8 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 
 // DeleteTask removes a task and optionally its related global data. Traffic has
 // no task-id column, so related exchanges are resolved by exact hosts from the
-// task's asset rows. Files are staged before the database operation; traffic is
-// staged while PostgreSQL excludes asset/anchor writers. Both are restored on a
+// task's component rows. Files are staged before the database operation; traffic is
+// staged while PostgreSQL excludes component/anchor writers. Both are restored on a
 // database failure and purged only after its commit.
 func (m *Manager) DeleteTask(id string, opts DeleteTaskOptions) (DeleteTaskResult, error) {
 	result := DeleteTaskResult{Deleted: id}
@@ -1480,13 +1480,13 @@ func (m *Manager) DeleteTask(id string, opts DeleteTaskOptions) (DeleteTaskResul
 	}
 
 	dbResult, err := m.pg.DeleteTaskCascadePrepared(
-		n, opts.DeleteAssets, opts.DeleteFindings, opts.DeleteLLMRecords, prepare,
+		n, opts.DeleteComponents, opts.DeleteFindings, opts.DeleteLLMRecords, prepare,
 	)
 	if err != nil {
 		return result, rollbackTaskDelete(err, trafficStage, fileStage)
 	}
-	result.AssetsDeleted = dbResult.AssetsDeleted
-	result.AssetsDetached = dbResult.AssetsDetached
+	result.ComponentsDeleted = dbResult.ComponentsDeleted
+	result.ComponentsDetached = dbResult.ComponentsDetached
 	result.FindingsDeleted = dbResult.FindingsDeleted
 	result.LLMRecordsDeleted = dbResult.LLMRecordsDeleted
 
@@ -1746,7 +1746,7 @@ func (m *Manager) List() []*Task {
 	return out
 }
 
-// Notify signals that the asset/exploration graph changed (debounced consumer
+// Notify signals that the component/exploration graph changed (debounced consumer
 // wakes the planner). Non-blocking.
 func (t *Task) Notify() {
 	select {

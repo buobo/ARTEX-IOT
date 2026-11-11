@@ -221,6 +221,14 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 			log.Printf("[tools] seed %s 失败: %v", s.Key, err)
 		}
 	}
+	// 组件改造后下线的内置工具名：老库里这些行会残留在 tools 表（种子只插不删），
+	// 留着会让 UI 列出一个跑不起来的工具，甚至被绑到 agent 上导致运行时找不到实现。
+	if err := pg.PruneBuiltinTools([]string{
+		"insert_assets", "list_assets", "list_untested_assets", "asset_neighbors",
+		"delete_assets_by_host",
+	}); err != nil {
+		log.Printf("[tools] 清理已下线工具失败: %v", err)
+	}
 	// Seed the traffic host tools so they're bindable per-agent like built-ins.
 	// Default binding = worker (preserves prior behavior). Their runtime availability
 	// is still gated by the global capture switch (hostTools() returns them only when
@@ -270,7 +278,7 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		// incoming list. Covers agents (Auto, custom) whose base only has DefaultTools
 		// and therefore never includes ToolSet-backed domain tools. Per-task instances
 		// in the base always win: inList is built from the original incoming list so a
-		// worker's own upsert_asset is never shadowed by the server-level registry copy.
+		// worker's own upsert_component is never shadowed by the server-level registry copy.
 		if len(domainReg) > 0 {
 			inList := make(map[string]bool, len(tools))
 			for _, t := range tools {
@@ -334,21 +342,21 @@ func contains(ss []string, v string) bool {
 }
 
 // buildDomainReg builds a name→CoreTool registry from a server-level ToolSet
-// (real AssetStore, nil ExplorationStore, taskID=0). Used by ToolResolve to inject
+// (real ComponentStore, nil ExplorationStore, taskID=0). Used by ToolResolve to inject
 // domain tools into agents (Auto, custom) that don't own a per-task ToolSet.
 // nil as → returns nil (no injection, graceful degradation).
 //
 // The nil ExplorationStore is deliberate — these instances are task-less by
-// construction — so every tool here must tolerate it. Asset/company tools do
-// (they only need the AssetStore); the exploration-graph tools refuse with a
+// construction — so every tool here must tolerate it. Component/company tools do
+// (they only need the ComponentStore); the exploration-graph tools refuse with a
 // clear message via ToolSet.needExploration. Binding one of them to a task-less
 // agent in the tools table is therefore a useless tool, not a crash.
-func buildDomainReg(as *db.AssetStore) map[string]actool.CoreTool {
+func buildDomainReg(as *db.ComponentStore) map[string]actool.CoreTool {
 	if as == nil {
 		return nil
 	}
 	serverTS := agent.NewToolSet(nil, "")
-	serverTS.SetAssetStore(as, as.Companies())
+	serverTS.SetComponentStore(as, as.Companies())
 	reg := make(map[string]actool.CoreTool)
 	for _, t := range serverTS.AllDomainTools() {
 		reg[t.Name()] = t

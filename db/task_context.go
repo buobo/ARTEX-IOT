@@ -337,7 +337,7 @@ func (d *DB) TaskSourceIDs(taskID int64) ([]int64, error) {
 	return out, rows.Err()
 }
 
-// TaskCompanyIDs returns the companies whose asset scopes are available to the
+// TaskCompanyIDs returns the companies whose component scopes are available to the
 // task. The task_scope rows remain the single source of truth.
 func (d *DB) TaskCompanyIDs(taskID int64) ([]int64, error) {
 	rows, err := d.Query(`

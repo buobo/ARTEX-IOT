@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"time"
 
@@ -259,7 +258,7 @@ func taskNodeDTOs(in []*db.Node) []TaskNodeDTO {
 	return out
 }
 
-// ---- Edge (frontend "Edge") — exploration edges and asset edges ----
+// ---- Edge (frontend "Edge") — exploration edges and component edges ----
 
 type EdgeDTO struct {
 	Src string `json:"src"`
@@ -279,9 +278,9 @@ func edgeDTOs(in []db.Edge) []EdgeDTO {
 	return out
 }
 
-// ---- Coverage asset references ----
+// ---- Coverage component references ----
 
-type CoverageAssetRefDTO struct {
+type CoverageComponentRefDTO struct {
 	ID           int64  `json:"id"`
 	Kind         string `json:"kind"`
 	State        string `json:"state"`
@@ -290,8 +289,8 @@ type CoverageAssetRefDTO struct {
 	Inherited    bool   `json:"inherited,omitempty"`
 }
 
-func coverageAssetRefDTO(ref db.AssetRef) CoverageAssetRefDTO {
-	out := CoverageAssetRefDTO{
+func coverageComponentRefDTO(ref db.ComponentRef) CoverageComponentRefDTO {
+	out := CoverageComponentRefDTO{
 		ID: ref.ID, Kind: ref.Kind, State: ref.State, Summary: ref.Summary, Inherited: ref.Inherited,
 	}
 	if ref.SourceTaskID > 0 {
@@ -325,47 +324,29 @@ type FindingDTO struct {
 	TaskDescription string            `json:"task_description,omitempty"`
 	SourceTaskID    string            `json:"source_task_id,omitempty"`
 	Inherited       bool              `json:"inherited,omitempty"`
-	Assets          []FindingAssetDTO `json:"assets,omitempty"`
+	Components          []FindingComponentDTO `json:"components,omitempty"`
 	TS              string            `json:"ts"`
 }
 
-// FindingAssetDTO is one asset a finding is anchored to, pre-labelled for display.
-type FindingAssetDTO struct {
+// FindingComponentDTO is one component a finding is anchored to, pre-labelled for display.
+type FindingComponentDTO struct {
 	ID    string `json:"id"`
 	Type  string `json:"type"`
 	Label string `json:"label"`
 }
 
-// assetLabel renders an asset's most identifying field for compact display.
-func assetLabel(a *db.Asset) string {
-	switch {
-	case a.URL != "":
-		if a.Method != "" {
-			return a.Method + " " + a.URL
-		}
-		return a.URL
-	case a.Domain != "":
-		if a.Port != nil && *a.Port > 0 {
-			return fmt.Sprintf("%s:%d", a.Domain, *a.Port)
-		}
-		return a.Domain
-	case a.IP != "":
-		if a.Port != nil && *a.Port > 0 {
-			return fmt.Sprintf("%s:%d", a.IP, *a.Port)
-		}
-		return a.IP
-	case a.AppName != "":
-		return a.AppName
-	case a.BundleID != "":
-		return a.BundleID
-	case a.ServiceName != "":
-		return a.ServiceName
-	case a.RootDomain != "":
-		return a.RootDomain
-	default:
-		return "#" + i64s(a.ID)
+// componentLabel renders an component's most identifying field for compact display.
+func componentLabel(a *db.Component) string {
+	label := a.ComponentName
+	if label == "" {
+		label = a.Type
 	}
+	if a.Version != "" {
+		label += " " + a.Version
+	}
+	return label
 }
+
 
 // findingPayload mirrors the JSON written by the worker's report_finding tool
 // (agent/tools.go addFinding): {vulnclass, severity, summary, evidence:{by,poc}}.
@@ -399,15 +380,15 @@ func findingDTO(n *db.Node) FindingDTO {
 
 // findingDTOsForTask converts a task's finding nodes to DTOs, stamping each with
 // the owning task's id/description so the global 发现 page can group across tasks.
-// meta maps node id → the standalone findings row (id + status + asset ids), so the
-// per-task view shows the same triage state and anchored assets as the global page;
+// meta maps node id → the standalone findings row (id + status + component ids), so the
+// per-task view shows the same triage state and anchored components as the global page;
 // nodes with no row keep the 'pending' default and no finding_id (not editable).
-// assets pre-resolves the anchored asset rows for label rendering.
-func findingDTOsForTask(t *Task, in []*db.Node, meta map[int64]db.FindingMeta, assets map[int64]*db.Asset) []FindingDTO {
-	return findingDTOsForOwner(t.ID, t.Description, in, meta, assets)
+// components pre-resolves the anchored component rows for label rendering.
+func findingDTOsForTask(t *Task, in []*db.Node, meta map[int64]db.FindingMeta, components map[int64]*db.Component) []FindingDTO {
+	return findingDTOsForOwner(t.ID, t.Description, in, meta, components)
 }
 
-func findingDTOsForOwner(taskID, description string, in []*db.Node, meta map[int64]db.FindingMeta, assets map[int64]*db.Asset) []FindingDTO {
+func findingDTOsForOwner(taskID, description string, in []*db.Node, meta map[int64]db.FindingMeta, components map[int64]*db.Component) []FindingDTO {
 	out := make([]FindingDTO, 0, len(in))
 	for _, n := range in {
 		d := findingDTO(n)
@@ -417,20 +398,20 @@ func findingDTOsForOwner(taskID, description string, in []*db.Node, meta map[int
 			d.FindingID = i64s(m.ID)
 			d.Status = m.Status
 			d.TrafficCount = m.TrafficCount
-			d.Assets = findingAssetDTOs(m.AssetIDs, assets)
+			d.Components = findingComponentDTOs(m.ComponentIDs, components)
 		}
 		out = append(out, d)
 	}
 	return out
 }
 
-// findingAssetDTOs maps anchored asset ids to display DTOs, skipping ids whose
-// asset row is missing (e.g. deleted).
-func findingAssetDTOs(ids []int64, assets map[int64]*db.Asset) []FindingAssetDTO {
-	var out []FindingAssetDTO
+// findingComponentDTOs maps anchored component ids to display DTOs, skipping ids whose
+// component row is missing (e.g. deleted).
+func findingComponentDTOs(ids []int64, components map[int64]*db.Component) []FindingComponentDTO {
+	var out []FindingComponentDTO
 	for _, aid := range ids {
-		if a := assets[aid]; a != nil {
-			out = append(out, FindingAssetDTO{ID: i64s(a.ID), Type: a.Type, Label: assetLabel(a)})
+		if a := components[aid]; a != nil {
+			out = append(out, FindingComponentDTO{ID: i64s(a.ID), Type: a.Type, Label: componentLabel(a)})
 		}
 	}
 	return out
@@ -438,7 +419,7 @@ func findingAssetDTOs(ids []int64, assets map[int64]*db.Asset) []FindingAssetDTO
 
 // findingFromDB converts a standalone DBFinding row to a FindingDTO. task_id and
 // task_description are empty when the originating task has been deleted (NULL).
-func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
+func findingFromDB(f *db.DBFinding, components map[int64]*db.Component) FindingDTO {
 	status := f.Status
 	if status == "" {
 		status = db.FindingPending
@@ -457,7 +438,7 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		Report:    f.Report,
 		TS:        rfc3339(f.CreatedAt),
 	}
-	d.Assets = findingAssetDTOs(f.AssetIDs, assets)
+	d.Components = findingComponentDTOs(f.ComponentIDs, components)
 	if f.TaskID != nil {
 		d.TaskID = i64s(*f.TaskID)
 		d.TaskDescription = f.TaskDescription

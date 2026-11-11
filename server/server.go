@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -230,7 +229,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			return a.TaskTimeoutWrapupMaxTurns, true
 		}
 		wireAgentAugment(m.pg, s.skillDir, s.hostTools) // 可见 skills/MCP + 流量/编排 host 工具装配进 agent 工具集
-		domainReg := buildDomainReg(m.Assets())
+		domainReg := buildDomainReg(m.Components())
 		wireTools(m.pg, domainReg) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
 		seedPrompts(m.pg)          // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
 		s.seedOrchestrationTools() // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
@@ -697,12 +696,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}", s.getTask)
 	mux.HandleFunc("PATCH /api/tasks/{id}", s.updateTaskMetadata)
 	mux.HandleFunc("PATCH /api/tasks/{id}/category", s.updateTaskCategory)
-	// 任务级资产拦截/允许规则
-	mux.HandleFunc("GET /api/tasks/{id}/intercept-rules", s.taskInterceptListRules)
-	mux.HandleFunc("POST /api/tasks/{id}/intercept-rules", s.taskInterceptCreateRule)
-	mux.HandleFunc("PUT /api/tasks/{id}/intercept-rules/{rid}", s.taskInterceptUpdateRule)
-	mux.HandleFunc("DELETE /api/tasks/{id}/intercept-rules/{rid}", s.taskInterceptDeleteRule)
-	mux.HandleFunc("POST /api/tasks/{id}/intercept-rules/{rid}/toggle", s.taskInterceptToggleRule)
 	mux.HandleFunc("POST /api/tasks/control/batch", s.controlTasksBatch)
 	mux.HandleFunc("GET /api/task-archives", s.listTaskArchives)
 	mux.HandleFunc("GET /api/task-archives/{id}", s.getTaskArchive)
@@ -714,10 +707,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/task-archives/delete/batch", s.deleteTaskArchivesBatch)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage", s.taskCoverage)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage-graph", s.taskCoverageGraph)
-	mux.HandleFunc("GET /api/tasks/{id}/asset-refs", s.taskAssetRefs)
-	mux.HandleFunc("POST /api/tasks/{id}/assets", s.attachTaskAssets)
-	mux.HandleFunc("DELETE /api/tasks/{id}/assets/{assetID}", s.detachTaskAsset)
-	mux.HandleFunc("GET /api/tasks/{id}/intent-assets", s.taskIntentAssets)
+	mux.HandleFunc("GET /api/tasks/{id}/component-refs", s.taskComponentRefs)
+	mux.HandleFunc("POST /api/tasks/{id}/components", s.attachTaskComponents)
+	mux.HandleFunc("DELETE /api/tasks/{id}/components/{componentID}", s.detachTaskComponent)
+	mux.HandleFunc("GET /api/tasks/{id}/intent-components", s.taskIntentComponents)
 
 	// 工作空间文件管理器（针对 workDir）
 	mux.HandleFunc("GET /api/workspace/list", s.wsList)
@@ -751,11 +744,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/llm", s.setLLM)
 	mux.HandleFunc("POST /api/llm/test", s.testLLM)
 
-	// asset system
-	mux.HandleFunc("GET /api/assets", s.listAssets)
-	mux.HandleFunc("GET /api/assets/counts", s.assetCounts)
-	mux.HandleFunc("POST /api/assets", s.insertAssets)
-	mux.HandleFunc("DELETE /api/assets", s.deleteAssets)
+	// component system
+	mux.HandleFunc("GET /api/components", s.listComponents)
+	mux.HandleFunc("GET /api/components/counts", s.componentCounts)
+	mux.HandleFunc("POST /api/components", s.insertComponents)
+	mux.HandleFunc("DELETE /api/components", s.deleteComponents)
 
 	// company system
 	mux.HandleFunc("GET /api/companies", s.listCompanies)
@@ -768,7 +761,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/frontier", s.frontier)
 	mux.HandleFunc("GET /api/exploration/findings", s.findings)
 	mux.HandleFunc("GET /api/exploration/findings/groups", s.findingGroups)
-	mux.HandleFunc("GET /api/exploration/findings/asset-tree", s.findingAssetTree)
+	mux.HandleFunc("GET /api/exploration/findings/component-tree", s.findingComponentTree)
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
 	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
 	s.registerFindingTraffic(mux)
@@ -883,19 +876,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/mcp/{id}/tools", s.pgMCPTools)
 	mux.HandleFunc("POST /api/mcp/{id}/refresh", s.pgRefreshMCP)
 	// 资产同步 — ScopeSentry 数据源
-	mux.HandleFunc("GET /api/sync/scopesentry/status", s.syncSSStatus)
-	mux.HandleFunc("POST /api/sync/scopesentry/datasource", s.syncSSDatasource)
-	mux.HandleFunc("GET /api/sync/scopesentry/projects", s.syncSSProjects)
-	mux.HandleFunc("GET /api/sync/scopesentry/tasks", s.syncSSTasks)
-	mux.HandleFunc("POST /api/sync/scopesentry/sync", s.syncSSRun)
 	// 资产同步 — FOFA 数据源
-	mux.HandleFunc("GET /api/sync/fofa/status", s.syncFofaStatus)
-	mux.HandleFunc("POST /api/sync/fofa/datasource", s.syncFofaDatasource)
-	mux.HandleFunc("POST /api/sync/fofa/query", s.syncFofaQuery)
-	mux.HandleFunc("POST /api/sync/fofa/sync", s.syncFofaRun)
 	// 资产合集（FOFA 收集的显式资产集合，可作任务目标）
-	mux.HandleFunc("GET /api/collections", s.listCollections)
-	mux.HandleFunc("DELETE /api/collections/{id}", s.deleteCollection)
 	// Skill CRUD (文件系统)
 	mux.HandleFunc("GET /api/skills", s.fsListSkills)
 	mux.HandleFunc("POST /api/skills", s.fsCreateSkill)
@@ -935,11 +917,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/intercept/rules/{id}/toggle", s.interceptToggleRule)
 
 	// 资产拦截规则管理（全局黑名单：域名/IP/URL/CIDR）
-	mux.HandleFunc("GET /api/asset-intercept/rules", s.assetInterceptListRules)
-	mux.HandleFunc("POST /api/asset-intercept/rules", s.assetInterceptCreateRule)
-	mux.HandleFunc("PUT /api/asset-intercept/rules/{id}", s.assetInterceptUpdateRule)
-	mux.HandleFunc("DELETE /api/asset-intercept/rules/{id}", s.assetInterceptDeleteRule)
-	mux.HandleFunc("POST /api/asset-intercept/rules/{id}/toggle", s.assetInterceptToggleRule)
 
 	mux.HandleFunc("GET /api/intercept/pending", s.interceptListPending)
 	mux.HandleFunc("GET /api/intercept/pending/{id}", s.interceptGetOne)
@@ -979,13 +956,13 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		out["traffic"] = c
 		out["traffic_enabled"] = true
 	}
-	if counts, err := s.m.Assets().CountsByType(); err == nil {
+	if counts, err := s.m.Components().CountsByType(0); err == nil {
 		total := 0
 		for _, n := range counts {
 			total += n
 		}
-		out["assets"] = total
-		out["asset_counts"] = counts
+		out["components"] = total
+		out["component_counts"] = counts
 	}
 
 	// resolve the task: explicit ?task=<id> binds to that task (so a detail view
@@ -1201,7 +1178,7 @@ func (s *Server) controlIntent(w http.ResponseWriter, r *http.Request) {
 }
 
 // rerunIntent 重跑一条没跑成功的意图(blocked/exhausted/stopped):把它置回 open,worker
-// 会重新认领、从头再跑(已写回图谱的 fact/finding/asset 保留);若任务已终态/暂停则顺带复活。
+// 会重新认领、从头再跑(已写回图谱的 fact/finding/component 保留);若任务已终态/暂停则顺带复活。
 // 用于「出错的 work 点击继续运行」——网络/LLM 抖动导致 blocked 后可一键重试。
 func restoreRerunIntent(t *Task, before *db.Node) error {
 	if t == nil || before == nil {
@@ -1473,13 +1450,10 @@ type createTaskReq struct {
 	LLMProfileIDs        []int64  `json:"llm_profile_ids,omitempty"`   // 有序任务级配置链;第一项初始生效
 	SourceTaskIDs        []string `json:"source_task_ids,omitempty"`   // 仅直接、只读继承的来源任务
 	CompanyIDs           []int64  `json:"company_ids,omitempty"`       // 关联企业范围并快照关联当前企业资产;不复制资产或强制生成意图
-	CollectionIDs        []int64  `json:"collection_ids,omitempty"`    // 关联资产合集(FOFA 等收集的显式资产集合)作为任务目标
 	TimeoutSeconds       int      `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
 	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
 	SeedFirstIntent      *bool    `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
-	CoverageEnabled      *bool    `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
-	// InterceptRules 任务级资产拦截/允许规则(创建时录入,存 task_intercept_rules,不进全局表)。
-	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
+	CoverageEnabled      *bool    `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_components。company 关联不受影响。
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -1526,23 +1500,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.CompanyIDs = companyIDs
-	collectionIDs, err := db.NormalizeTaskCollectionIDs(req.CollectionIDs)
-	if err != nil {
-		writeErr(w, 400, fmt.Sprintf("关联资产合集无效：最多选择 %d 个", db.MaxTaskCollectionCount))
-		return
-	}
-	req.CollectionIDs = collectionIDs
-	interceptRules, err := buildTaskInterceptRules(req.InterceptRules)
-	if err != nil {
-		writeErr(w, 400, "任务级拦截规则无效："+err.Error())
-		return
-	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
 		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
-		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, CollectionIDs: req.CollectionIDs, LLMProfileIDs: req.LLMProfileIDs,
+		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
 		CoverageEnabled: req.CoverageEnabled,
-		InterceptRules:  interceptRules,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrTaskCategoryInvalid) || errors.Is(err, db.ErrTaskCategoryNotFound) {
@@ -1709,27 +1671,7 @@ func (s *Server) seed(t *Task, text string) {
 	if !(scheme == "https" && port == 443) && !(scheme == "http" && port == 80) {
 		u += ":" + strconv.Itoa(port)
 	}
-	var rootID int64
-	if as := s.m.Assets(); as != nil {
-		taskID, _ := strconv.ParseInt(t.ID, 10, 64)
-		if net.ParseIP(host) != nil {
-			rootID, _ = as.UpsertIP(db.UpsertIPReq{IP: host, TaskID: taskID})
-		} else if scheme == "https" || scheme == "http" {
-			rootID, _ = as.UpsertHTTPService(db.UpsertHTTPServiceReq{URL: u, TaskID: taskID})
-		} else {
-			rootID, _ = as.UpsertRootDomain(db.UpsertRootDomainReq{Domain: host, TaskID: taskID})
-		}
-		if rootID > 0 {
-			_ = as.SetTaskAssetSource(taskID, rootID, "task", "由任务描述或目标初始化", nil)
-		}
-	}
-	// anchor the seeded assets to this task's begin root as lineage/provenance
-	// (the asset graph is global and shared; anchoring no longer gates reads).
-	if rootID > 0 {
-		if begin, _ := t.Store.OriginFactID(); begin > 0 {
-			_ = t.Store.Anchor(begin, rootID)
-		}
-	}
+	// 组件来自固件解包，不再由任务目标(域名/IP)自动播种。
 	log.Printf("[seed] task %s: 目标站点 %s", t.ID, u)
 	// 不在这里 Notify:首轮是否触发统一由 engine.Run 的 HasActiveIntent 决定(种子意图任务
 	// 跳过首轮)。seed 早于 Run 执行,若在此 Notify 会 buffered 到通道、被 plannerLoop 启动时
@@ -1766,16 +1708,16 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, dto)
 }
 
-// taskCoverage returns a task's rough asset test coverage (denominator/tested/backlog).
+// taskCoverage returns a task's rough component test coverage (denominator/tested/backlog).
 func (s *Server) taskCoverage(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.m.Task(r.PathValue("id"))
 	if !ok {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	as := s.m.Assets()
+	as := s.m.Components()
 	if as == nil {
-		writeErr(w, 503, "asset store 未启用")
+		writeErr(w, 503, "component store 未启用")
 		return
 	}
 	// 资产覆盖度功能关闭 → 短路返回 {enabled:false}，前端据此隐藏覆盖度卡片/进度。
@@ -1793,17 +1735,17 @@ func (s *Server) taskCoverage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, cov)
 }
 
-// taskCoverageGraph returns the force-directed asset coverage graph for a task:
-// all in-scope assets (每种类型) + 连接用的根域名/公司节点, each carrying tested/in_scope.
+// taskCoverageGraph returns the force-directed component coverage graph for a task:
+// all in-scope components (每种类型) + 连接用的根域名/公司节点, each carrying tested/in_scope.
 func (s *Server) taskCoverageGraph(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.m.Task(r.PathValue("id"))
 	if !ok {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	as := s.m.Assets()
+	as := s.m.Components()
 	if as == nil {
-		writeErr(w, 503, "asset store 未启用")
+		writeErr(w, 503, "component store 未启用")
 		return
 	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
@@ -1815,29 +1757,29 @@ func (s *Server) taskCoverageGraph(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, g)
 }
 
-// taskAssetRefs returns the intents / facts / findings in this task anchored to a
-// given asset id — powers the coverage-graph node drawer's「关联意图 / 关联事实」。
-func (s *Server) taskAssetRefs(w http.ResponseWriter, r *http.Request) {
+// taskComponentRefs returns the intents / facts / findings in this task anchored to a
+// given component id — powers the coverage-graph node drawer's「关联意图 / 关联事实」。
+func (s *Server) taskComponentRefs(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.m.Task(r.PathValue("id"))
 	if !ok {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	assetID, _ := strconv.ParseInt(r.URL.Query().Get("asset_id"), 10, 64)
-	if assetID <= 0 {
-		writeErr(w, 400, "需要 asset_id")
+	componentID, _ := strconv.ParseInt(r.URL.Query().Get("component_id"), 10, 64)
+	if componentID <= 0 {
+		writeErr(w, 400, "需要 component_id")
 		return
 	}
-	refs, err := t.Store.AssetRefsWithSources(assetID)
+	refs, err := t.Store.ComponentRefsWithSources(componentID)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	intents := []CoverageAssetRefDTO{}
-	facts := []CoverageAssetRefDTO{}
-	findings := []CoverageAssetRefDTO{}
+	intents := []CoverageComponentRefDTO{}
+	facts := []CoverageComponentRefDTO{}
+	findings := []CoverageComponentRefDTO{}
 	for _, ref := range refs {
-		dto := coverageAssetRefDTO(ref)
+		dto := coverageComponentRefDTO(ref)
 		switch ref.Kind {
 		case "intent":
 			intents = append(intents, dto)
@@ -1857,9 +1799,9 @@ func (s *Server) taskScopeList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	as := s.m.Assets()
+	as := s.m.Components()
 	if as == nil {
-		writeErr(w, 503, "asset store 未启用")
+		writeErr(w, 503, "component store 未启用")
 		return
 	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
@@ -1877,9 +1819,9 @@ func (s *Server) taskScopeAdd(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	as := s.m.Assets()
+	as := s.m.Components()
 	if as == nil {
-		writeErr(w, 503, "asset store 未启用")
+		writeErr(w, 503, "component store 未启用")
 		return
 	}
 	var body struct {
@@ -1915,9 +1857,9 @@ func (s *Server) taskScopeDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	as := s.m.Assets()
+	as := s.m.Components()
 	if as == nil {
-		writeErr(w, 503, "asset store 未启用")
+		writeErr(w, 503, "component store 未启用")
 		return
 	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
@@ -1958,10 +1900,10 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 		// 与 intents 端点的兼容策略一致）。筛选/排序统一下推到 SQL。
 		if q.Get("page") == "" && q.Get("limit") == "" {
 			fs, _ := s.m.pg.ListFindings(500)
-			assets := s.resolveFindingAssets(fs)
+			components := s.resolveFindingComponents(fs)
 			out := make([]FindingDTO, 0, len(fs))
 			for _, f := range fs {
-				out = append(out, findingFromDB(f, assets))
+				out = append(out, findingFromDB(f, components))
 			}
 			writeJSON(w, 200, out)
 			return
@@ -1973,10 +1915,10 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 500, err.Error())
 			return
 		}
-		assets := s.resolveFindingAssets(fs)
+		components := s.resolveFindingComponents(fs)
 		out := make([]FindingDTO, 0, len(fs))
 		for _, f := range fs {
-			out = append(out, findingFromDB(f, assets))
+			out = append(out, findingFromDB(f, components))
 		}
 		writeJSON(w, 200, map[string]any{"items": out, "total": total, "page": page, "page_size": limit})
 		return
@@ -1998,10 +1940,10 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 	}
 	var aidSet []int64
 	for _, m := range meta {
-		aidSet = append(aidSet, m.AssetIDs...)
+		aidSet = append(aidSet, m.ComponentIDs...)
 	}
-	assets := s.resolveAssetIDs(aidSet)
-	out := findingDTOsForTask(t, f, meta, assets)
+	components := s.resolveComponentIDs(aidSet)
+	out := findingDTOsForTask(t, f, meta, components)
 
 	// Related-task findings are a live, read-only view. Provenance metadata lets
 	// the task UI suppress mutation affordances while retaining stable ids.
@@ -2024,16 +1966,16 @@ func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
 		if metaErr != nil {
 			log.Printf("[findings] source_task=%d meta: %v", source.Task.TaskID, metaErr)
 		}
-		var sourceAssetIDs []int64
+		var sourceComponentIDs []int64
 		for _, item := range sourceMeta {
-			sourceAssetIDs = append(sourceAssetIDs, item.AssetIDs...)
+			sourceComponentIDs = append(sourceComponentIDs, item.ComponentIDs...)
 		}
 		out = append(out, findingDTOsForOwner(
 			i64s(source.Task.TaskID),
 			source.Task.Description,
 			nodes,
 			sourceMeta,
-			s.resolveAssetIDs(sourceAssetIDs),
+			s.resolveComponentIDs(sourceComponentIDs),
 		)...)
 	}
 	writeJSON(w, 200, out)
@@ -2048,19 +1990,19 @@ func normFilter(v string) string {
 	return v
 }
 
-// resolveFindingAssets loads every asset anchored by the given findings, keyed by
-// id, so each finding DTO can render its assets' labels.
-func (s *Server) resolveFindingAssets(fs []*db.DBFinding) map[int64]*db.Asset {
+// resolveFindingComponents loads every component anchored by the given findings, keyed by
+// id, so each finding DTO can render its components' labels.
+func (s *Server) resolveFindingComponents(fs []*db.DBFinding) map[int64]*db.Component {
 	var ids []int64
 	for _, f := range fs {
-		ids = append(ids, f.AssetIDs...)
+		ids = append(ids, f.ComponentIDs...)
 	}
-	return s.resolveAssetIDs(ids)
+	return s.resolveComponentIDs(ids)
 }
 
-// resolveAssetIDs de-dupes ids and loads their asset rows into an id→asset map.
-func (s *Server) resolveAssetIDs(ids []int64) map[int64]*db.Asset {
-	assets := map[int64]*db.Asset{}
+// resolveComponentIDs de-dupes ids and loads their component rows into an id→component map.
+func (s *Server) resolveComponentIDs(ids []int64) map[int64]*db.Component {
+	components := map[int64]*db.Component{}
 	seen := map[int64]bool{}
 	var uniq []int64
 	for _, id := range ids {
@@ -2070,16 +2012,16 @@ func (s *Server) resolveAssetIDs(ids []int64) map[int64]*db.Asset {
 		}
 	}
 	if len(uniq) == 0 {
-		return assets
+		return components
 	}
-	list, err := s.m.pg.Assets().GetByIDs(uniq)
+	list, err := s.m.pg.Components().GetByIDs(uniq)
 	if err != nil {
-		log.Printf("[findings] resolve assets: %v", err)
+		log.Printf("[findings] resolve components: %v", err)
 	}
 	for _, a := range list {
-		assets[a.ID] = a
+		components[a.ID] = a
 	}
-	return assets
+	return components
 }
 
 // findingStats serves the whole-table aggregates (stat cards + vuln-class filter)
@@ -2094,7 +2036,7 @@ func (s *Server) findingStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // getFinding returns one finding by its standalone-table id (DTO finding_id),
-// with anchored assets resolved for display.
+// with anchored components resolved for display.
 func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 	id := int64(atoiDefault(r.PathValue("id"), 0))
 	if id <= 0 {
@@ -2110,8 +2052,8 @@ func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "finding not found")
 		return
 	}
-	assets := s.resolveAssetIDs(f.AssetIDs)
-	dto := findingFromDB(f, assets)
+	components := s.resolveComponentIDs(f.ComponentIDs)
+	dto := findingFromDB(f, components)
 	if contextTaskID := strings.TrimSpace(r.URL.Query().Get("context_task")); contextTaskID != "" {
 		contextTask := s.m.ResolveTask(contextTaskID)
 		if contextTask == nil {
@@ -2215,14 +2157,14 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		setDownload("text/csv; charset=utf-8", "findings-"+stamp+".csv")
 		_, _ = w.Write(report.FindingsCSV(fs))
 	case "json":
-		assets := s.resolveFindingAssets(fs)
+		components := s.resolveFindingComponents(fs)
 		out := make([]FindingDTO, 0, len(fs))
 		for _, f := range fs {
 			for i := range f.TrafficBindings {
 				f.TrafficBindings[i].Snapshot.ReqHead = ""
 				f.TrafficBindings[i].Snapshot.RespHead = ""
 			}
-			out = append(out, findingFromDB(f, assets))
+			out = append(out, findingFromDB(f, components))
 		}
 		setDownload("application/json; charset=utf-8", "findings-"+stamp+".json")
 		enc := json.NewEncoder(w)
@@ -2380,7 +2322,7 @@ func (s *Server) patchFinding(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "finding not found")
 		return
 	}
-	writeJSON(w, 200, findingFromDB(f, s.resolveAssetIDs(f.AssetIDs)))
+	writeJSON(w, 200, findingFromDB(f, s.resolveComponentIDs(f.ComponentIDs)))
 }
 
 // deleteFinding removes a finding (findings row + originating exploration node).
@@ -2637,28 +2579,28 @@ func (s *Server) explorationNodes(w http.ResponseWriter, r *http.Request) {
 		"size":   size,
 		"edges":  edgeDTOs(edges),
 		"refs":   refs,
-		"assets": s.nodeAnchoredAssets(t, append(ids, neighbourIDs...)),
+		"components": s.nodeAnchoredComponents(t, append(ids, neighbourIDs...)),
 	})
 }
 
-// nodeAnchoredAssets resolves the exploration_anchors of the given nodes into
-// display-ready asset labels, keyed by node id. Anchors are provenance decoration
+// nodeAnchoredComponents resolves the exploration_anchors of the given nodes into
+// display-ready component labels, keyed by node id. Anchors are provenance decoration
 // for the 播报板 — a failure here must not cost the caller its page, so errors are
-// logged and degrade to "no assets".
-func (s *Server) nodeAnchoredAssets(t *Task, nodeIDs []int64) map[string][]FindingAssetDTO {
-	out := map[string][]FindingAssetDTO{}
-	anchors, err := t.Store.NodeAssets(nodeIDs)
+// logged and degrade to "no components".
+func (s *Server) nodeAnchoredComponents(t *Task, nodeIDs []int64) map[string][]FindingComponentDTO {
+	out := map[string][]FindingComponentDTO{}
+	anchors, err := t.Store.NodeComponents(nodeIDs)
 	if err != nil {
-		log.Printf("[broadcast] node assets: %v", err)
+		log.Printf("[broadcast] node components: %v", err)
 		return out
 	}
 	var flat []int64
 	for _, ids := range anchors {
 		flat = append(flat, ids...)
 	}
-	assets := s.resolveAssetIDs(flat)
+	components := s.resolveComponentIDs(flat)
 	for nodeID, ids := range anchors {
-		if dtos := findingAssetDTOs(ids, assets); len(dtos) > 0 {
+		if dtos := findingComponentDTOs(ids, components); len(dtos) > 0 {
 			out[i64s(nodeID)] = dtos
 		}
 	}
@@ -3674,7 +3616,7 @@ func (s *Server) mainSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 // newMainSession starts a fresh main-agent conversation segment. Only the segment
-// counter advances — the task's exploration graph, assets and goal are untouched, so
+// counter advances — the task's exploration graph, components and goal are untouched, so
 // the main agent continues over the same task with a clean transcript/context.
 func (s *Server) newMainSession(w http.ResponseWriter, r *http.Request) {
 	t := s.m.ResolveTask(r.URL.Query().Get("task"))
@@ -3787,7 +3729,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
 			agentMsg := composeAgentMessage(agentMessage, req.Attachments, taskDir)
 			s.engine.BeginLLMCall(t.ID)
-			_, err := ma.Chat(ctx, maTaskID, mainSeg, s.m.Assets(), t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal, t.NotifyHint)
+			_, err := ma.Chat(ctx, maTaskID, mainSeg, s.m.Components(), t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal, t.NotifyHint)
 			s.engine.EndLLMCall(t.ID)
 			if err != nil && ctx.Err() == nil {
 				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）", MainSeg: segPtr})
@@ -3865,14 +3807,14 @@ func (s *Server) fallbackChat(t *Task, msg string) string {
 		_, _ = t.Store.AddNode(db.KindHint, map[string]any{"text": text}, 0, "active", "human", nil)
 		return "已记录提示，规划者下次会读到：" + text
 	default:
-		assetCounts, _ := s.m.Assets().CountsByType()
-		assets := 0
-		for _, c := range assetCounts {
-			assets += c
+		componentCounts, _ := s.m.Components().CountsByType(0)
+		components := 0
+		for _, c := range componentCounts {
+			components += c
 		}
 		fnd, _ := t.Store.ListByKind(db.KindFinding, 1000)
 		fr, _ := t.Store.Frontier(1000)
-		return fmt.Sprintf("（规则模式，未配置 LLM）当前态势：资产 %d，待领意图 %d，确认发现 %d。\n可用指令：以\"意图 ...\"注入意图，\"提示 ...\"给规划者提示。", assets, len(fr), len(fnd))
+		return fmt.Sprintf("（规则模式，未配置 LLM）当前态势：资产 %d，待领意图 %d，确认发现 %d。\n可用指令：以\"意图 ...\"注入意图，\"提示 ...\"给规划者提示。", components, len(fr), len(fnd))
 	}
 }
 
@@ -3884,15 +3826,14 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 	}
 	findings, _ := t.Store.ListByKind(db.KindFinding, 1000) // 纯漏洞（事实是独立的 KindFact，不进报告）
 	counts := map[string]int{}
-	for _, ty := range []string{"root_domain", "ip", "subdomain", "app", "service", "endpoint"} {
-		ns, _ := s.m.Assets().QueryByType(ty, 100000, 0)
-		if len(ns) > 0 {
-			counts[ty] = len(ns)
+	if cs := s.m.Components(); cs != nil {
+		if got, err := cs.CountsByType(0); err == nil {
+			counts = got
 		}
 	}
 	md := report.Markdown(report.Input{
 		Title: t.Description, Goal: t.Goal, GeneratedAt: time.Now(),
-		AssetCounts: counts, Findings: findings,
+		ComponentCounts: counts, Findings: findings,
 	})
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.WriteHeader(200)
@@ -3908,7 +3849,7 @@ func (s *Server) getAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"entries": t.Guard.Audit(), "attributions": t.Guard.Attributions()})
 }
 
-// gc is a no-op stub (GC not yet implemented in the new asset store).
+// gc is a no-op stub (GC not yet implemented in the new component store).
 func (s *Server) gc(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"removed": 0})
 }

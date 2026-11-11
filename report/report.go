@@ -17,7 +17,7 @@ type Input struct {
 	Title       string
 	Goal        string
 	GeneratedAt time.Time
-	AssetCounts map[string]int
+	ComponentCounts map[string]int
 	Findings    []*db.Node
 }
 
@@ -57,7 +57,7 @@ func Markdown(in Input) string {
 	fmt.Fprintf(&b, "- 确认发现：**%d** 个\n", len(in.Findings))
 	fmt.Fprintf(&b, "- 资产：")
 	var types []string
-	for t := range in.AssetCounts {
+	for t := range in.ComponentCounts {
 		types = append(types, t)
 	}
 	sort.Strings(types)
@@ -65,7 +65,7 @@ func Markdown(in Input) string {
 		if i > 0 {
 			b.WriteString("、")
 		}
-		fmt.Fprintf(&b, "%s %d", t, in.AssetCounts[t])
+		fmt.Fprintf(&b, "%s %d", t, in.ComponentCounts[t])
 	}
 	b.WriteString("\n\n")
 

@@ -12,7 +12,7 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
-// compactIntents distills intents to {id, summary, state, asset_ids, parents,
+// compactIntents distills intents to {id, summary, state, component_ids, parents,
 // yields} so the planner sees both the direction and its LINEAGE — parents (the
 // upstream nodes it derived from: facts/intents/findings) and yields (the facts/
 // findings it produced) — without pulling full payloads. parentsOf/yieldsOf are
@@ -27,15 +27,15 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 			m["source_task_id"] = n.SourceTaskID
 			m["inherited"] = true
 		}
-		// asset_ids is the structured "which assets this direction covers" signal for
+		// component_ids is the structured "which components this direction covers" signal for
 		// dedup; fall back to legacy payload keys (target_ids plural, then target_id
 		// single) so intents stored before the rename still surface their anchors.
-		if tg, ok := p["asset_ids"]; ok && tg != nil {
-			m["asset_ids"] = tg
+		if tg, ok := p["component_ids"]; ok && tg != nil {
+			m["component_ids"] = tg
 		} else if tg, ok := p["target_ids"]; ok && tg != nil {
-			m["asset_ids"] = tg
+			m["component_ids"] = tg
 		} else if tg, ok := p["target_id"]; ok && tg != nil && tg != "" {
-			m["asset_ids"] = []any{tg}
+			m["component_ids"] = []any{tg}
 		}
 		if ps := parentsOf[n.ID]; len(ps) > 0 {
 			m["parents"] = ps // 上游：本意图派生自哪些节点（多个事实可共同产生一个意图）
@@ -48,11 +48,11 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 	return out
 }
 
-// ToolSet exposes the PG-backed dual graph (asset + exploration) to an LLM agent.
+// ToolSet exposes the PG-backed dual graph (component + exploration) to an LLM agent.
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
 	findingRecorder FindingRecorder
-	as              *db.AssetStore   // asset store (optional; nil = asset tools not available)
+	as              *db.ComponentStore   // component store (optional; nil = component tools not available)
 	cs              *db.CompanyStore // company store (optional)
 	ts              *db.ExplorationStore
 	worker          string
@@ -60,11 +60,11 @@ type ToolSet struct {
 	// coverageDisabled mirrors tasks.coverage_enabled=false. Stored inverted so the
 	// zero value (all existing ToolSet constructions) means ENABLED — matching the
 	// DB default (true). When true: graphOverviewData drops the coverage block, the
-	// auto-scope hook (insertAssets) is skipped, and add_task_scope/list_untested_assets
+	// auto-scope hook (insertComponents) is skipped, and add_task_scope/list_untested_components
 	// are filtered out of the agent's tool list. The scope field stays regardless.
 	coverageDisabled bool
-	// ownerNode is the exploration node that writes attach to: assets this run
-	// touches get anchored to it as lineage/provenance (NOT visibility — the asset
+	// ownerNode is the exploration node that writes attach to: components this run
+	// touches get anchored to it as lineage/provenance (NOT visibility — the component
 	// graph is global and shared). Worker = its claimed intent; planner = begin root.
 	ownerNode int64
 	GoalMet   bool
@@ -137,27 +137,27 @@ type EnrichTrigger interface {
 }
 
 // WriteCounts breaks down what a worker persisted this run, by node kind, so the
-// engine can log an accurate "wrote back" summary instead of lumping assets and
-// findings under "facts" (record_fact → Facts, insert_assets → Assets,
+// engine can log an accurate "wrote back" summary instead of lumping components and
+// findings under "facts" (record_fact → Facts, insert_components → Components,
 // report_finding → Findings; each element of a batch counts once).
 type WriteCounts struct {
 	Facts    int
-	Assets   int
+	Components   int
 	Findings int
 }
 
 // Total is every node persisted this run, regardless of kind — the
 // "explored but persisted nothing" signal (Total == 0).
-func (w WriteCounts) Total() int { return w.Facts + w.Assets + w.Findings }
+func (w WriteCounts) Total() int { return w.Facts + w.Components + w.Findings }
 
-// String renders the per-kind breakdown for logs, e.g. "事实1 资产25 漏洞0".
+// String renders the per-kind breakdown for logs, e.g. "事实1 组件25 漏洞0".
 func (w WriteCounts) String() string {
-	return fmt.Sprintf("事实%d 资产%d 漏洞%d", w.Facts, w.Assets, w.Findings)
+	return fmt.Sprintf("事实%d 组件%d 漏洞%d", w.Facts, w.Components, w.Findings)
 }
 
 // Writes reports what this run wrote back, split by node kind (so the engine can
 // tell "explored but persisted nothing" apart from a completed intent, and log an
-// honest breakdown instead of calling assets/findings "facts").
+// honest breakdown instead of calling components/findings "facts").
 func (t *ToolSet) Writes() WriteCounts { return t.writes }
 
 func NewToolSet(ts *db.ExplorationStore, worker string) *ToolSet {
@@ -168,25 +168,25 @@ func NewToolSet(ts *db.ExplorationStore, worker string) *ToolSet {
 // dual-write to the standalone findings table (which survives task deletion).
 func (t *ToolSet) SetTaskID(id int64) { t.taskID = id }
 
-// SetCoverageEnabled records whether this task has the asset-coverage feature on
+// SetCoverageEnabled records whether this task has the component-coverage feature on
 // (default enabled). Passing false makes graphOverviewData omit the coverage block
 // and DropCoverageTools filter the two coverage-only tools out of the agent's tool
-// list. It does NOT stop scope accumulation: insertAssets' auto-scope hook runs
+// list. It does NOT stop scope accumulation: insertComponents' auto-scope hook runs
 // either way, because task_scope is the task's range boundary (the filter basis for
-// asset queries), not merely a coverage denominator.
+// component queries), not merely a coverage denominator.
 func (t *ToolSet) SetCoverageEnabled(enabled bool) { t.coverageDisabled = !enabled }
 
 // CoverageDisabled reports whether the coverage feature is off for this task.
 func (t *ToolSet) CoverageDisabled() bool { return t.coverageDisabled }
 
-// coverageOnlyTools are the LLM tools that only make sense when asset coverage is
+// coverageOnlyTools are the LLM tools that only make sense when component coverage is
 // on. When the feature is off they are filtered out of the agent's tool list so
 // they neither pollute the prompt nor let the model build a disabled denominator.
 // add_task_scope is deliberately NOT here: task_scope is the task's range boundary
-// (the filter basis for asset queries), not merely a coverage denominator, so the
-// agents that own范围定义 keep it either way — in lockstep with insertAssets'
+// (the filter basis for component queries), not merely a coverage denominator, so the
+// agents that own范围定义 keep it either way — in lockstep with insertComponents'
 // auto-scope hook, which also runs regardless of the switch.
-var coverageOnlyTools = map[string]bool{"list_untested_assets": true}
+var coverageOnlyTools = map[string]bool{"list_untested_components": true}
 
 // DropCoverageTools returns tools with the coverage-only ones removed when this
 // task has the feature disabled; otherwise it returns tools unchanged.
@@ -221,16 +221,16 @@ func (t *ToolSet) AddHintTool() actool.CoreTool            { return t.addHint() 
 func (t *ToolSet) SetEnrich(e EnrichTrigger) { t.enrich = e }
 
 // SetOwnerNode sets the exploration node that writes anchor to (worker: its
-// intent node; planner/main: the begin root). Assets created/referenced while
+// intent node; planner/main: the begin root). Components created/referenced while
 // ownerNode is set are anchored to it as lineage (not visibility).
 func (t *ToolSet) SetOwnerNode(id int64) { t.ownerNode = id }
 
-// anchorOwner records a lineage edge from this run's owner node to an asset
-// (no-op if unset). Provenance only — the asset graph is global and shared, so
-// this no longer affects which assets a task can read.
-func (t *ToolSet) anchorOwner(assetID int64) {
-	if t.ts != nil && t.ownerNode > 0 && assetID > 0 {
-		_ = t.ts.Anchor(t.ownerNode, assetID)
+// anchorOwner records a lineage edge from this run's owner node to an component
+// (no-op if unset). Provenance only — the component graph is global and shared, so
+// this no longer affects which components a task can read.
+func (t *ToolSet) anchorOwner(componentID int64) {
+	if t.ts != nil && t.ownerNode > 0 && componentID > 0 {
+		_ = t.ts.Anchor(t.ownerNode, componentID)
 	}
 }
 
@@ -340,7 +340,7 @@ func jsonResult(v any) (actool.Result, error) {
 
 func (t *ToolSet) graphOverview() actool.CoreTool {
 	return t.readExpTool("graph_overview",
-		"(探索链路图)探索态势蒸馏摘要：资产计数、无接口的站点、frontier、发现、hints(人类/主 agent 的战略提示，生成意图时须纳入)。规划时先调它。",
+		"(探索链路图)探索态势蒸馏摘要：组件计数、无接口的站点、frontier、发现、hints(人类/主 agent 的战略提示，生成意图时须纳入)。规划时先调它。",
 		obj(map[string]any{}),
 		func(context.Context, json.RawMessage) (actool.Result, error) {
 			return jsonResult(t.graphOverviewData())
@@ -448,7 +448,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
 	// 让 planner 每轮判目标时一眼看到最近确认的漏洞；全量/更早的用 list_findings 取。
 	// 每条只留 {id, summary, from_intent?}：from_intent 是产生本漏洞的意图。
-	// evidence/assets/vulnclass/severity/state 等仍可用 list_findings / node_detail(id) 取。
+	// evidence/components/vulnclass/severity/state 等仍可用 list_findings / node_detail(id) 取。
 	const findingListCap = 10
 	findingList := make([]map[string]any, 0, findingListCap)
 	for _, n := range vulnNodes {
@@ -516,20 +516,34 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// summaries in a separate field so their intents never enter this task's
 	// frontier or get mistaken for locally claimable work.
 	out["related_tasks"] = t.relatedTaskOverviews()
-	// coverage：粗略的资产测试覆盖度参考——范围(task_scope)内的资产里，被 fact 碰过的
-	// 占比 + by_type(按类型的 总数/已测)。要看未测的具体资产由 agent 按需调 list_untested_assets 自行判断。仅任务上下文有。
-	// 资产覆盖度功能关闭时(coverageDisabled)：只保留 host_count(目标主机数的感知信息)，
+	// coverage：粗略的组件测试覆盖度参考——任务范围内的组件里，被 fact 碰过的
+	// 占比 + by_type(按类型的 总数/已测)。要看未测的具体组件由 agent 按需调 list_untested_components 自行判断。仅任务上下文有。
+	// 覆盖度功能关闭时(coverageDisabled)：只保留 host_count(目标主机数的感知信息)，
 	// 丢弃 denominator/tested/pct/by_type/note 等覆盖度度量，避免污染上下文、也不诱导
-	// 已隐藏的 add_task_scope/list_untested_assets。
+	// 已隐藏的 add_task_scope/list_untested_components。
 	if t.as != nil && t.ts != nil && t.taskID > 0 {
 		{
 			m := map[string]any{}
 			if !t.coverageDisabled {
+				if scopes, err := t.as.ListTaskScope(t.taskID); err == nil && len(scopes) > 0 {
+					rows := make([]map[string]any, 0, len(scopes))
+					for _, sc := range scopes {
+						row := map[string]any{"kind": sc.Kind, "value": sc.Value, "source": sc.Source}
+						if sc.Sha256 != "" {
+							row["sha256"] = sc.Sha256
+						}
+						if sc.Reason != "" {
+							row["reason"] = sc.Reason
+						}
+						rows = append(rows, row)
+					}
+					m["scope"] = rows
+				}
 				if cov, err := t.as.TaskCoverageWithSources(t.taskID); err == nil {
 					m["denominator"] = cov.Denominator
 					m["tested"] = cov.Tested
 					m["by_type"] = cov.ByType
-					m["note"] = "coverage资产测试覆盖度（包括接口等各种相关资产），粗略估计、仅供参考：包含当前任务与直接关联任务的 scope、事实锚点；关联 scope 只读。容器型资产/大量枚举会让它偏低，勿据此认为已测完；可用 add_task_scope 增补本任务范围、list_untested_assets 看未测资产【通常不调用list_untested_assets，按照任务推进即可】；"
+					m["note"] = "coverage组件测试覆盖度（按组件状态：completed 算已测），粗略估计、仅供参考：包含当前任务与直接关联任务的 scope、事实锚点；关联 scope 只读。大量枚举/未回填状态会让它偏低，勿据此认为已测完；可用 add_task_scope 增补本任务范围、list_untested_components 看未测组件【通常不调用list_untested_components，按照任务推进即可】；"
 					if cov.Denominator == 0 {
 						m["pct"] = nil
 						m["status"] = "范围未锚定"
@@ -537,11 +551,6 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 						m["pct"] = cov.Pct
 					}
 				}
-			}
-			if hosts, err := t.as.HostsByTaskWithSources(t.taskID); err == nil {
-				// 只给主机总数，不再把 host 列表平铺进 graph_overview（大范围任务里那是每轮
-				// 都重复携带的大量字符串，对规划决策价值有限）；具体主机按需 list_assets 查。
-				m["host_count"] = len(hosts)
 			}
 			if len(m) > 0 {
 				out["coverage"] = m
@@ -843,11 +852,11 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 					}
 					scope = append(scope, entry)
 				}
-				item["asset_scope"] = scope
-				item["asset_scope_count"] = scopeCount
+				item["component_scope"] = scope
+				item["component_scope_count"] = scopeCount
 			}
 			if coverage, err := t.as.TaskCoverage(source.Task.TaskID, source.Task.ExplorationID); err == nil {
-				item["asset_coverage"] = map[string]any{
+				item["component_coverage"] = map[string]any{
 					"denominator": coverage.Denominator,
 					"tested":      coverage.Tested,
 					"pct":         coverage.Pct,
@@ -993,8 +1002,8 @@ func compactFact(n *db.Node) map[string]any {
 }
 
 func (t *ToolSet) nodeDetail() actool.CoreTool {
-	return t.readExpTool("node_detail", "按 id 取本任务或直接关联任务的【探索图节点】完整内容。继承节点带 source_task_id/inherited=true 且只读。仅限 list_facts/list_findings/graph_overview 返回的探索节点 id；资产请用 list_assets/asset_neighbors。",
-		obj(map[string]any{"id": idp("探索图节点 id(非资产 id)")}, "id"),
+	return t.readExpTool("node_detail", "按 id 取本任务或直接关联任务的【探索图节点】完整内容。继承节点带 source_task_id/inherited=true 且只读。仅限 list_facts/list_findings/graph_overview 返回的探索节点 id；组件请用 list_components。",
+		obj(map[string]any{"id": idp("探索图节点 id(非组件 id)")}, "id"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				ID json.RawMessage `json:"id"`
@@ -1009,7 +1018,7 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 				return actool.Errorf(err.Error()), nil
 			}
 			if n == nil {
-				return actool.Errorf(fmt.Sprintf("未找到探索节点 %d。若你想查的是资产，请用 list_assets / asset_neighbors（资产与探索节点是不同的 id 空间，资产 id 不能传给 node_detail）。", id)), nil
+				return actool.Errorf(fmt.Sprintf("未找到探索节点 %d。若你想查的是组件，请用 list_components（组件与探索节点是不同的 id 空间，组件 id 不能传给 node_detail）。", id)), nil
 			}
 			if err := t.ts.PopulateFindingTrafficIDs([]*db.Node{n}); err != nil {
 				return actool.Errorf(err.Error()), nil
@@ -1023,7 +1032,7 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 // intentItem 是 add_intent 批量/单条的一条探索方向。
 type intentItem struct {
 	Summary   string            `json:"summary"`
-	AssetIDs  []json.RawMessage `json:"asset_ids"`
+	ComponentIDs  []json.RawMessage `json:"component_ids"`
 	ParentIDs []json.RawMessage `json:"parent_ids"`
 	Priority  int               `json:"priority"`
 }
@@ -1051,25 +1060,10 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if priority == 0 {
 		priority = 5
 	}
-	anchors := pidList(it.AssetIDs)
-	// 资产拦截：意图绑定的资产若命中系统资产拦截规则，则禁止下发该意图。
-	if t.as != nil && len(anchors) > 0 {
-		hits, err := t.as.CheckAssetsIntercept(t.taskID, anchors)
-		if err != nil {
-			return 0, fmt.Errorf("资产拦截校验失败：%w", err)
-		}
-		if len(hits) > 0 {
-			var b strings.Builder
-			fmt.Fprintf(&b, "意图「%s」绑定的资产未通过测试范围校验，请停止对相关资产进行测试：", it.Summary)
-			for _, h := range hits {
-				fmt.Fprintf(&b, "\n - %s", h.Describe())
-			}
-			return 0, fmt.Errorf("%s", b.String())
-		}
-	}
+	anchors := pidList(it.ComponentIDs)
 	payload := map[string]any{"summary": it.Summary}
 	if len(anchors) > 0 {
-		payload["asset_ids"] = anchors
+		payload["component_ids"] = anchors
 	}
 	id, err := t.ts.AddIntent(payload, priority, anchors, "planner")
 	if err != nil {
@@ -1095,16 +1089,16 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
 		obj(map[string]any{
-			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
-			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
+			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/component_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖组件 id。"),
+			"component_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标组件 id】（**尽量传**，0/1/多个；是 list_components 返回的组件 id，不是探索节点 id）：这条探索方向针对哪些组件（服务/二进制/配置/接口等）。只要方向围绕某些具体组件就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入组件链路。仅当纯固件级摸底、确实没有具体组件时才留空。"},
 			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
 			"priority":   intp("优先级 0-10，默认5"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Intents    []intentItem `json:"intents"`
-				intentItem              // 单条模式：顶层 summary/asset_ids/parent_ids/priority
+				intentItem              // 单条模式：顶层 summary/component_ids/parent_ids/priority
 			}
 			_ = json.Unmarshal(in, &a)
 			batch := len(a.Intents) > 0
@@ -1222,7 +1216,7 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 func (t *ToolSet) addFinding() actool.CoreTool {
 	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
 		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要"),
-		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
+		"intent_id": idp("当前任务的意图 id"), "component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响组件 id"},
 		"evidence":         str("证据/PoC 文本"),
 		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
 		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。",
@@ -1231,7 +1225,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		var a struct {
 			VulnClass, Name, Severity, Summary, Evidence string
 			IntentID                                     json.RawMessage   `json:"intent_id"`
-			AssetIDs                                     []json.RawMessage `json:"asset_ids"`
+			ComponentIDs                                     []json.RawMessage `json:"component_ids"`
 			TrafficRefs                                  []db.TrafficRef   `json:"traffic_refs"`
 			EvidenceHintID                               json.RawMessage   `json:"evidence_hint_id"`
 		}
@@ -1256,7 +1250,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
 		}
-		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs)}
+		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, ComponentIDs: pidList(a.ComponentIDs)}
 		var recorded *db.RecordedFinding
 		if t.findingRecorder != nil {
 			recorded, err = t.findingRecorder.Record(ctx, input, refs)
@@ -1301,10 +1295,10 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 }
 
 // recordFact writes a general exploration RESULT/conclusion (not a vuln, not a
-// new asset) into the EXPLORATION graph, chained to the intent that produced it.
+// new component) into the EXPLORATION graph, chained to the intent that produced it.
 // This is the home for observations and — importantly — negative results
 // ("port closed", "param not injectable", "no login found"). Such conclusions
-// must NOT be stuffed into the asset graph via upsert_asset.
+// must NOT be stuffed into the component graph via upsert_component.
 // factItem 是 record_fact 批量/单条的一条事实。
 type factItem struct {
 	Summary    string            `json:"summary"`
@@ -1312,7 +1306,7 @@ type factItem struct {
 	Evidence   string            `json:"evidence"`   // 一行关键证据（命令+关键输出行），支撑结论、便于事后核对
 	Confidence string            `json:"confidence"` // observed（直接看到）| inferred（据现象推断）
 	IntentID   json.RawMessage   `json:"intent_id"`
-	AssetIDs   []json.RawMessage `json:"asset_ids"`
+	ComponentIDs   []json.RawMessage `json:"component_ids"`
 }
 
 // recordOneFact 写一条 fact 节点并连到意图（intent→yields→fact）。defaultIntent 为
@@ -1342,7 +1336,7 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 		}
 	}
 	// a fact is its OWN node kind (distinct from a vuln finding).
-	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, pidList(it.AssetIDs))
+	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, pidList(it.ComponentIDs))
 	if err != nil {
 		return 0, err
 	}
@@ -1362,13 +1356,13 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 		"  · confidence=observed（输出里直接看到）| inferred（据现象推断）。\n"+
 		"  · **否定类结论**（不可注入/端口关闭/未发现入口等）只写\"观察 + 试探性读法\"——陈述你实际看到什么，方向是否放弃由规划者综合全局定；务必给 evidence，手段没穷尽或证据弱（含只探一次、看起来像）标 inferred，确已穷尽且直接看到才标 observed。",
 		obj(map[string]any{
-			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/component_ids）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":    str("对本次探索结论的【总结性一句话】（是对 detail 的概括）"),
 			"intent_id":  idp("产生本事实的意图 id（你领到的意图；批量时作为各条默认）"),
 			"detail":     str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
 			"evidence":   str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
 			"confidence": str("observed（输出里直接看到）| inferred（据现象推断）。否定结论务必如实标注。"),
-			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 id（可选，0/1/多个）：该事实涉及哪些资产"},
+			"component_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关组件 id（可选，0/1/多个）：该事实涉及哪些组件"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -1410,11 +1404,11 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 
 type hintItem struct {
 	Text        string            `json:"text"`
-	AssetIDs    []json.RawMessage `json:"asset_ids"`
+	ComponentIDs    []json.RawMessage `json:"component_ids"`
 	TrafficRefs []db.TrafficRef   `json:"traffic_refs"`
 }
 
-// addOneHint 挂一条 hint 节点(active/human)到探索图,可锚定资产,返回 id。
+// addOneHint 挂一条 hint 节点(active/human)到探索图,可锚定组件,返回 id。
 func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
 	if len(it.TrafficRefs) > 0 && !findingTrafficBindingEnabled() {
 		return 0, fmt.Errorf("Agent 自动绑定流量已关闭，未保存携带 traffic_refs 的提示；可在系统设置开启，或仅交接文字")
@@ -1423,7 +1417,7 @@ func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
 		return 0, fmt.Errorf("text 不能为空")
 	}
 	var anchors []int64
-	for _, raw := range it.AssetIDs {
+	for _, raw := range it.ComponentIDs {
 		if tid := pid(raw); tid > 0 {
 			anchors = append(anchors, tid)
 		}
@@ -1620,15 +1614,15 @@ func (t *ToolSet) addHint() actool.CoreTool {
 	return t.writeExpTool("add_hint", "把人类/主 agent 的战略提示挂到探索图，规划者下次生成意图时会读到它。\n"+
 		"★优先批量：多条提示放进 hints 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 hints 等长同序（失败项 id=0，详情见 errors）。单条则省略 hints 直接给顶层 text。",
 		obj(map[string]any{
-			"hints":        map[string]any{"type": "array", "description": "【优先用这个】要新增的提示数组，按顺序处理。每个元素字段同下方顶层字段（text/asset_ids/traffic_refs）。返回 ids 与本数组等长、同序。", "items": obj(map[string]any{"text": str("提示内容"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": HintTrafficSchema()})},
+			"hints":        map[string]any{"type": "array", "description": "【优先用这个】要新增的提示数组，按顺序处理。每个元素字段同下方顶层字段（text/component_ids/traffic_refs）。返回 ids 与本数组等长、同序。", "items": obj(map[string]any{"text": str("提示内容"), "component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "traffic_refs": HintTrafficSchema()})},
 			"text":         str("[单条] 提示内容，如'重点挖认证后接口'"),
 			"traffic_refs": HintTrafficSchema(),
-			"asset_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的资产 id（可选，0/1/多个）"},
+			"component_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "锚定的组件 id（可选，0/1/多个）"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Hints    []hintItem `json:"hints"`
-				hintItem            // 单条模式：顶层 text/asset_ids
+				hintItem            // 单条模式：顶层 text/component_ids
 			}
 			_ = json.Unmarshal(in, &a)
 			batch := len(a.Hints) > 0
@@ -2042,16 +2036,18 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.killWorkTool(), t.steerWorkTool(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。
 		t.addFinding(),
-		// list_companies：查看企业列表 + scope + 资产数（拿 company_id / 理解归属范围）。
+		// list_companies：查看企业列表 + scope + 组件数（拿 company_id / 理解归属范围）。
 		t.listCompanies(),
-		// list_assets：规划时按 DSL 检索全资产库（配合 list_untested_assets 的"范围内未测"视角，
+		// list_components：规划时按 DSL 检索全组件库（配合 list_untested_components 的"范围内未测"视角，
 		// 补上"按域名/指纹/端口/状态码等条件在整库里查"的能力）。
-		t.listAssets(),
-		// add_company_scope：规划时可把域名/IP/CIDR/ICP/关键词纳入某公司的资产范围（自动认领命中资产）。
+		t.listComponents(),
+		// add_company_scope：规划时可把域名/IP/CIDR/ICP/关键词纳入某公司的范围。
 		t.addCompanyScope(),
 		// add_task_scope：主动把整根域/整公司/某子域/IP 纳入本任务测试范围(覆盖度分母)。
 		t.addTaskScope(),
-		// list_untested_assets：按需查本任务范围内未测资产(类型+分页)，自行决定补测。
-		t.listUntestedAssets(),
+		// list_untested_components：按需查本任务范围内未测组件(类型+分页)，自行决定补测。
+		t.listUntestedComponents(),
+		// set_component_status：把挖完/不值得挖的组件状态置 completed/ignored，覆盖度才准。
+		t.setComponentStatus(),
 	}
 }

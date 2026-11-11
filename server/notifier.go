@@ -424,7 +424,7 @@ func (n *Notifier) renderBatch(ctx context.Context, deliveries []*db.Notificatio
 
 // itemFor 把事件快照渲染成待推送条目，顺带解析资产名与详情回链。
 func (n *Notifier) itemFor(ctx context.Context, snap notify.Snapshot, baseURL string) (notify.Item, error) {
-	assets, err := n.pg.NotificationAssetNames(ctx, snap.AssetIDs)
+	components, err := n.pg.NotificationComponentNames(ctx, snap.ComponentIDs)
 	if err != nil {
 		// 资产名解析失败不该阻止推送：读不到名字比收不到通知轻得多，
 		// 消息里少一行资产而已。
@@ -436,7 +436,7 @@ func (n *Notifier) itemFor(ctx context.Context, snap notify.Snapshot, baseURL st
 		VulnClass:  snap.VulnClass,
 		Severity:   snap.Severity,
 		Summary:    snap.Summary,
-		Assets:     assets,
+		Components:     components,
 		FromStatus: snap.FromStatus,
 		ToStatus:   snap.ToStatus,
 	}

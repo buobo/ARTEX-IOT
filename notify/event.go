@@ -16,7 +16,7 @@ type Snapshot struct {
 	Name      string  `json:"name"`
 	Severity  string  `json:"severity"`
 	Summary   string  `json:"summary"`
-	AssetIDs  []int64 `json:"asset_ids"`
+	ComponentIDs  []int64 `json:"component_ids"`
 	// 仅 kind=finding_status_changed 时非空。
 	FromStatus string `json:"from_status,omitempty"`
 	ToStatus   string `json:"to_status,omitempty"`
@@ -29,9 +29,9 @@ type Item struct {
 	VulnClass string
 	Severity  string
 	Summary   string
-	// Assets 是解析后的资产展示名（如域名/IP）。由 server 层填充——
+	// Components 是解析后的组件展示名（如 lighttpd 1.4.35）。由 server 层填充——
 	// 本包不碰数据库，拿不到名字。
-	Assets []string
+	Components []string
 	// DetailURL 是漏洞详情回链；为空表示未配 public_base_url，渲染时省略。
 	DetailURL string
 	// 状态变更事件专用；两项均非空时渲染成「待处理 → 已修复」。

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"fmt"
 	"strconv"
 	"strings"
@@ -28,21 +29,17 @@ func leafNode(e Expr) *astNode       { return &astNode{kind: "leaf", expr: &e} }
 // knownStringFields maps DSL field name → SQL column name.
 // NOTE: "type" is intentionally excluded — it is a separate parameter, not a DSL field.
 var knownStringFields = map[string]string{
-	"domain":       "domain",
-	"root_domain":  "root_domain",
-	"ip":           "ip",
-	"url":          "url",
-	"page_title":   "page_title",
-	"title":        "page_title",
-	"icp":          "icp",
-	"service_name": "service_name",
-	"app_name":     "app_name",
-	"bundle_id":    "bundle_id",
-	"category":     "category",
-	"app_icp":      "app_icp",
-	"method":       "method",
-	"service_type": "service_type",
-	"record_type":  "record_type",
+	"component_name": "component_name",
+	"name":           "component_name",
+	"version":        "version",
+	"vendor":         "vendor",
+	"binary":         "binary_path",
+	"binary_path":    "binary_path",
+	"config_path":    "config_path",
+	"started_by":     "started_by",
+	"status":         "status",
+	"firmware_sha256": "firmware_sha256",
+	"sha256":         "firmware_sha256",
 }
 
 // knownArrayFields maps DSL field name → SQL column name (array).
@@ -53,10 +50,9 @@ var knownArrayFields = map[string]string{
 }
 
 // knownNumericFields maps DSL field name → SQL column name (integer).
+// 组件表当前只有 port 一个数字字段；保留引擎，后续加 size_bytes 之类可直接用。
 var knownNumericFields = map[string]string{
-	"port":        "port",
-	"status_code": "status_code",
-	"status":      "status_code",
+	"port": "port",
 }
 
 func isKnownField(f string) bool {
@@ -253,8 +249,7 @@ func ParseDSL(s string) (*astNode, error) {
 
 // fullTextCols are searched for bare-text tokens.
 var fullTextCols = []string{
-	"domain", "root_domain", "ip", "url", "page_title",
-	"icp", "service_name", "app_name", "app_description",
+	"component_name", "version", "vendor", "binary_path", "config_path", "started_by", "notes",
 }
 
 type whereBuilder struct {
@@ -307,7 +302,6 @@ func (b *whereBuilder) buildLeaf(e Expr) (string, error) {
 		}
 		parts = append(parts,
 			"EXISTS (SELECT 1 FROM unnest(technologies) t(v) WHERE v ILIKE "+p+")",
-			"EXISTS (SELECT 1 FROM unnest(bound_domains) t(v) WHERE v ILIKE "+p+")",
 		)
 		return "(" + strings.Join(parts, " OR ") + ")", nil
 	}
@@ -477,10 +471,17 @@ func ValidateDSL(dsl string) error {
 	return err
 }
 
-// CountDSL returns the total number of assets matching a DSL expression (and optional
-// type), for server-side pagination — same WHERE as QueryDSL, without LIMIT/OFFSET.
-// taskID > 0 scopes the count to assets attached to that task.
-func (s *AssetStore) CountDSL(dsl, typ string, taskID int64) (int, error) {
+// componentSelectCols 是组件查询的公共 SELECT 前缀。
+var componentSelectCols = "SELECT " + componentCols() + " FROM components"
+
+// componentScopeTargetCTE 限定「本任务的组件」：task_ids 含 $1。
+const componentScopeTargetCTE = `
+target AS (
+  SELECT id FROM components WHERE $1 = ANY(task_ids)
+)`
+
+// CountDSL 返回匹配 DSL 的组件总数（分页用）。taskID>0 时只统计该任务内的组件。
+func (s *ComponentStore) CountDSL(dsl, typ string, taskID int64) (int, error) {
 	node, err := ParseDSL(dsl)
 	if err != nil {
 		return 0, err
@@ -498,15 +499,12 @@ func (s *AssetStore) CountDSL(dsl, typ string, taskID int64) (int, error) {
 		where += fmt.Sprintf(" AND $%d = ANY(task_ids)", len(args))
 	}
 	var n int
-	err = s.db.QueryRow("SELECT count(*) FROM assets WHERE "+where, args...).Scan(&n)
+	err = s.db.QueryRow("SELECT count(*) FROM components WHERE "+where, args...).Scan(&n)
 	return n, err
 }
 
-// QueryDSL executes a DSL query string against the asset store.
-// typ is an optional asset type filter applied independently of the DSL expression.
-// taskID > 0 scopes results to assets attached to that task and hydrates each
-// row's per-task source metadata (as QueryByTask does).
-func (s *AssetStore) QueryDSL(dsl, typ string, taskID int64, limit, offset int) ([]*Asset, error) {
+// QueryDSL 执行 DSL 查询。typ 为可选的组件类型过滤；taskID>0 时限定在该任务内。
+func (s *ComponentStore) QueryDSL(dsl, typ string, taskID int64, limit, offset int) ([]*Component, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -530,33 +528,27 @@ func (s *AssetStore) QueryDSL(dsl, typ string, taskID int64, limit, offset int) 
 		where += fmt.Sprintf(" AND $%d = ANY(task_ids)", len(args))
 	}
 	args = append(args, limit, offset)
-	q := assetSelectCols + " WHERE " + where +
+	q := componentSelectCols + " WHERE " + where +
 		fmt.Sprintf(" ORDER BY last_seen DESC, id DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	assets, err := scanAssets(rows)
+	out, err := scanComponents(rows)
 	if err != nil {
 		return nil, err
 	}
 	if taskID > 0 {
-		if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
+		if err := s.hydrateTaskComponentSources(taskID, out); err != nil {
 			return nil, err
 		}
 	}
-	return assets, nil
+	return out, nil
 }
 
-// QueryDSLInScope is QueryDSL restricted to assets that BELONG to taskID's (and its
-// direct source tasks') declared scope — membership, not literal value: a
-// root_domain scope returns every subdomain / service / endpoint under it. This is
-// the agent-facing list_assets path, so an agent queries the task's relevant assets
-// instead of the whole shared库. taskID<=0 (non-task contexts: Auto / pentest / chat)
-// has no scope to honor and falls back to the plain global QueryDSL. Rows carry the
-// same per-task source metadata as QueryByTask.
-func (s *AssetStore) QueryDSLInScope(dsl, typ string, taskID int64, limit, offset int) ([]*Asset, error) {
+// QueryDSLInScope 是限定在「本任务组件」内的 QueryDSL（成员判定 = task_ids 含该任务）。
+// taskID<=0 时退化为全局查询。
+func (s *ComponentStore) QueryDSLInScope(dsl, typ string, taskID int64, limit, offset int) ([]*Component, error) {
 	if taskID <= 0 {
 		return s.QueryDSL(dsl, typ, 0, limit, offset)
 	}
@@ -570,41 +562,36 @@ func (s *AssetStore) QueryDSLInScope(dsl, typ string, taskID int64, limit, offse
 	if err != nil {
 		return nil, err
 	}
-	// $1 is reserved for taskID (scopeTargetCTE); DSL placeholders start at $2.
+	// $1 留给 taskID（scope CTE），DSL 占位符从 $2 起。
 	where, dslArgs, err := buildDSLWhereBase(node, 1)
 	if err != nil {
 		return nil, err
 	}
-	args := []any{taskID}
-	args = append(args, dslArgs...)
+	args := append([]any{taskID}, dslArgs...)
 	if typ != "" {
 		args = append(args, typ)
 		where += fmt.Sprintf(" AND type = $%d", len(args))
 	}
-	where += " AND id IN (SELECT id FROM target)"
 	args = append(args, limit, offset)
-	q := `WITH ` + scopeTargetCTE + ` ` + assetSelectCols + " WHERE " + where +
+	q := `WITH ` + componentScopeTargetCTE + ` ` + componentSelectCols +
+		" WHERE " + where + " AND id IN (SELECT id FROM target)" +
 		fmt.Sprintf(" ORDER BY last_seen DESC, id DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	assets, err := scanAssets(rows)
+	out, err := scanComponents(rows)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
+	if err := s.hydrateTaskComponentSources(taskID, out); err != nil {
 		return nil, err
 	}
-	return assets, nil
+	return out, nil
 }
 
-// GetByIDsInScope is GetByIDs restricted to ids that BELONG to taskID's (and its
-// direct source tasks') declared scope, so an agent cannot reach out-of-scope
-// assets by id. taskID<=0 (non-task contexts) falls back to the global GetByIDs.
-// Out-of-scope ids are silently dropped from the result (not an error).
-func (s *AssetStore) GetByIDsInScope(taskID int64, ids []int64) ([]*Asset, error) {
+// GetByIDsInScope 是限定在「本任务组件」内的 GetByIDs，越界 id 静默丢弃。
+func (s *ComponentStore) GetByIDsInScope(taskID int64, ids []int64) ([]*Component, error) {
 	if taskID <= 0 {
 		return s.GetByIDs(ids)
 	}
@@ -612,26 +599,61 @@ func (s *AssetStore) GetByIDsInScope(taskID int64, ids []int64) ([]*Asset, error
 		return nil, nil
 	}
 	args := make([]any, 0, len(ids)+1)
-	args = append(args, taskID) // $1 reserved for scopeTargetCTE
+	args = append(args, taskID)
 	placeholders := make([]string, len(ids))
 	for i, id := range ids {
 		placeholders[i] = fmt.Sprintf("$%d", i+2)
 		args = append(args, id)
 	}
-	q := `WITH ` + scopeTargetCTE + ` ` + assetSelectCols +
+	q := `WITH ` + componentScopeTargetCTE + ` ` + componentSelectCols +
 		" WHERE id IN (" + strings.Join(placeholders, ",") + ")" +
 		" AND id IN (SELECT id FROM target) ORDER BY last_seen DESC, id DESC"
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	assets, err := scanAssets(rows)
+	out, err := scanComponents(rows)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.hydrateTaskAssetSources(taskID, assets); err != nil {
+	if err := s.hydrateTaskComponentSources(taskID, out); err != nil {
 		return nil, err
 	}
-	return assets, nil
+	return out, nil
+}
+
+// hydrateTaskComponentSources 填充每个组件的任务维度来源信息。
+func (s *ComponentStore) hydrateTaskComponentSources(taskID int64, comps []*Component) error {
+	if len(comps) == 0 {
+		return nil
+	}
+	ids := make([]int64, 0, len(comps))
+	byID := make(map[int64]*Component, len(comps))
+	for _, c := range comps {
+		ids = append(ids, c.ID)
+		byID[c.ID] = c
+	}
+	rows, err := s.db.Query(`SELECT component_id, source, source_summary, source_node_id
+FROM task_component_links WHERE task_id=$1 AND component_id = ANY($2::bigint[])`, taskID, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var src, summary sql.NullString
+		var node sql.NullInt64
+		if err := rows.Scan(&id, &src, &summary, &node); err != nil {
+			return err
+		}
+		if c, ok := byID[id]; ok {
+			c.TaskSource = src.String
+			c.TaskSourceSummary = summary.String
+			if node.Valid {
+				n := node.Int64
+				c.TaskSourceNodeID = &n
+			}
+		}
+	}
+	return rows.Err()
 }

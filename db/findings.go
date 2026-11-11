@@ -29,7 +29,7 @@ type DBFinding struct {
 	Summary         string
 	Evidence        string
 	Worker          string
-	AssetIDs        []int64
+	ComponentIDs        []int64
 	Status          string
 	Report          string // 详细报告(Markdown);仅 GetFinding 填充,列表查询不带
 	CreatedAt       time.Time
@@ -79,9 +79,9 @@ func ValidSeverity(s string) bool {
 // AddFinding inserts a finding into the standalone findings table. taskID and
 // nodeID may be 0 (stored as NULL). name may be "" (frontend falls back to
 // vulnclass). Returns the new finding id.
-func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, name, severity, summary, evidence, worker string, assetIDs []int64) (int64, error) {
-	aidsJSON, _ := json.Marshal(assetIDs)
-	if assetIDs == nil {
+func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, name, severity, summary, evidence, worker string, componentIDs []int64) (int64, error) {
+	aidsJSON, _ := json.Marshal(componentIDs)
+	if componentIDs == nil {
 		aidsJSON = []byte("[]")
 	}
 	var tid, nid *int64
@@ -93,7 +93,7 @@ func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, name, severity, summary
 	}
 	var id int64
 	err := d.QueryRow(
-		`INSERT INTO findings (task_id, node_id, vulnclass, name, severity, summary, evidence, worker, asset_ids)
+		`INSERT INTO findings (task_id, node_id, vulnclass, name, severity, summary, evidence, worker, component_ids)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
 		tid, nid, vulnclass, name, severity, summary, evidence, worker, string(aidsJSON),
 	).Scan(&id)
@@ -103,7 +103,7 @@ func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, name, severity, summary
 // findingSelectCols is the column list (with task_description join) every finding
 // list query selects, so scanFinding stays in sync across callers.
 const findingSelectCols = `f.id, f.task_id, f.node_id, f.vulnclass, COALESCE(f.name, ''), f.severity, f.summary,
-	       f.evidence, f.worker, f.asset_ids, COALESCE(f.status, 'pending'), f.created_at,
+	       f.evidence, f.worker, f.component_ids, COALESCE(f.status, 'pending'), f.created_at,
 	       COALESCE(t.description, '') AS task_description, f.evidence_version, f.report_evidence_version,
  (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id)`
 
@@ -121,7 +121,7 @@ func scanFindings(rows interface {
 			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+		_ = json.Unmarshal([]byte(aidsJSON), &f.ComponentIDs)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -156,14 +156,14 @@ type FindingFilter struct {
 	TaskID    string // 任务 id(字符串形式;空/非法 = 不按任务筛选)
 	Query     string // 名称/类型/摘要/证据/报告正文的模糊检索关键词
 	Sort      string // "severity" | "time"
-	// AssetScope 是资产树的节点 key(a:<id> / c:<id> / r:<domain> / __none__),
+	// ComponentScope 是资产树的节点 key(a:<id> / c:<id> / r:<domain> / __none__),
 	// 选中一个节点等于选中它的整棵子树。空 = 不按资产筛选。
-	AssetScope string
+	ComponentScope string
 
-	// 下面三个由 applyAssetScope 从 AssetScope 解析而来,调用方不用设置。
-	assetIDs  []int64 // 子树里所有资产 id
-	assetNone bool    // 只要「未关联资产」的发现
-	assetMiss bool    // 选中的节点在当前筛选下不存在 → 结果恒空
+	// 下面三个由 applyComponentScope 从 ComponentScope 解析而来,调用方不用设置。
+	componentIDs  []int64 // 子树里所有资产 id
+	componentNone bool    // 只要「未关联资产」的发现
+	componentMiss bool    // 选中的节点在当前筛选下不存在 → 结果恒空
 }
 
 // FindingUnassignedTask is the task filter sentinel for findings whose task is
@@ -194,24 +194,24 @@ func (f FindingFilter) where() (string, []any) {
 		args = append(args, tid)
 		conds = append(conds, fmt.Sprintf("f.task_id = $%d", len(args)))
 	}
-	// 资产筛选:asset_ids 是 jsonb 数组,@> ANY(...) 能走 idx_findings_asset_ids。
+	// 资产筛选:component_ids 是 jsonb 数组,@> ANY(...) 能走 idx_findings_component_ids。
 	switch {
-	case f.assetMiss:
+	case f.componentMiss:
 		conds = append(conds, "FALSE")
-	case f.assetNone:
-		// 「未关联资产」= asset_ids 为空,或者里面的 id 一个都不在 assets 表里
+	case f.componentNone:
+		// 「未关联资产」= component_ids 为空,或者里面的 id 一个都不在 components 表里
 		// (资产已被删除)。两类都进资产树的未关联桶,这里必须同样收下,否则桶上
 		// 的计数会大于点开后能查到的条数。
 		conds = append(conds, `(
-			jsonb_array_length(COALESCE(f.asset_ids, '[]'::jsonb)) = 0
+			jsonb_array_length(COALESCE(f.component_ids, '[]'::jsonb)) = 0
 			OR NOT EXISTS (
-				SELECT 1 FROM jsonb_array_elements_text(f.asset_ids) e(v)
-				JOIN assets a ON a.id = e.v::bigint
+				SELECT 1 FROM jsonb_array_elements_text(f.component_ids) e(v)
+				JOIN components a ON a.id = e.v::bigint
 			)
 		)`)
-	case len(f.assetIDs) > 0:
-		args = append(args, assetIDContainments(f.assetIDs))
-		conds = append(conds, fmt.Sprintf("f.asset_ids @> ANY($%d::jsonb[])", len(args)))
+	case len(f.componentIDs) > 0:
+		args = append(args, componentIDContainments(f.componentIDs))
+		conds = append(conds, fmt.Sprintf("f.component_ids @> ANY($%d::jsonb[])", len(args)))
 	}
 	if query := strings.TrimSpace(f.Query); query != "" {
 		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
@@ -240,7 +240,7 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 	if pageSize <= 0 {
 		pageSize = 20
 	}
-	f, err := d.applyAssetScope(f)
+	f, err := d.applyComponentScope(f)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -303,7 +303,7 @@ func (d *DB) ListFindingGroups(f FindingFilter, page, pageSize int) ([]FindingGr
 	if pageSize <= 0 {
 		pageSize = 10
 	}
-	f, err := d.applyAssetScope(f)
+	f, err := d.applyComponentScope(f)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -367,7 +367,7 @@ func (d *DB) ListFindingGroups(f FindingFilter, page, pageSize int) ([]FindingGr
 var ErrFindingOriginUnavailable = errors.New("finding origin is no longer available")
 
 // AddFindingFollowUpIntent atomically creates a priority-10 human intent from a
-// live finding node, copies that finding's asset anchors, records the
+// live finding node, copies that finding's component anchors, records the
 // finding --derived_from--> intent lineage edge, and persists its audit activity.
 // The returned activity is the committed row and can be broadcast as-is without
 // calling AppendActivity again.
@@ -393,17 +393,17 @@ func (s *ExplorationStore) AddFindingFollowUpIntent(findingID, findingNodeID int
 	}
 
 	anchors := []int64{}
-	anchorRows, err := tx.Query(`SELECT asset_id FROM exploration_anchors WHERE node_id=$1 ORDER BY asset_id`, liveNodeID)
+	anchorRows, err := tx.Query(`SELECT component_id FROM exploration_anchors WHERE node_id=$1 ORDER BY component_id`, liveNodeID)
 	if err != nil {
 		return 0, Activity{}, err
 	}
 	for anchorRows.Next() {
-		var assetID int64
-		if err := anchorRows.Scan(&assetID); err != nil {
+		var componentID int64
+		if err := anchorRows.Scan(&componentID); err != nil {
 			anchorRows.Close()
 			return 0, Activity{}, err
 		}
-		anchors = append(anchors, assetID)
+		anchors = append(anchors, componentID)
 	}
 	if err := anchorRows.Err(); err != nil {
 		anchorRows.Close()
@@ -419,7 +419,7 @@ func (s *ExplorationStore) AddFindingFollowUpIntent(findingID, findingNodeID int
 		"source_finding_node_id": liveNodeID,
 	}
 	if len(anchors) > 0 {
-		payload["asset_ids"] = anchors
+		payload["component_ids"] = anchors
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -430,8 +430,8 @@ func (s *ExplorationStore) AddFindingFollowUpIntent(findingID, findingNodeID int
 		VALUES ($1,'intent',$2,10,'open','human') RETURNING id`, s.expID, raw).Scan(&intentID); err != nil {
 		return 0, Activity{}, err
 	}
-	if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id,asset_id)
-		SELECT $1, asset_id FROM exploration_anchors WHERE node_id=$2
+	if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id,component_id)
+		SELECT $1, component_id FROM exploration_anchors WHERE node_id=$2
 		ON CONFLICT DO NOTHING`, intentID, liveNodeID); err != nil {
 		return 0, Activity{}, err
 	}
@@ -487,7 +487,7 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 			WHERE f.id IN (` + strings.Join(ph, ",") + `)
 			` + order
 	} else {
-		scoped, err := d.applyAssetScope(f)
+		scoped, err := d.applyComponentScope(f)
 		if err != nil {
 			return nil, err
 		}
@@ -514,7 +514,7 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.Report); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+		_ = json.Unmarshal([]byte(aidsJSON), &f.ComponentIDs)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -646,14 +646,14 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+	_ = json.Unmarshal([]byte(aidsJSON), &f.ComponentIDs)
 	return f, nil
 }
 
 // DeleteFinding removes a finding entirely: the standalone findings row and its
 // originating exploration node (kind='finding'), so it disappears from the findings
 // list, the per-task 发现 Tab, and the exploration graph alike. Deleting the node
-// cascades its edges + node_assets and nulls any activity referencing it. Returns
+// cascades its edges + node_components and nulls any activity referencing it. Returns
 // rows affected (0 = no finding with that id).
 func (d *DB) DeleteFinding(id int64) (n int64, err error) {
 	err = d.WithEvidenceTx(context.Background(), func(tx *sql.Tx) error {
@@ -749,32 +749,32 @@ func (d *DB) SetFindingVulnClass(id int64, vulnclass string) (int64, error) {
 	return d.setFindingCol(id, "vulnclass", "vulnclass", vulnclass)
 }
 
-// FindingMeta is the standalone-row data (id, triage state, anchored assets) the
+// FindingMeta is the standalone-row data (id, triage state, anchored components) the
 // per-task view grafts onto its exploration-node findings.
 type FindingMeta struct {
 	TrafficCount int
 
 	ID       int64
 	Status   string
-	AssetIDs []int64
+	ComponentIDs []int64
 }
 
 // FindingMetaByNodeID maps a task's finding node ids to their standalone-row
-// metadata (status + anchored asset ids) via the asset store, so callers holding
-// only an AssetStore (e.g. the agent ToolSet) can reach it without a raw *DB.
-func (a *AssetStore) FindingMetaByNodeID(taskID int64) (map[int64]FindingMeta, error) {
+// metadata (status + anchored component ids) via the component store, so callers holding
+// only an ComponentStore (e.g. the agent ToolSet) can reach it without a raw *DB.
+func (a *ComponentStore) FindingMetaByNodeID(taskID int64) (map[int64]FindingMeta, error) {
 	return a.db.FindingMetaByNodeID(taskID)
 }
 
 // FindingMetaByNodeID maps a task's finding node ids to their standalone-row
 // metadata, so the per-task view (which reads exploration nodes) can show and
-// edit the same status — and the same anchored assets — as the global 发现 page.
+// edit the same status — and the same anchored components — as the global 发现 page.
 func (d *DB) FindingMetaByNodeID(taskID int64) (map[int64]FindingMeta, error) {
 	out := map[int64]FindingMeta{}
 	if taskID <= 0 {
 		return out, nil
 	}
-	rows, err := d.Query(`SELECT node_id, id, COALESCE(status,'pending'), asset_ids, (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=findings.id) FROM findings
+	rows, err := d.Query(`SELECT node_id, id, COALESCE(status,'pending'), component_ids, (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=findings.id) FROM findings
 		WHERE task_id=$1 AND node_id IS NOT NULL`, taskID)
 	if err != nil {
 		return out, err
@@ -787,7 +787,7 @@ func (d *DB) FindingMetaByNodeID(taskID int64) (map[int64]FindingMeta, error) {
 		if err := rows.Scan(&nid, &m.ID, &m.Status, &aidsJSON, &m.TrafficCount); err != nil {
 			return out, err
 		}
-		_ = json.Unmarshal([]byte(aidsJSON), &m.AssetIDs)
+		_ = json.Unmarshal([]byte(aidsJSON), &m.ComponentIDs)
 		out[nid] = m
 	}
 	return out, rows.Err()

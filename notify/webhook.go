@@ -47,7 +47,7 @@ const webhookDefaultTemplate = `{
       "vulnclass": {{json $it.VulnClass}},
       "severity": {{json $it.Severity}},
       "summary": {{json $it.Summary}},
-      "assets": {{json $it.Assets}},
+      "assets": {{json $it.Components}},
       "detail_url": {{json $it.DetailURL}}
     }
 {{- end}}
@@ -72,7 +72,7 @@ type webhookItem struct {
 	Severity      string
 	SeverityLabel string
 	Summary       string
-	Assets        []string
+	Components    []string
 	DetailURL     string
 	FromStatus    string
 	ToStatus      string
@@ -210,7 +210,7 @@ func newWebhookTemplateData(m Message) webhookTemplateData {
 			Severity:      it.Severity,
 			SeverityLabel: SeverityLabel(it.Severity),
 			Summary:       it.Summary,
-			Assets:        append([]string{}, it.Assets...),
+			Components:    append([]string{}, it.Components...),
 			DetailURL:     it.DetailURL,
 			FromStatus:    it.FromStatus,
 			ToStatus:      it.ToStatus,

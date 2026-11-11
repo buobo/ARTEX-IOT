@@ -449,7 +449,7 @@ func notifyTestMessage(baseURL string) notify.Message {
 			VulnClass: "连通性测试",
 			Severity:  "low",
 			Summary:   "这是 ARTEX 推送渠道的测试消息，收到即表示该渠道配置可用。",
-			Assets:    []string{"artex.example.com"},
+			Components:    []string{"artex.example.com"},
 			DetailURL: baseURL,
 		}},
 		HomeURL: baseURL,
@@ -512,4 +512,12 @@ func notifyChannelLookupErr(w http.ResponseWriter, err error) {
 		return
 	}
 	writeErr(w, 500, err.Error())
+}
+
+// queryInt 读取整型 query 参数，缺省/非法时用 def。
+func queryInt(r *http.Request, key string, def int) int {
+	if v := r.URL.Query().Get(key); v != "" {
+		return atoiDefault(v, def)
+	}
+	return def
 }

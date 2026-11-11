@@ -13,7 +13,7 @@ import (
 // webuiDist holds the statically-exported frontend (built with
 // `cd web && npm run build:static`, then copied into server/webui/dist). Compiled
 // into the binary only when building with `-tags embedui`. The `all:` prefix is
-// required so Next's `_next/` asset dir (leading underscore) is included.
+// required so Next's `_next/` component dir (leading underscore) is included.
 //
 //go:embed all:webui/dist
 var webuiDist embed.FS
@@ -31,7 +31,7 @@ func (s *Server) webuiHandler() http.Handler {
 		if p == "" {
 			p = "index.html"
 		}
-		// 1) exact file (assets: _next/*, favicon.ico, ...)
+		// 1) exact file (components: _next/*, favicon.ico, ...)
 		// 2) route dir → <p>/index.html (trailingSlash export)
 		// 3) <p>.html
 		// 4) SPA 兜底 → index.html（交给客户端路由）

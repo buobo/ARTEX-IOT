@@ -366,11 +366,11 @@ func (s *ExplorationStore) ActivityByIDsWithSources(ids []int64) ([]Activity, er
 	return out, nil
 }
 
-// AssetRefsWithSources returns anchored nodes from this exploration and each
+// ComponentRefsWithSources returns anchored nodes from this exploration and each
 // direct source. Inherited entries retain their owning task id so API/UI callers
 // can present them as immutable context.
-func (s *ExplorationStore) AssetRefsWithSources(assetID int64) ([]AssetRef, error) {
-	out, err := s.AssetRefs(assetID)
+func (s *ExplorationStore) ComponentRefsWithSources(componentID int64) ([]ComponentRef, error) {
+	out, err := s.ComponentRefs(componentID)
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +379,7 @@ func (s *ExplorationStore) AssetRefsWithSources(assetID int64) ([]AssetRef, erro
 		return nil, err
 	}
 	for _, source := range sources {
-		refs, err := source.Store.AssetRefs(assetID)
+		refs, err := source.Store.ComponentRefs(componentID)
 		if err != nil {
 			return nil, err
 		}

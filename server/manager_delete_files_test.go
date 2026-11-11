@@ -12,40 +12,6 @@ import (
 	"github.com/Autumn-27/artex/traffic"
 )
 
-func TestSeedAssociatesTargetAssetWithTask(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
-	if err != nil {
-		t.Skipf("postgres unavailable (%v) - skipping", err)
-	}
-	defer m.Close()
-	task, err := m.CreateTask("seed ownership", "seed ownership", nil, 0, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = m.DeleteTask(task.ID, DeleteTaskOptions{DeleteAssets: true})
-	})
-
-	host := fmt.Sprintf("seed-%s.example.test", task.ID)
-	s := &Server{m: m}
-	s.seed(task, "https://"+host)
-	taskID := mustTaskID(t, task.ID)
-	assets, err := m.Assets().QueryByTask(taskID, "", 20, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, asset := range assets {
-		if asset.Domain == host || asset.URL == "https://"+host {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("seed target was not associated with task %s: %+v", task.ID, assets)
-	}
-}
-
 func TestDeleteTaskFilesRemovesOnlyOwnedWorkspaceAndTranscripts(t *testing.T) {
 	dataDir := t.TempDir()
 
@@ -188,12 +154,12 @@ func TestManagerDeleteTaskRestoresFilesAndTrafficWhenPostgresDeleteFails(t *test
 	cleanupDB := func() {
 		_, _ = m.pg.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON tasks`, triggerName))
 		_, _ = m.pg.Exec(fmt.Sprintf(`DROP FUNCTION IF EXISTS %s()`, functionName))
-		_, _ = m.DeleteTask(task.ID, DeleteTaskOptions{DeleteAssets: true, DeleteTraffic: true, DeleteFiles: true})
+		_, _ = m.DeleteTask(task.ID, DeleteTaskOptions{DeleteComponents: true, DeleteTraffic: true, DeleteFiles: true})
 	}
 	t.Cleanup(cleanupDB)
 
 	host := fmt.Sprintf("delete-rollback-%d.example.test", taskID)
-	if _, err := m.Assets().UpsertHTTPService(pgdb.UpsertHTTPServiceReq{URL: "https://" + host, TaskID: taskID}); err != nil {
+	if _, _, _, err := m.Components().UpsertComponents([]int64{taskID}, []pgdb.ComponentInput{{Type: "web", Name: host}}); err != nil {
 		t.Fatal(err)
 	}
 	createDeleteFixture(t, dataDir, filepath.Join("tasks", task.ID), true)

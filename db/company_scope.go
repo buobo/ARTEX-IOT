@@ -11,7 +11,7 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-// ParsedScope is one parsed asset-scope entry. Its kind selects Domain, Net, or Value.
+// ParsedScope is one parsed component-scope entry. Its kind selects Domain, Net, or Value.
 // Used internally by the company scope parsers and CompanyStore.
 type ParsedScope struct {
 	Kind   string // "domain" | "ip" | "cidr" | "icp" | "keyword"

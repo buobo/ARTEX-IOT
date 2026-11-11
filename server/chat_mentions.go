@@ -17,10 +17,9 @@ const maxChatMentions = 10
 
 // The visible token survives drafts, uploads, retries and conversation history.
 // Labels are only for display: the server trusts only the type and numeric ID.
-var chatMentionPattern = regexp.MustCompile(`@\[(漏洞|资产|企业|接口|IP|应用|域名|子域名|服务)#([0-9]+)(?: [^\]\r\n]*)?\]`)
+var chatMentionPattern = regexp.MustCompile(`@\[(漏洞|组件|企业|接口|IP|应用|域名|子域名|服务)#([0-9]+)(?: [^\]\r\n]*)?\]`)
 var chatMentionKinds = map[string]string{
-	"漏洞": "finding", "资产": "asset", "企业": "company", "接口": "endpoint",
-	"IP": "ip", "应用": "app", "域名": "root_domain", "子域名": "subdomain", "服务": "service",
+	"漏洞": "finding", "组件": "component", "企业": "company",
 }
 
 type chatMentionRef struct {
@@ -143,11 +142,11 @@ func loadChatMention(pg *db.DB, ref chatMentionRef) (any, error) {
 		if err != nil || f == nil {
 			return nil, err
 		}
-		assets, err := pg.Assets().GetByIDs(f.AssetIDs)
+		components, err := pg.Components().GetByIDs(f.ComponentIDs)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"finding": f, "assets": assets}, nil
+		return map[string]any{"finding": f, "components": components}, nil
 	case "company":
 		c, err := pg.Companies().GetCompany(ref.ID)
 		if err != nil || c == nil {
@@ -159,15 +158,15 @@ func loadChatMention(pg *db.DB, ref chatMentionRef) (any, error) {
 		}
 		return map[string]any{"company": c, "scope": scope}, nil
 	default:
-		assets, err := pg.Assets().GetByIDs([]int64{ref.ID})
-		if err != nil || len(assets) == 0 {
+		components, err := pg.Components().GetByIDs([]int64{ref.ID})
+		if err != nil || len(components) == 0 {
 			return nil, err
 		}
-		a := assets[0]
-		if ref.Kind != "asset" && a.Type != ref.Kind {
+		a := components[0]
+		if ref.Kind != "component" && a.Type != ref.Kind {
 			return nil, nil
 		}
-		out := map[string]any{"asset": a}
+		out := map[string]any{"component": a}
 		if a.CompanyID != nil {
 			company, err := pg.Companies().GetCompany(*a.CompanyID)
 			if err != nil {

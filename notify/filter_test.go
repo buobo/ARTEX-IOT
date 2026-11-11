@@ -19,7 +19,7 @@ func TestParseFilterMalformedFallsBackToMatchAll(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := ParseFilter([]byte(tc.raw))
-			if f.MinSeverity != "" || len(f.TaskIDs) != 0 || len(f.AssetIDs) != 0 {
+			if f.MinSeverity != "" || len(f.TaskIDs) != 0 || len(f.ComponentIDs) != 0 {
 				t.Fatalf("畸形配置应退化为零值 Filter，得到 %+v", f)
 			}
 			// 零值 Filter 必须命中任意事件。
@@ -66,7 +66,7 @@ func TestMatchScopeRestrictions(t *testing.T) {
 		Kind:      EventFindingCreated,
 		Severity:  "high",
 		TaskID:    7,
-		AssetIDs:  []int64{10, 20},
+		ComponentIDs:  []int64{10, 20},
 		VulnClass: "SQL注入",
 	}
 	cases := []struct {
@@ -78,10 +78,10 @@ func TestMatchScopeRestrictions(t *testing.T) {
 		{"任务命中", Filter{TaskIDs: []int64{7}}, true},
 		{"任务未命中", Filter{TaskIDs: []int64{8}}, false},
 		{"任务多选含命中", Filter{TaskIDs: []int64{8, 7}}, true},
-		{"资产有交集", Filter{AssetIDs: []int64{20, 99}}, true},
-		{"资产无交集", Filter{AssetIDs: []int64{99}}, false},
-		{"任务与资产同时命中", Filter{TaskIDs: []int64{7}, AssetIDs: []int64{10}}, true},
-		{"任务命中但资产未命中", Filter{TaskIDs: []int64{7}, AssetIDs: []int64{99}}, false},
+		{"资产有交集", Filter{ComponentIDs: []int64{20, 99}}, true},
+		{"资产无交集", Filter{ComponentIDs: []int64{99}}, false},
+		{"任务与资产同时命中", Filter{TaskIDs: []int64{7}, ComponentIDs: []int64{10}}, true},
+		{"任务命中但资产未命中", Filter{TaskIDs: []int64{7}, ComponentIDs: []int64{99}}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

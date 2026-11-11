@@ -47,7 +47,7 @@ type Task struct {
 	PlanHeartbeatSeconds int `json:"plan_heartbeat_seconds"`
 	// CoverageEnabled 是「资产覆盖度功能」总开关(默认 true)。false 时：不计算/不展示测试
 	// 覆盖度、不自动累积 task_scope(source=auto)、不给 agent 开放 add_task_scope/
-	// list_untested_assets、态势里不注入 coverage 块(scope 字段仍保留)。company 关联
+	// list_untested_components、态势里不注入 coverage 块(scope 字段仍保留)。company 关联
 	// (task_scope kind=company)与此开关无关，永不受影响。见 db/task_scope.go。
 	CoverageEnabled bool `json:"coverage_enabled"`
 }
@@ -55,14 +55,14 @@ type Task struct {
 // TaskDeleteResult reports optional related-data cleanup performed in the same
 // transaction as the task/exploration delete.
 type TaskDeleteResult struct {
-	AssetsDeleted     int64
-	AssetsDetached    int64
+	ComponentsDeleted     int64
+	ComponentsDetached    int64
 	FindingsDeleted   int64
 	LLMRecordsDeleted int64
 }
 
 // TaskDeletePreparation is produced inside the PostgreSQL deletion transaction
-// after asset and anchor writers have been excluded. Prepare callbacks may use
+// after component and anchor writers have been excluded. Prepare callbacks may use
 // TrafficHosts to stage an external traffic deletion before PostgreSQL commits.
 type TaskDeletePreparation struct {
 	ExplorationID int64
@@ -85,27 +85,22 @@ const MinPlanHeartbeatSeconds = 600
 // MaxTaskSourceCount bounds the amount of live inherited context one task can
 // pull into every planner/main-agent prompt. Inheritance is intentionally direct
 // only; keeping the fan-in bounded also prevents a single create request from
-// multiplying graph and asset-context queries without limit.
+// multiplying graph and component-context queries without limit.
 const MaxTaskSourceCount = 8
 
-// MaxTaskCompanyCount bounds the number of company asset scopes attached to a
+// MaxTaskCompanyCount bounds the number of company component scopes attached to a
 // task. Company scopes are prompt context, and their currently attributed
-// assets are snapshotted into the task at creation time.
+// components are snapshotted into the task at creation time.
 const MaxTaskCompanyCount = 32
 
-const taskCompanyAssetSource = "company"
+const taskCompanyComponentSource = "company"
 
-// MaxTaskCollectionCount bounds asset collections attachable as task targets.
-const MaxTaskCollectionCount = 32
 
-const taskCollectionAssetSource = "collection"
 
 var (
 	ErrTaskCompanyIDsInvalid = errors.New("invalid task company ids")
 	ErrTaskCompanyNotFound   = errors.New("task company not found")
 
-	ErrTaskCollectionIDsInvalid = errors.New("invalid task collection ids")
-	ErrTaskCollectionNotFound   = errors.New("task collection not found")
 )
 
 // NormalizeTaskCompanyIDs validates IDs and removes duplicates while retaining
@@ -127,30 +122,6 @@ func NormalizeTaskCompanyIDs(ids []int64) ([]int64, error) {
 		normalized = append(normalized, id)
 		if len(normalized) > MaxTaskCompanyCount {
 			return nil, fmt.Errorf("%w: got more than %d unique companies", ErrTaskCompanyIDsInvalid, MaxTaskCompanyCount)
-		}
-	}
-	return normalized, nil
-}
-
-// NormalizeTaskCollectionIDs validates collection IDs and removes duplicates
-// while retaining the user's first-seen order.
-func NormalizeTaskCollectionIDs(ids []int64) ([]int64, error) {
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	seen := make(map[int64]struct{}, min(len(ids), MaxTaskCollectionCount))
-	normalized := make([]int64, 0, min(len(ids), MaxTaskCollectionCount))
-	for _, id := range ids {
-		if id <= 0 {
-			return nil, fmt.Errorf("%w: collection id must be positive", ErrTaskCollectionIDsInvalid)
-		}
-		if _, exists := seen[id]; exists {
-			continue
-		}
-		seen[id] = struct{}{}
-		normalized = append(normalized, id)
-		if len(normalized) > MaxTaskCollectionCount {
-			return nil, fmt.Errorf("%w: got more than %d unique collections", ErrTaskCollectionIDsInvalid, MaxTaskCollectionCount)
 		}
 	}
 	return normalized, nil
@@ -187,8 +158,6 @@ type TaskCreateOptions struct {
 	// CoverageEnabled 是「资产覆盖度功能」开关;nil=默认开(true)，让不关心该开关的创建
 	// 路径(编排 spawn、老 API)沿用原行为。仅 web 创建任务时可显式传 false 关闭。
 	CoverageEnabled *bool
-	// InterceptRules 是任务级资产拦截规则,创建时随任务在同一事务内写入 task_intercept_rules。
-	InterceptRules []TaskInterceptRuleInput
 }
 
 // CreateTaskWithOptions creates an exploration, task, direct source relations,
@@ -202,11 +171,6 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 		return nil, err
 	}
 	opts.CompanyIDs = companyIDs
-	collectionIDs, err := NormalizeTaskCollectionIDs(opts.CollectionIDs)
-	if err != nil {
-		return nil, err
-	}
-	opts.CollectionIDs = collectionIDs
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, err
@@ -218,7 +182,7 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 	}
 	// origin fact: the exploration graph's root, a KindFact node (state='origin')
 	// holding the original task description. Goals/intents/findings descend from
-	// it, and the seeded target asset is anchored to it as lineage (the asset graph
+	// it, and the seeded target component is anchored to it as lineage (the component graph
 	// is global and shared, not isolated per task). Being a fact (not a special 'begin' kind) lets every
 	// intent uniformly connect to a fact node, including the first ones.
 	originPayload, _ := json.Marshal(map[string]any{
@@ -275,13 +239,7 @@ RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, descripti
 	if err := insertTaskCompanies(tx, t.ID, opts.CompanyIDs); err != nil {
 		return nil, err
 	}
-	if err := insertTaskCollections(tx, t.ID, opts.CollectionIDs); err != nil {
-		return nil, err
-	}
 	if err := insertTaskLLMProfiles(tx, t.ID, opts.LLMProfileIDs); err != nil {
-		return nil, err
-	}
-	if err := insertTaskInterceptRules(tx, t.ID, opts.InterceptRules); err != nil {
 		return nil, err
 	}
 	if len(opts.LLMProfileIDs) == 0 {
@@ -296,7 +254,7 @@ func insertTaskCompanies(tx *sql.Tx, taskID int64, companyIDs []int64) error {
 	if len(companyIDs) == 0 {
 		return nil
 	}
-	// Company scope edits rebuild assets.company_id. Serialize the creation-time
+	// Company scope edits rebuild components.company_id. Serialize the creation-time
 	// snapshot with those edits so the task sees one committed attribution state.
 	if err := lockCompanyScopeMutation(tx); err != nil {
 		return err
@@ -322,83 +280,6 @@ SELECT count(*) FROM inserted`, taskID, companyIDs).Scan(&inserted)
 		return fmt.Errorf("%w: one or more companies do not exist", ErrTaskCompanyNotFound)
 	}
 
-	// Updating task_ids fires sync_task_asset_links, which first creates generic
-	// source rows. The provenance upsert must therefore run afterwards so the
-	// company name and creation-time reason remain visible to operators.
-	if _, err := tx.Exec(`
-UPDATE assets
-SET task_ids=CASE
-    WHEN $1=ANY(task_ids) THEN task_ids
-    ELSE array_append(task_ids, $1)
-END
-WHERE company_id=ANY($2::bigint[])`, taskID, companyIDs); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`
-INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
-SELECT $1, asset.id, $3, '任务创建时关联企业：' || company.name
-FROM assets asset
-JOIN companies company ON company.id=asset.company_id
-WHERE asset.company_id=ANY($2::bigint[])
-  AND $1=ANY(asset.task_ids)
-ON CONFLICT (task_id, asset_id) DO UPDATE
-SET source=EXCLUDED.source,
-    source_summary=EXCLUDED.source_summary,
-    source_node_id=NULL`, taskID, companyIDs, taskCompanyAssetSource); err != nil {
-		return err
-	}
-	return nil
-}
-
-// insertTaskCollections writes task_scope rows (kind='collection') for the given
-// collections and snapshots their member assets into the task, mirroring
-// insertTaskCompanies but keyed on the explicit asset_collection_members list.
-func insertTaskCollections(tx *sql.Tx, taskID int64, collectionIDs []int64) error {
-	if len(collectionIDs) == 0 {
-		return nil
-	}
-	var inserted int
-	if err := tx.QueryRow(`
-WITH requested(collection_id, position) AS (
-    SELECT collection_id, position
-    FROM unnest($2::bigint[]) WITH ORDINALITY AS requested(collection_id, position)
-), inserted AS (
-    INSERT INTO task_scope(task_id, kind, collection_id, source, reason)
-    SELECT $1, 'collection', c.id, 'manual', '任务创建时关联资产合集'
-    FROM requested
-    JOIN asset_collections c ON c.id=requested.collection_id
-    ORDER BY requested.position
-    RETURNING collection_id
-)
-SELECT count(*) FROM inserted`, taskID, collectionIDs).Scan(&inserted); err != nil {
-		return err
-	}
-	if inserted != len(collectionIDs) {
-		return fmt.Errorf("%w: one or more collections do not exist", ErrTaskCollectionNotFound)
-	}
-	// Snapshot members into assets.task_ids so 测试资产 shows them (fires sync_task_asset_links).
-	if _, err := tx.Exec(`
-UPDATE assets
-SET task_ids=CASE WHEN $1=ANY(task_ids) THEN task_ids ELSE array_append(task_ids, $1) END
-WHERE id IN (SELECT asset_id FROM asset_collection_members WHERE collection_id=ANY($2::bigint[]))`, taskID, collectionIDs); err != nil {
-		return err
-	}
-	// Provenance. DISTINCT ON (asset.id) so an asset shared by several collections
-	// yields one row (ON CONFLICT must not affect the same row twice).
-	if _, err := tx.Exec(`
-INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
-SELECT DISTINCT ON (asset.id) $1, asset.id, $3, '任务创建时关联资产合集：' || c.name
-FROM asset_collection_members m
-JOIN asset_collections c ON c.id=m.collection_id
-JOIN assets asset ON asset.id=m.asset_id
-WHERE m.collection_id=ANY($2::bigint[]) AND $1=ANY(asset.task_ids)
-ORDER BY asset.id, c.id
-ON CONFLICT (task_id, asset_id) DO UPDATE
-SET source=EXCLUDED.source,
-    source_summary=EXCLUDED.source_summary,
-    source_node_id=NULL`, taskID, collectionIDs, taskCollectionAssetSource); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -615,7 +496,7 @@ UPDATE tasks
 }
 
 // DeleteTask preserves the historical behavior: remove the task and its
-// exploration subgraph while retaining global assets.
+// exploration subgraph while retaining global components.
 func (d *DB) DeleteTask(id int64) error {
 	_, err := d.DeleteTaskCascade(id, false, false)
 	return err
@@ -623,17 +504,17 @@ func (d *DB) DeleteTask(id int64) error {
 
 // DeleteTaskCascade hard-deletes a task and its exploration subgraph
 // (nodes/edges/activity via ON DELETE CASCADE). Optional standalone findings and
-// assets owned only by this task are deleted in the same transaction; shared
-// assets are retained and only have this task id detached. deleteLLMRecords is
+// components owned only by this task are deleted in the same transaction; shared
+// components are retained and only have this task id detached. deleteLLMRecords is
 // optional to preserve callers of the original two-option API.
-func (d *DB) DeleteTaskCascade(id int64, deleteAssets, deleteFindings bool, deleteLLMRecords ...bool) (TaskDeleteResult, error) {
+func (d *DB) DeleteTaskCascade(id int64, deleteComponents, deleteFindings bool, deleteLLMRecords ...bool) (TaskDeleteResult, error) {
 	deleteRecords := len(deleteLLMRecords) > 0 && deleteLLMRecords[0]
-	return d.DeleteTaskCascadePrepared(id, deleteAssets, deleteFindings, deleteRecords, nil)
+	return d.DeleteTaskCascadePrepared(id, deleteComponents, deleteFindings, deleteRecords, nil)
 }
 
 // DeleteTaskCascadePrepared coordinates reversible external deletion with the
 // PostgreSQL cascade. When prepare is non-nil, host ownership is resolved and
-// prepare is invoked inside this transaction while asset and anchor writers are
+// prepare is invoked inside this transaction while component and anchor writers are
 // excluded. The locks remain held through commit, closing the window where a
 // host could become shared after its traffic had already been staged.
 //
@@ -642,7 +523,7 @@ func (d *DB) DeleteTaskCascade(id int64, deleteAssets, deleteFindings bool, dele
 // external work that its callback staged successfully.
 func (d *DB) DeleteTaskCascadePrepared(
 	id int64,
-	deleteAssets, deleteFindings, deleteLLMRecords bool,
+	deleteComponents, deleteFindings, deleteLLMRecords bool,
 	prepare func(TaskDeletePreparation) error,
 ) (TaskDeleteResult, error) {
 	var result TaskDeleteResult
@@ -661,10 +542,10 @@ func (d *DB) DeleteTaskCascadePrepared(
 
 	// SHARE ROW EXCLUSIVE conflicts with every INSERT/UPDATE/DELETE on these
 	// tables and with another coordinated deletion. Taking both in one fixed order
-	// prevents phantoms (a distinct asset row for the same host) as well as new
+	// prevents phantoms (a distinct component row for the same host) as well as new
 	// ownership/anchor references until the deletion transaction commits.
-	if deleteAssets || prepare != nil {
-		if _, err := tx.Exec(`LOCK TABLE assets, exploration_anchors IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+	if deleteComponents || prepare != nil {
+		if _, err := tx.Exec(`LOCK TABLE components, exploration_anchors IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 			return result, err
 		}
 	}
@@ -680,24 +561,24 @@ func (d *DB) DeleteTaskCascadePrepared(
 			return result, err
 		}
 	}
-	if deleteAssets {
+	if deleteComponents {
 		// Ownership is the union of explicit task_ids and this exploration's anchors.
-		// An asset is deletable only when no other live task references it through
+		// An component is deletable only when no other live task references it through
 		// either mechanism. This covers legacy anchor-only seeds without destroying
 		// evidence anchored by another task.
 		res, err := tx.Exec(`
-WITH candidate_assets AS (
-  SELECT id FROM assets WHERE $1 = ANY(task_ids)
+WITH candidate_components AS (
+  SELECT id FROM components WHERE $1 = ANY(task_ids)
   UNION
-  SELECT ea.asset_id
+  SELECT ea.component_id
   FROM exploration_anchors ea
   JOIN exploration_nodes n ON n.id=ea.node_id
   WHERE n.exploration_id=$2
 ),
 deletable AS (
   SELECT a.id
-  FROM assets a
-  JOIN candidate_assets c ON c.id=a.id
+  FROM components a
+  JOIN candidate_components c ON c.id=a.id
   WHERE NOT EXISTS (
     SELECT 1 FROM tasks t
     WHERE t.id<>$1 AND t.deleted_at IS NULL AND t.id=ANY(a.task_ids)
@@ -706,20 +587,20 @@ deletable AS (
     FROM exploration_anchors ea
     JOIN exploration_nodes n ON n.id=ea.node_id
     JOIN tasks t ON t.exploration_id=n.exploration_id
-    WHERE ea.asset_id=a.id AND t.id<>$1 AND t.deleted_at IS NULL
+    WHERE ea.component_id=a.id AND t.id<>$1 AND t.deleted_at IS NULL
   )
 )
-DELETE FROM assets a USING deletable d WHERE a.id=d.id`, id, expID)
+DELETE FROM components a USING deletable d WHERE a.id=d.id`, id, expID)
 		if err != nil {
 			return result, err
 		}
-		result.AssetsDeleted, _ = res.RowsAffected()
+		result.ComponentsDeleted, _ = res.RowsAffected()
 
-		res, err = tx.Exec(`UPDATE assets SET task_ids = array_remove(task_ids, $1) WHERE $1 = ANY(task_ids)`, id)
+		res, err = tx.Exec(`UPDATE components SET task_ids = array_remove(task_ids, $1) WHERE $1 = ANY(task_ids)`, id)
 		if err != nil {
 			return result, err
 		}
-		result.AssetsDetached, _ = res.RowsAffected()
+		result.ComponentsDetached, _ = res.RowsAffected()
 	}
 	if deleteFindings {
 		res, err := tx.Exec(`DELETE FROM findings WHERE task_id = $1`, id)

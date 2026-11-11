@@ -59,12 +59,12 @@ func addTestEvent(t *testing.T, d *DB, kind string, findingID int64, snap notify
 	return id
 }
 
-func TestNotificationAssetNamesResolvesAndPreservesOrder(t *testing.T) {
+func TestNotificationComponentNamesResolvesAndPreservesOrder(t *testing.T) {
 	d := notifyTestDB(t)
 	ctx := context.Background()
 
 	// 三类资产各有各的展示口径：域名、IP、URL。
-	insertAsset := func(query, value string) int64 {
+	insertComponent := func(query, value string) int64 {
 		t.Helper()
 		var id int64
 		if err := d.QueryRow(query, value).Scan(&id); err != nil {
@@ -72,15 +72,15 @@ func TestNotificationAssetNamesResolvesAndPreservesOrder(t *testing.T) {
 		}
 		return id
 	}
-	domID := insertAsset(`INSERT INTO assets(type, domain) VALUES('subdomain',$1) RETURNING id`, "a.example.com")
-	ipID := insertAsset(`INSERT INTO assets(type, ip) VALUES('ip',$1) RETURNING id`, "10.1.2.3")
-	svcID := insertAsset(`INSERT INTO assets(type, url) VALUES('service',$1) RETURNING id`, "https://a.example.com/admin")
+	domID := insertComponent(`INSERT INTO components(type, component_name) VALUES('web',$1) RETURNING id`, "a.example.com")
+	ipID := insertComponent(`INSERT INTO components(type, component_name) VALUES('other',$1) RETURNING id`, "10.1.2.3")
+	svcID := insertComponent(`INSERT INTO components(type, component_name) VALUES('web',$1) RETURNING id`, "https://a.example.com/admin")
 	t.Cleanup(func() {
-		d.Exec(`DELETE FROM assets WHERE id IN ($1,$2,$3)`, domID, ipID, svcID)
+		d.Exec(`DELETE FROM components WHERE id IN ($1,$2,$3)`, domID, ipID, svcID)
 	})
 
 	// 传入顺序刻意乱序，且含一个不存在的 id。
-	got, err := d.NotificationAssetNames(ctx, []int64{svcID, 999999999, domID, ipID, svcID})
+	got, err := d.NotificationComponentNames(ctx, []int64{svcID, 999999999, domID, ipID, svcID})
 	if err != nil {
 		t.Fatalf("解析资产名失败: %v", err)
 	}

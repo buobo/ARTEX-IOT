@@ -377,9 +377,9 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 	// so FromEnv returned empty and every task silently fell back to the crude rule
 	// splitter (which shredded URLs / made meaningless 2-way splits).
 	var specs []goalSpec
-	var as *db.AssetStore
+	var as *db.ComponentStore
 	if s.m != nil {
-		as = s.m.Assets()
+		as = s.m.Components()
 	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	s.engine.BeginLLMCall(t.ID)

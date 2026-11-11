@@ -60,8 +60,8 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	// Prevent task/asset ownership from changing while exclusivity is rechecked.
-	if _, err := tx.Exec(`LOCK TABLE assets, exploration_anchors IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+	// Prevent task/component ownership from changing while exclusivity is rechecked.
+	if _, err := tx.Exec(`LOCK TABLE components, exploration_anchors IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM intercept_pending WHERE COALESCE(task_id,'')=$1`, strconv.FormatInt(taskID, 10)); err != nil {
@@ -89,7 +89,7 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		args  []any
 	}{
 		{`DELETE FROM task_relations WHERE task_id=$1 OR source_task_id=$1`, []any{taskID}},
-		{`DELETE FROM task_asset_links WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM task_component_links WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_llm_profiles WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_scope WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_constraints WHERE exploration_id=$1`, []any{expID}},
@@ -100,18 +100,18 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 			return err
 		}
 	}
-	if _, err := tx.Exec(`UPDATE assets SET task_ids=array_remove(task_ids,$1) WHERE $1=ANY(task_ids)`, taskID); err != nil {
+	if _, err := tx.Exec(`UPDATE components SET task_ids=array_remove(task_ids,$1) WHERE $1=ANY(task_ids)`, taskID); err != nil {
 		return err
 	}
-	if len(snapshot.ExclusiveAssetIDs) > 0 {
-		if _, err := tx.Exec(`DELETE FROM assets asset
-WHERE asset.id=ANY($2::bigint[]) AND asset.company_id IS NULL
-AND NOT EXISTS (SELECT 1 FROM tasks task WHERE task.id<>$1 AND task.deleted_at IS NULL AND task.id=ANY(asset.task_ids))
+	if len(snapshot.ExclusiveComponentIDs) > 0 {
+		if _, err := tx.Exec(`DELETE FROM components component
+WHERE component.id=ANY($2::bigint[]) AND component.company_id IS NULL
+AND NOT EXISTS (SELECT 1 FROM tasks task WHERE task.id<>$1 AND task.deleted_at IS NULL AND task.id=ANY(component.task_ids))
 AND NOT EXISTS (
  SELECT 1 FROM exploration_anchors anchor JOIN exploration_nodes node ON node.id=anchor.node_id
  JOIN tasks task ON task.exploration_id=node.exploration_id
- WHERE anchor.asset_id=asset.id AND task.id<>$1 AND task.deleted_at IS NULL
-)`, taskID, snapshot.ExclusiveAssetIDs); err != nil {
+ WHERE anchor.component_id=component.id AND task.id<>$1 AND task.deleted_at IS NULL
+)`, taskID, snapshot.ExclusiveComponentIDs); err != nil {
 			return err
 		}
 	}
@@ -195,11 +195,11 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 		return nil, fmt.Errorf("%w: restore snapshot identity/state mismatch", ErrTaskArchiveState)
 	}
 	warnings := []string{}
-	assetMap, assetWarnings, err := restoreArchiveAssets(tx, taskID, snapshot.Tables["assets"])
+	componentMap, componentWarnings, err := restoreArchiveComponents(tx, taskID, snapshot.Tables["components"])
 	if err != nil {
 		return nil, err
 	}
-	warnings = append(warnings, assetWarnings...)
+	warnings = append(warnings, componentWarnings...)
 
 	// The task row exists as an archived stub. Restore its global references only
 	// when the current instance still owns them; never recreate categories/profiles.
@@ -232,7 +232,7 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 		return nil, err
 	}
 
-	remappedTables, err := remapArchiveAssetReferences(snapshot.Tables, assetMap)
+	remappedTables, err := remapArchiveComponentReferences(snapshot.Tables, componentMap)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +267,7 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	} else {
 		warnings = append(warnings, warning...)
 	}
-	for _, table := range []string{"task_asset_links", "findings"} {
+	for _, table := range []string{"task_component_links", "findings"} {
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
@@ -353,7 +353,7 @@ func decodeArchiveRows(raw json.RawMessage) ([]map[string]any, error) {
 }
 
 func rowExists(tx *sql.Tx, table string, id int64) bool {
-	if table != "task_categories" && table != "llm_profiles" && table != "companies" && table != "tasks" && table != "assets" {
+	if table != "task_categories" && table != "llm_profiles" && table != "companies" && table != "tasks" && table != "components" {
 		return false
 	}
 	var exists bool
@@ -386,7 +386,7 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	}
 	allowed := map[string]bool{
 		"exploration_nodes": true, "exploration_edges": true, "exploration_anchors": true,
-		"task_constraints": true, "activity": true, "task_asset_links": true, "findings": true,
+		"task_constraints": true, "activity": true, "task_component_links": true, "findings": true,
 		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true,
 		"side_question_sessions": true, "side_question_requests": true,
 	}
@@ -430,7 +430,7 @@ func insertArchiveJSONSequenceRows(tx *sql.Tx, table string, reader io.Reader) (
 	return count, nil
 }
 
-func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[int64]int64, []string, error) {
+func restoreArchiveComponents(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[int64]int64, []string, error) {
 	rows, err := decodeArchiveRows(raw)
 	if err != nil {
 		return nil, nil, err
@@ -440,44 +440,44 @@ func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[in
 	for _, row := range rows {
 		oldID, ok := jsonInt64(row["id"])
 		if !ok || oldID <= 0 {
-			return nil, nil, errors.New("archived asset has invalid id")
+			return nil, nil, errors.New("archived component has invalid id")
 		}
 		if companyID, ok := jsonInt64(row["company_id"]); ok && companyID > 0 && !rowExists(tx, "companies", companyID) {
 			row["company_id"] = nil
 			row["company_source"] = "explicit"
 			warnings = append(warnings, fmt.Sprintf("资产 %d 的企业 %d 已删除，已恢复为未归属", oldID, companyID))
 		}
-		if existing, found, err := findArchiveAssetNaturalID(tx, row); err != nil {
+		if existing, found, err := findArchiveComponentNaturalID(tx, row); err != nil {
 			return nil, nil, err
 		} else if found {
 			mapping[oldID] = existing
-			if _, err := tx.Exec(`UPDATE assets SET task_ids=CASE WHEN $1=ANY(task_ids) THEN task_ids ELSE array_append(task_ids,$1) END WHERE id=$2`, taskID, existing); err != nil {
+			if _, err := tx.Exec(`UPDATE components SET task_ids=CASE WHEN $1=ANY(task_ids) THEN task_ids ELSE array_append(task_ids,$1) END WHERE id=$2`, taskID, existing); err != nil {
 				return nil, nil, err
 			}
 			continue
 		}
 		candidate := oldID
-		if rowExists(tx, "assets", oldID) {
-			if err := tx.QueryRow(`SELECT nextval(pg_get_serial_sequence('assets','id'))`).Scan(&candidate); err != nil {
+		if rowExists(tx, "components", oldID) {
+			if err := tx.QueryRow(`SELECT nextval(pg_get_serial_sequence('components','id'))`).Scan(&candidate); err != nil {
 				return nil, nil, err
 			}
 			row["id"] = candidate
 			warnings = append(warnings, fmt.Sprintf("资产 ID %d 已被占用，恢复为 %d", oldID, candidate))
 		}
 		row["task_ids"] = mergeJSONTaskID(row["task_ids"], taskID)
-		assetRaw, _ := json.Marshal(row)
-		res, err := tx.Exec(`INSERT INTO assets SELECT * FROM json_populate_record(NULL::assets,$1::json) ON CONFLICT DO NOTHING`, string(assetRaw))
+		componentRaw, _ := json.Marshal(row)
+		res, err := tx.Exec(`INSERT INTO components SELECT * FROM json_populate_record(NULL::components,$1::json) ON CONFLICT DO NOTHING`, string(componentRaw))
 		if err != nil {
 			return nil, nil, err
 		}
 		inserted, _ := res.RowsAffected()
 		if inserted == 0 {
-			existing, found, findErr := findArchiveAssetNaturalID(tx, row)
+			existing, found, findErr := findArchiveComponentNaturalID(tx, row)
 			if findErr != nil || !found {
-				return nil, nil, errors.Join(findErr, fmt.Errorf("could not restore asset %d", oldID))
+				return nil, nil, errors.Join(findErr, fmt.Errorf("could not restore component %d", oldID))
 			}
 			candidate = existing
-			if _, err := tx.Exec(`UPDATE assets SET task_ids=CASE WHEN $1=ANY(task_ids) THEN task_ids ELSE array_append(task_ids,$1) END WHERE id=$2`, taskID, existing); err != nil {
+			if _, err := tx.Exec(`UPDATE components SET task_ids=CASE WHEN $1=ANY(task_ids) THEN task_ids ELSE array_append(task_ids,$1) END WHERE id=$2`, taskID, existing); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -503,61 +503,44 @@ func mergeJSONTaskID(value any, taskID int64) []int64 {
 	return out
 }
 
-func findArchiveAssetNaturalID(tx *sql.Tx, row map[string]any) (int64, bool, error) {
-	typeName, _ := row["type"].(string)
+func findArchiveComponentNaturalID(tx *sql.Tx, row map[string]any) (int64, bool, error) {
+	// 组件身份 = (firmware_sha256, type, component_name, version)，与 uq_components_v1 一致。
 	stringValue := func(key string) string {
 		value, _ := row[key].(string)
 		return value
 	}
-	var query string
-	var args []any
-	switch typeName {
-	case "root_domain":
-		query, args = `SELECT id FROM assets WHERE type='root_domain' AND domain=$1`, []any{stringValue("domain")}
-	case "ip":
-		query, args = `SELECT id FROM assets WHERE type='ip' AND ip=$1`, []any{stringValue("ip")}
-	case "subdomain":
-		query, args = `SELECT id FROM assets WHERE type='subdomain' AND domain=$1 AND COALESCE(record_type,'')=$2`, []any{stringValue("domain"), stringValue("record_type")}
-	case "app":
-		if bundle := stringValue("bundle_id"); bundle != "" {
-			query, args = `SELECT id FROM assets WHERE type='app' AND bundle_id=$1`, []any{bundle}
-		} else {
-			query, args = `SELECT id FROM assets WHERE type='app' AND bundle_id IS NULL AND app_name=$1`, []any{stringValue("app_name")}
-		}
-	case "service":
-		if stringValue("service_type") == "http" {
-			query, args = `SELECT id FROM assets WHERE type='service' AND service_type='http' AND url=$1`, []any{stringValue("url")}
-		} else {
-			port, _ := jsonInt64(row["port"])
-			query, args = `SELECT id FROM assets WHERE type='service' AND service_type='other' AND COALESCE(domain,'')=$1 AND COALESCE(ip,'')=$2 AND port=$3 AND service_name=$4`, []any{stringValue("domain"), stringValue("ip"), port, stringValue("service_name")}
-		}
-	case "endpoint":
-		query, args = `SELECT id FROM assets WHERE type='endpoint' AND url=$1 AND method=$2`, []any{stringValue("url"), stringValue("method")}
-	default:
-		return 0, false, fmt.Errorf("unsupported archived asset type %q", typeName)
+	typeName := stringValue("type")
+	name := stringValue("component_name")
+	if typeName == "" || name == "" {
+		return 0, false, fmt.Errorf("archived component missing type/component_name")
 	}
 	var id int64
-	err := tx.QueryRow(query, args...).Scan(&id)
+	err := tx.QueryRow(`
+SELECT id FROM components
+WHERE type=$1 AND component_name=$2
+  AND COALESCE(version,'')=$3
+  AND COALESCE(firmware_sha256,'')=$4`,
+		typeName, name, stringValue("version"), stringValue("firmware_sha256")).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
 	return id, err == nil, err
 }
 
-func remapArchiveAssetReferences(tables map[string]json.RawMessage, mapping map[int64]int64) (map[string]json.RawMessage, error) {
+func remapArchiveComponentReferences(tables map[string]json.RawMessage, mapping map[int64]int64) (map[string]json.RawMessage, error) {
 	out := make(map[string]json.RawMessage, len(tables))
 	for name, raw := range tables {
 		out[name] = raw
 	}
-	for _, table := range []string{"exploration_anchors", "task_asset_links"} {
+	for _, table := range []string{"exploration_anchors", "task_component_links"} {
 		rows, err := decodeArchiveRows(tables[table])
 		if err != nil {
 			return nil, err
 		}
 		for _, row := range rows {
-			if old, ok := jsonInt64(row["asset_id"]); ok {
+			if old, ok := jsonInt64(row["component_id"]); ok {
 				if replacement, exists := mapping[old]; exists {
-					row["asset_id"] = replacement
+					row["component_id"] = replacement
 				}
 			}
 		}
@@ -569,7 +552,7 @@ func remapArchiveAssetReferences(tables map[string]json.RawMessage, mapping map[
 			return nil, err
 		}
 		for _, row := range rows {
-			key := "asset_ids"
+			key := "component_ids"
 			container := row
 			if table == "exploration_nodes" {
 				payload, ok := row["payload"].(map[string]any)

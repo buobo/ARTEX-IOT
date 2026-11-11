@@ -194,7 +194,7 @@ func TestEvidenceAtomicFailuresAndLegacy(t *testing.T) {
 				}
 				refs = refs[:1]
 			case "database_failure":
-				input.AssetIDs = []int64{9223372036854775807}
+				input.ComponentIDs = []int64{9223372036854775807}
 				refs = refs[:1]
 			}
 			if _, err := local.Record(ctx, input, refs); err == nil {

@@ -36,14 +36,14 @@ func findingFilterFromQuery(q url.Values) db.FindingFilter {
 		TaskID:     normFilter(q.Get("task_id")),
 		Query:      q.Get("q"),
 		Sort:       q.Get("sort"),
-		AssetScope: strings.TrimSpace(q.Get("asset_scope")),
+		ComponentScope: strings.TrimSpace(q.Get("component_scope")),
 	}
 }
 
-// findingAssetTree serves the「按资产」view's left-hand tree: every asset that
+// findingComponentTree serves the「按资产」view's left-hand tree: every component that
 // carries at least one matching finding, plus the ancestors needed to place it.
-func (s *Server) findingAssetTree(w http.ResponseWriter, r *http.Request) {
-	tree, err := s.m.pg.BuildFindingAssetTree(findingFilterFromQuery(r.URL.Query()))
+func (s *Server) findingComponentTree(w http.ResponseWriter, r *http.Request) {
+	tree, err := s.m.pg.BuildFindingComponentTree(findingFilterFromQuery(r.URL.Query()))
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

@@ -82,7 +82,7 @@ func TestTaskLifecycleAndDeleteCascade(t *testing.T) {
 	}
 }
 
-func TestTaskDeleteCascadeAssets(t *testing.T) {
+func TestTaskDeleteCascadeComponents(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
@@ -97,8 +97,8 @@ func TestTaskDeleteCascadeAssets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assets := d.Assets()
-	exclusiveID, err := assets.UpsertRootDomain(UpsertRootDomainReq{
+	components := d.Components()
+	exclusiveID, err := components.UpsertRootDomain(UpsertRootDomainReq{
 		Domain: fmt.Sprintf("delete-%d.example.test", first.ID),
 		TaskID: first.ID,
 	})
@@ -106,15 +106,15 @@ func TestTaskDeleteCascadeAssets(t *testing.T) {
 		t.Fatal(err)
 	}
 	sharedDomain := fmt.Sprintf("shared-%d.example.test", first.ID)
-	sharedID, err := assets.UpsertRootDomain(UpsertRootDomainReq{Domain: sharedDomain, TaskID: first.ID})
+	sharedID, err := components.UpsertRootDomain(UpsertRootDomainReq{Domain: sharedDomain, TaskID: first.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := assets.UpsertRootDomain(UpsertRootDomainReq{Domain: sharedDomain, TaskID: second.ID}); err != nil {
+	if _, err := components.UpsertRootDomain(UpsertRootDomainReq{Domain: sharedDomain, TaskID: second.ID}); err != nil {
 		t.Fatal(err)
 	}
 	anchorOnlyDomain := fmt.Sprintf("anchor-only-%d.example.test", first.ID)
-	anchorOnlyID, err := assets.UpsertRootDomain(UpsertRootDomainReq{Domain: anchorOnlyDomain})
+	anchorOnlyID, err := components.UpsertRootDomain(UpsertRootDomainReq{Domain: anchorOnlyDomain})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestTaskDeleteCascadeAssets(t *testing.T) {
 		t.Fatal(err)
 	}
 	protectedDomain := fmt.Sprintf("other-anchor-%d.example.test", first.ID)
-	protectedID, err := assets.UpsertRootDomain(UpsertRootDomainReq{Domain: protectedDomain, TaskID: first.ID})
+	protectedID, err := components.UpsertRootDomain(UpsertRootDomainReq{Domain: protectedDomain, TaskID: first.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,34 +140,8 @@ func TestTaskDeleteCascadeAssets(t *testing.T) {
 	t.Cleanup(func() {
 		_ = d.DeleteTask(first.ID)
 		_ = d.DeleteTask(second.ID)
-		_, _ = assets.DeleteByIDs([]int64{exclusiveID, sharedID, anchorOnlyID, protectedID})
+		_, _ = components.DeleteByIDs([]int64{exclusiveID, sharedID, anchorOnlyID, protectedID})
 	})
-
-	hosts, err := assets.HostsByTask(first.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hostSet := make(map[string]bool, len(hosts))
-	for _, host := range hosts {
-		hostSet[host] = true
-	}
-	if !hostSet[fmt.Sprintf("delete-%d.example.test", first.ID)] || !hostSet[sharedDomain] {
-		t.Fatalf("task hosts missing cascade fixtures: %v", hosts)
-	}
-	deletableHosts, err := assets.HostsForTaskDeletion(first.ID, first.ExplorationID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	deletableSet := make(map[string]bool, len(deletableHosts))
-	for _, host := range deletableHosts {
-		deletableSet[host] = true
-	}
-	if !deletableSet[fmt.Sprintf("delete-%d.example.test", first.ID)] || !deletableSet[anchorOnlyDomain] {
-		t.Fatalf("exclusive or anchor-only cleanup host missing: %v", deletableHosts)
-	}
-	if deletableSet[sharedDomain] || deletableSet[protectedDomain] {
-		t.Fatalf("shared host was not protected from traffic cleanup: %v", deletableHosts)
-	}
 
 	findingID, err := d.AddFinding(first.ID, 0, "__task_delete_cascade__", "", SeverityHigh, "summary", "evidence", "tester", []int64{exclusiveID})
 	if err != nil {
@@ -178,8 +152,8 @@ func TestTaskDeleteCascadeAssets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.AssetsDeleted < 2 || result.AssetsDetached < 2 {
-		t.Fatalf("unexpected asset cleanup result: %+v", result)
+	if result.ComponentsDeleted < 2 || result.ComponentsDetached < 2 {
+		t.Fatalf("unexpected component cleanup result: %+v", result)
 	}
 	if result.FindingsDeleted != 1 {
 		t.Fatalf("unexpected finding cleanup result: %+v", result)
@@ -187,22 +161,22 @@ func TestTaskDeleteCascadeAssets(t *testing.T) {
 	if finding, err := d.GetFinding(findingID); err != nil || finding != nil {
 		t.Fatalf("finding should be deleted, got finding=%+v err=%v", finding, err)
 	}
-	remaining, err := assets.GetByIDs([]int64{exclusiveID, sharedID, anchorOnlyID, protectedID})
+	remaining, err := components.GetByIDs([]int64{exclusiveID, sharedID, anchorOnlyID, protectedID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(remaining) != 2 {
-		t.Fatalf("only shared and other-anchored assets should remain, got %+v", remaining)
+		t.Fatalf("only shared and other-anchored components should remain, got %+v", remaining)
 	}
-	byID := make(map[int64]*Asset, len(remaining))
-	for _, asset := range remaining {
-		byID[asset.ID] = asset
+	byID := make(map[int64]*Component, len(remaining))
+	for _, component := range remaining {
+		byID[component.ID] = component
 	}
 	if shared := byID[sharedID]; shared == nil || len(shared.TaskIDs) != 1 || shared.TaskIDs[0] != second.ID {
-		t.Fatalf("deleted task should be detached from shared asset: %+v", shared)
+		t.Fatalf("deleted task should be detached from shared component: %+v", shared)
 	}
 	if protected := byID[protectedID]; protected == nil || len(protected.TaskIDs) != 0 {
-		t.Fatalf("other task's anchor should preserve the asset after detaching ownership: %+v", protected)
+		t.Fatalf("other task's anchor should preserve the component after detaching ownership: %+v", protected)
 	}
 }
 
@@ -541,27 +515,27 @@ func TestCreateTaskWithCompanyScopes(t *testing.T) {
 		_, _ = d.Exec(`DELETE FROM companies WHERE id IN ($1,$2,$3)`, companyA, companyB, emptyCompany)
 	})
 
-	existingTask, err := d.CreateTask("existing company asset owner", "goal", nil, 0, 0)
+	existingTask, err := d.CreateTask("existing company component owner", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = d.DeleteTask(existingTask.ID) })
-	var companyAssetA, companyAssetB int64
+	var companyComponentA, companyComponentB int64
 	domainA := fmt.Sprintf("task-company-a-%d.example.test", suffix)
 	domainB := fmt.Sprintf("task-company-b-%d.example.test", suffix)
 	if err := d.QueryRow(`
-INSERT INTO assets(type, domain, root_domain, company_id, company_source, task_ids)
-VALUES ('root_domain',$1,$1,$2,'explicit',ARRAY[$3]::bigint[])
-RETURNING id`, domainA, companyA, existingTask.ID).Scan(&companyAssetA); err != nil {
+INSERT INTO components(type, component_name, company_id, task_ids)
+VALUES ('web',$1,$2,ARRAY[$3]::bigint[])
+RETURNING id`, domainA, companyA, existingTask.ID).Scan(&companyComponentA); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.QueryRow(`
-INSERT INTO assets(type, domain, root_domain, company_id, company_source)
-VALUES ('root_domain',$1,$1,$2,'explicit')
-RETURNING id`, domainB, companyB).Scan(&companyAssetB); err != nil {
+INSERT INTO components(type, component_name, company_id)
+VALUES ('web',$1,$2)
+RETURNING id`, domainB, companyB).Scan(&companyComponentB); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = d.Assets().DeleteByIDs([]int64{companyAssetA, companyAssetB}) })
+	t.Cleanup(func() { _, _ = d.Components().DeleteByIDs([]int64{companyComponentA, companyComponentB}) })
 
 	task, err := d.CreateTaskWithOptions("company-scoped task", "use company scope", TaskCreateOptions{
 		CompanyIDs: []int64{companyA, companyB},
@@ -587,53 +561,19 @@ RETURNING id`, domainB, companyB).Scan(&companyAssetB); err != nil {
 	if scopeCount != 2 {
 		t.Fatalf("company task scope rows=%d want 2", scopeCount)
 	}
-	assets, err := d.Assets().QueryByTask(task.ID, "root_domain", 10, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(assets) != 2 {
-		t.Fatalf("company task assets=%d want 2: %+v", len(assets), assets)
-	}
-	assetByID := make(map[int64]*Asset, len(assets))
-	for _, asset := range assets {
-		assetByID[asset.ID] = asset
-	}
-	for assetID, companyName := range map[int64]string{
-		companyAssetA: fmt.Sprintf("Task Company A %d", suffix),
-		companyAssetB: fmt.Sprintf("Task Company B %d", suffix),
-	} {
-		asset := assetByID[assetID]
-		if asset == nil {
-			t.Errorf("company asset %d missing from task", assetID)
-			continue
-		}
-		if asset.TaskSource != taskCompanyAssetSource || asset.TaskSourceSummary != "任务创建时关联企业："+companyName {
-			t.Errorf("asset %d provenance=%q/%q", assetID, asset.TaskSource, asset.TaskSourceSummary)
-		}
-	}
-	var existingAssociation bool
-	if err := d.QueryRow(`SELECT $1=ANY(task_ids) FROM assets WHERE id=$2`, existingTask.ID, companyAssetA).Scan(&existingAssociation); err != nil {
-		t.Fatal(err)
-	}
-	if !existingAssociation {
-		t.Fatal("company snapshot removed the asset's existing task association")
-	}
-	var existingSource string
-	if err := d.QueryRow(`SELECT source FROM task_asset_links WHERE task_id=$1 AND asset_id=$2`, existingTask.ID, companyAssetA).Scan(&existingSource); err != nil {
-		t.Fatal(err)
-	}
-	if existingSource == taskCompanyAssetSource {
-		t.Fatalf("company snapshot overwrote another task's provenance: %q", existingSource)
+	// 组件不再由企业范围快照到任务：企业范围只登记 task_scope，不挂组件。
+	if taskComponents, err := d.Components().QueryByTask(task.ID, "", 10, 0); err != nil || len(taskComponents) != 0 {
+		t.Fatalf("company task components=%+v err=%v（企业范围不应再挂组件）", taskComponents, err)
 	}
 
-	emptyTask, err := d.CreateTaskWithOptions("empty company scope", "no current assets", TaskCreateOptions{
+	emptyTask, err := d.CreateTaskWithOptions("empty company scope", "no current components", TaskCreateOptions{
 		CompanyIDs: []int64{emptyCompany},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if assets, err := d.Assets().QueryByTask(emptyTask.ID, "", 10, 0); err != nil || len(assets) != 0 {
-		t.Fatalf("empty company task assets=%+v err=%v", assets, err)
+	if components, err := d.Components().QueryByTask(emptyTask.ID, "", 10, 0); err != nil || len(components) != 0 {
+		t.Fatalf("empty company task components=%+v err=%v", components, err)
 	}
 	if err := d.DeleteTask(emptyTask.ID); err != nil {
 		t.Fatal(err)

@@ -122,7 +122,7 @@ type TaskArchiveSnapshot struct {
 	SourceTaskIDs     []int64                    `json:"source_task_ids"`
 	Hosts             []string                   `json:"hosts"`
 	ExclusiveHosts    []string                   `json:"exclusive_hosts"`
-	ExclusiveAssetIDs []int64                    `json:"exclusive_asset_ids"`
+	ExclusiveComponentIDs []int64                    `json:"exclusive_component_ids"`
 	Tables            map[string]json.RawMessage `json:"tables"`
 	StreamedTables    map[string]string          `json:"streamed_tables,omitempty"`
 	DataCounts        map[string]int64           `json:"data_counts"`
@@ -525,20 +525,20 @@ func rawRowCount(raw json.RawMessage) int64 {
 	return int64(len(rows))
 }
 
-func archiveAssetIDsQuery() string {
-	return `SELECT id FROM assets WHERE $1=ANY(task_ids)
-UNION SELECT link.asset_id FROM task_asset_links link WHERE link.task_id=$1
-UNION SELECT anchor.asset_id FROM exploration_anchors anchor
+func archiveComponentIDsQuery() string {
+	return `SELECT id FROM components WHERE $1=ANY(task_ids)
+UNION SELECT link.component_id FROM task_component_links link WHERE link.task_id=$1
+UNION SELECT anchor.component_id FROM exploration_anchors anchor
       JOIN exploration_nodes node ON node.id=anchor.node_id WHERE node.exploration_id=$2
 UNION SELECT value::bigint FROM findings finding
       CROSS JOIN LATERAL jsonb_array_elements_text(
-        CASE WHEN jsonb_typeof(finding.asset_ids)='array' THEN finding.asset_ids ELSE '[]'::jsonb END
+        CASE WHEN jsonb_typeof(finding.component_ids)='array' THEN finding.component_ids ELSE '[]'::jsonb END
       ) value WHERE finding.task_id=$1 AND value ~ '^[0-9]+$'`
 }
 
 // SnapshotTaskArchive reads one repeatable PostgreSQL snapshot. Task-owned Agent
 // writes are already quiescent at the server barrier; repeatable-read also keeps
-// the asset and accounting views mutually consistent during serialization.
+// the component and accounting views mutually consistent during serialization.
 func (d *DB) SnapshotTaskArchive(taskID int64) (*TaskArchiveSnapshot, error) {
 	return d.snapshotTaskArchive(taskID, nil)
 }
@@ -579,11 +579,11 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"explorations", `SELECT * FROM explorations WHERE id=$1`, []any{expID}},
 		{"exploration_nodes", `SELECT * FROM exploration_nodes WHERE exploration_id=$1 ORDER BY id`, []any{expID}},
 		{"exploration_edges", `SELECT * FROM exploration_edges WHERE exploration_id=$1 ORDER BY src_id,dst_id`, []any{expID}},
-		{"exploration_anchors", `SELECT anchor.* FROM exploration_anchors anchor JOIN exploration_nodes node ON node.id=anchor.node_id WHERE node.exploration_id=$1 ORDER BY node_id,asset_id`, []any{expID}},
+		{"exploration_anchors", `SELECT anchor.* FROM exploration_anchors anchor JOIN exploration_nodes node ON node.id=anchor.node_id WHERE node.exploration_id=$1 ORDER BY node_id,component_id`, []any{expID}},
 		{"task_constraints", `SELECT * FROM task_constraints WHERE exploration_id=$1 ORDER BY id`, []any{expID}},
 		{"activity", `SELECT * FROM activity WHERE exploration_id=$1 ORDER BY id`, []any{expID}},
 		{"task_relations", `SELECT * FROM task_relations WHERE task_id=$1 ORDER BY created_at,source_task_id`, []any{taskID}},
-		{"task_asset_links", `SELECT * FROM task_asset_links WHERE task_id=$1 ORDER BY asset_id`, []any{taskID}},
+		{"task_component_links", `SELECT * FROM task_component_links WHERE task_id=$1 ORDER BY component_id`, []any{taskID}},
 		{"task_llm_profiles", `SELECT * FROM task_llm_profiles WHERE task_id=$1 ORDER BY position`, []any{taskID}},
 		{"task_scope", `SELECT * FROM task_scope WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"findings", `SELECT * FROM findings WHERE task_id=$1 ORDER BY id`, []any{taskID}},
@@ -596,7 +596,7 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"intercept_pending", `SELECT * FROM intercept_pending WHERE COALESCE(task_id,'')=$1 ORDER BY id`, []any{strconv.FormatInt(taskID, 10)}},
 		{"side_question_sessions", `SELECT * FROM side_question_sessions WHERE task_id=$1 ORDER BY session_key`, []any{taskID}},
 		{"side_question_requests", `SELECT r.* FROM side_question_requests r JOIN side_question_sessions s ON s.session_key=r.session_key WHERE s.task_id=$1 ORDER BY r.ordinal`, []any{taskID}},
-		{"assets", `SELECT asset.* FROM assets asset WHERE asset.id IN (` + archiveAssetIDsQuery() + `) ORDER BY asset.id`, []any{taskID, expID}},
+		{"components", `SELECT component.* FROM components component WHERE component.id IN (` + archiveComponentIDsQuery() + `) ORDER BY component.id`, []any{taskID, expID}},
 	}
 	counts := make(map[string]int64, len(queries))
 	streamedTables := map[string]string{}
@@ -619,11 +619,11 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		counts[query.name] = count
 	}
 
-	assetIDs, exclusiveAssetIDs, hosts, exclusiveHosts, err := archiveAssetMetadata(tx, taskID, expID, tables["assets"])
+	componentIDs, exclusiveComponentIDs, hosts, exclusiveHosts, err := archiveComponentMetadata(tx, taskID, expID, tables["components"])
 	if err != nil {
 		return nil, err
 	}
-	_ = assetIDs // retained in the assets table payload; only exclusive ids need a side channel.
+	_ = componentIDs // retained in the components table payload; only exclusive ids need a side channel.
 	var sources []int64
 	rows, err := tx.Query(`SELECT source_task_id FROM task_relations WHERE task_id=$1 ORDER BY created_at,source_task_id`, taskID)
 	if err != nil {
@@ -647,22 +647,22 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 	snapshot := &TaskArchiveSnapshot{
 		FormatVersion: TaskArchiveFormatVersion, CreatedAt: time.Now().UTC(), TaskID: taskID,
 		ExplorationID: expID, SourceTaskIDs: sources, Hosts: hosts, ExclusiveHosts: exclusiveHosts,
-		ExclusiveAssetIDs: exclusiveAssetIDs, Tables: tables, StreamedTables: streamedTables,
+		ExclusiveComponentIDs: exclusiveComponentIDs, Tables: tables, StreamedTables: streamedTables,
 		DataCounts: counts, AggregateStats: stats,
 	}
 	return snapshot, tx.Commit()
 }
 
-func archiveAssetMetadata(tx *sql.Tx, taskID, expID int64, assetRows json.RawMessage) ([]int64, []int64, []string, []string, error) {
+func archiveComponentMetadata(tx *sql.Tx, taskID, expID int64, componentRows json.RawMessage) ([]int64, []int64, []string, []string, error) {
 	var rows []map[string]any
-	if err := json.Unmarshal(assetRows, &rows); err != nil {
+	if err := json.Unmarshal(componentRows, &rows); err != nil {
 		return nil, nil, nil, nil, err
 	}
 	allHosts := map[string]struct{}{}
-	assetIDs := make([]int64, 0, len(rows))
+	componentIDs := make([]int64, 0, len(rows))
 	for _, row := range rows {
 		if id, ok := jsonInt64(row["id"]); ok {
-			assetIDs = append(assetIDs, id)
+			componentIDs = append(componentIDs, id)
 		}
 		for _, key := range []string{"domain", "ip"} {
 			if value, _ := row[key].(string); strings.TrimSpace(value) != "" {
@@ -679,15 +679,15 @@ func archiveAssetMetadata(tx *sql.Tx, taskID, expID int64, assetRows json.RawMes
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	rowsID, err := tx.Query(`WITH candidate AS (`+archiveAssetIDsQuery()+`)
-SELECT asset.id FROM assets asset JOIN candidate ON candidate.id=asset.id
-WHERE asset.company_id IS NULL
-AND NOT EXISTS (SELECT 1 FROM tasks task WHERE task.id<>$1 AND task.deleted_at IS NULL AND task.id=ANY(asset.task_ids))
+	rowsID, err := tx.Query(`WITH candidate AS (`+archiveComponentIDsQuery()+`)
+SELECT component.id FROM components component JOIN candidate ON candidate.id=component.id
+WHERE component.company_id IS NULL
+AND NOT EXISTS (SELECT 1 FROM tasks task WHERE task.id<>$1 AND task.deleted_at IS NULL AND task.id=ANY(component.task_ids))
 AND NOT EXISTS (
  SELECT 1 FROM exploration_anchors anchor JOIN exploration_nodes node ON node.id=anchor.node_id
  JOIN tasks task ON task.exploration_id=node.exploration_id
- WHERE anchor.asset_id=asset.id AND task.id<>$1 AND task.deleted_at IS NULL
-) ORDER BY asset.id`, taskID, expID)
+ WHERE anchor.component_id=component.id AND task.id<>$1 AND task.deleted_at IS NULL
+) ORDER BY component.id`, taskID, expID)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -708,7 +708,7 @@ AND NOT EXISTS (
 		hosts = append(hosts, host)
 	}
 	sort.Strings(hosts)
-	return assetIDs, exclusiveIDs, hosts, exclusiveHosts, nil
+	return componentIDs, exclusiveIDs, hosts, exclusiveHosts, nil
 }
 
 func taskArchiveAggregates(tx *sql.Tx, taskID, expID int64) (map[string]any, error) {

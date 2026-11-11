@@ -166,16 +166,16 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if err := d.SetPaused(task.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	assetID, err := d.Assets().UpsertRootDomain(UpsertRootDomainReq{Domain: fmt.Sprintf("archive-%d.example", task.ID), TaskID: task.ID})
+	componentID, err := d.Components().UpsertRootDomain(UpsertRootDomainReq{Domain: fmt.Sprintf("archive-%d.example", task.ID), TaskID: task.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	store := d.Exploration(task.ExplorationID)
-	nodeID, err := store.AddNode(KindFact, map[string]any{"summary": "archived fact", "asset_ids": []int64{assetID}}, 1, "confirmed", "worker", nil)
+	nodeID, err := store.AddNode(KindFact, map[string]any{"summary": "archived fact", "component_ids": []int64{componentID}}, 1, "confirmed", "worker", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Anchor(nodeID, assetID); err != nil {
+	if err := store.Anchor(nodeID, componentID); err != nil {
 		t.Fatal(err)
 	}
 	profileName := fmt.Sprintf("archive-profile-%d", task.ID)
@@ -197,7 +197,7 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.AddFinding(task.ID, nodeID, vulnclass, "archive finding", SeverityCritical, "summary", "evidence", "worker", []int64{assetID}); err != nil {
+	if _, err := d.AddFinding(task.ID, nodeID, vulnclass, "archive finding", SeverityCritical, "summary", "evidence", "worker", []int64{componentID}); err != nil {
 		t.Fatal(err)
 	}
 	archive, err := d.QueueTaskArchive(task.ID)
@@ -219,7 +219,7 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if rawRowCount(snapshot.Tables["llm_records"]) != 0 {
 		t.Fatal("streamed LLM records were also retained in manifest memory")
 	}
-	if snapshot.DataCounts["assets"] != 1 || snapshot.DataCounts["exploration_nodes"] < 2 {
+	if snapshot.DataCounts["components"] != 1 || snapshot.DataCounts["exploration_nodes"] < 2 {
 		t.Fatalf("unexpected snapshot counts: %#v", snapshot.DataCounts)
 	}
 	if err := d.CompleteTaskArchive(archive.ID, snapshot, "/tmp/test-task.tar.zst", "abc", 100, 50); err != nil {
@@ -228,18 +228,18 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if live, err := d.GetTask(task.ID); err != nil || live != nil {
 		t.Fatalf("archived task must be hidden, got %+v, %v", live, err)
 	}
-	var nodes, assets, usage int
+	var nodes, components, usage int
 	if err := d.QueryRow(`SELECT count(*) FROM exploration_nodes WHERE exploration_id=$1`, task.ExplorationID).Scan(&nodes); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.QueryRow(`SELECT count(*) FROM assets WHERE id=$1`, assetID).Scan(&assets); err != nil {
+	if err := d.QueryRow(`SELECT count(*) FROM components WHERE id=$1`, componentID).Scan(&components); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.QueryRow(`SELECT count(*) FROM llm_usage WHERE task_id=$1`, fmt.Sprint(task.ID)).Scan(&usage); err != nil {
 		t.Fatal(err)
 	}
-	if nodes != 0 || assets != 0 || usage != 0 {
-		t.Fatalf("hot compaction left nodes=%d assets=%d usage=%d", nodes, assets, usage)
+	if nodes != 0 || components != 0 || usage != 0 {
+		t.Fatalf("hot compaction left nodes=%d components=%d usage=%d", nodes, components, usage)
 	}
 	ready, err := d.GetTaskArchive(archive.ID)
 	if err != nil || ready == nil || ready.State != ArchiveReady {
@@ -288,14 +288,14 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if err := d.QueryRow(`SELECT count(*) FROM exploration_nodes WHERE exploration_id=$1`, task.ExplorationID).Scan(&nodes); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.QueryRow(`SELECT count(*) FROM assets WHERE id=$1 AND $2=ANY(task_ids)`, assetID, task.ID).Scan(&assets); err != nil {
+	if err := d.QueryRow(`SELECT count(*) FROM components WHERE id=$1 AND $2=ANY(task_ids)`, componentID, task.ID).Scan(&components); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.QueryRow(`SELECT count(*) FROM llm_usage WHERE task_id=$1`, fmt.Sprint(task.ID)).Scan(&usage); err != nil {
 		t.Fatal(err)
 	}
-	if nodes < 2 || assets != 1 || usage != 1 {
-		t.Fatalf("restore incomplete nodes=%d assets=%d usage=%d", nodes, assets, usage)
+	if nodes < 2 || components != 1 || usage != 1 {
+		t.Fatalf("restore incomplete nodes=%d components=%d usage=%d", nodes, components, usage)
 	}
 	var restoredRawRequest, restoredRawResponse string
 	if err := d.QueryRow(`SELECT COALESCE(raw_request,''),COALESCE(raw_response,'') FROM llm_records WHERE task_id=$1`, fmt.Sprint(task.ID)).

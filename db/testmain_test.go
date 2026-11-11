@@ -11,8 +11,8 @@ import (
 // TestMain acquires a PostgreSQL advisory lock (7337741002) for the entire
 // db test suite. Packages agent and server hold the same lock, so parallel
 // `go test ./...` runs serialize across packages on the shared dev DB and
-// avoid cross-package cleanup races (e.g. DELETE FROM assets WHERE id > X
-// from one package deleting assets created by another).
+// avoid cross-package cleanup races (e.g. DELETE FROM components WHERE id > X
+// from one package deleting components created by another).
 func TestMain(m *testing.M) {
 	dsn, _, err := DSN()
 	if err != nil {

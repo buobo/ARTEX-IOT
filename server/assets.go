@@ -54,12 +54,12 @@ func (items *companyScopeInputs) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// assetStore returns the asset store.
-func (s *Server) assetStore() *db.AssetStore {
+// componentStore returns the component store.
+func (s *Server) componentStore() *db.ComponentStore {
 	if s.m.pg == nil {
 		return nil
 	}
-	return s.m.pg.Assets()
+	return s.m.pg.Components()
 }
 
 // companyStore returns the company store.
@@ -231,10 +231,10 @@ func (s *Server) addCompanyScope(w http.ResponseWriter, r *http.Request) {
 		out["errors"] = errs
 	}
 	// Reported separately from errors: this is pre-existing bad data, not a fault
-	// in the submitted rules, but the operator still has to see it or those assets
+	// in the submitted rules, but the operator still has to see it or those components
 	// look like the IP/CIDR rules simply never match. A failure to build the
 	// warning must not fail the scope write that already committed.
-	if warning, err := cs.MalformedIPAssetWarning(); err == nil && warning != "" {
+	if warning, err := cs.MalformedIPComponentWarning(); err == nil && warning != "" {
 		out["warnings"] = []string{warning}
 	}
 	writeJSON(w, 200, out)
@@ -256,7 +256,7 @@ func (s *Server) deleteCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		DeleteAssets bool `json:"delete_assets"`
+		DeleteComponents bool `json:"delete_components"`
 	}
 	// The body is optional. Only an actual empty body is ignored; malformed or
 	// trailing JSON is a client error.
@@ -278,7 +278,7 @@ func (s *Server) deleteCompany(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	assetsDeleted, err := s.m.DeleteCompanyWithAssets(id, req.DeleteAssets)
+	componentsDeleted, err := s.m.DeleteCompanyWithComponents(id, req.DeleteComponents)
 	if err != nil {
 		if errors.Is(err, db.ErrCompanyNotFound) {
 			writeErr(w, http.StatusNotFound, "company not found")
@@ -287,7 +287,7 @@ func (s *Server) deleteCompany(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"deleted": 1, "assets_deleted": assetsDeleted})
+	writeJSON(w, 200, map[string]any{"deleted": 1, "components_deleted": componentsDeleted})
 }
 
 // =====================================================================
@@ -308,16 +308,16 @@ func (s *Server) reattribute(w http.ResponseWriter, r *http.Request) {
 }
 
 // =====================================================================
-// GET /api/assets
+// GET /api/components
 // =====================================================================
 
 const (
-	defaultAssetPageSize = 50
-	maxAssetPageSize     = 200
+	defaultComponentPageSize = 50
+	maxComponentPageSize     = 200
 )
 
-func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
-	as := s.assetStore()
+func (s *Server) listComponents(w http.ResponseWriter, r *http.Request) {
+	as := s.componentStore()
 	if as == nil {
 		writeErr(w, 503, "database unavailable")
 		return
@@ -327,15 +327,15 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
 	if limit <= 0 {
-		limit = defaultAssetPageSize
-	} else if limit > maxAssetPageSize {
-		limit = maxAssetPageSize
+		limit = defaultComponentPageSize
+	} else if limit > maxComponentPageSize {
+		limit = maxComponentPageSize
 	}
 	if offset < 0 {
 		offset = 0
 	}
 
-	assets := []*db.Asset{}
+	components := []*db.Component{}
 	var err error
 	// total is the full match count ignoring limit/offset. Count first so an offset
 	// beyond the last row can return an empty page without an expensive scan.
@@ -346,36 +346,18 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		// task_id scopes the DSL search to a task's assets (the task detail
-		// "测试资产" search); 0 means the global asset view.
+		// task_id scopes the DSL search to a task's components (the task detail
+		// "测试资产" search); 0 means the global component view.
 		taskID, _ := strconv.ParseInt(q.Get("task_id"), 10, 64)
 		total, err = as.CountDSL(dsl, typ, taskID)
 		if err == nil && offset < total {
-			assets, err = as.QueryDSL(dsl, typ, taskID, limit, offset)
+			components, err = as.QueryDSL(dsl, typ, taskID, limit, offset)
 		}
 	} else {
-		companyID, _ := strconv.ParseInt(q.Get("company_id"), 10, 64)
 		taskID, _ := strconv.ParseInt(q.Get("task_id"), 10, 64)
-		switch {
-		case companyID > 0:
-			total, err = as.CountByCompany(companyID, typ)
-			if err == nil && offset < total {
-				assets, err = as.QueryByCompany(companyID, typ, limit, offset)
-			}
-		case taskID > 0:
-			total, err = as.CountByTask(taskID, typ)
-			if err == nil && offset < total {
-				assets, err = as.QueryByTask(taskID, typ, limit, offset)
-			}
-		default:
-			if typ == "" {
-				typ = "root_domain"
-			}
-			total, err = as.CountByType(typ)
-			if err == nil && offset < total {
-				assets, err = as.QueryByType(typ, limit, offset)
-			}
-		}
+		components, total, err = as.ListComponents(db.ComponentFilter{
+			Type: typ, TaskID: taskID, Limit: limit, Offset: offset,
+		})
 	}
 
 	if err != nil {
@@ -383,29 +365,24 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"count":  len(assets),
+		"count":  len(components),
 		"total":  total,
-		"assets": assets,
+		"components": components,
 	})
 }
 
 // =====================================================================
-// GET /api/assets/counts
+// GET /api/components/counts
 // =====================================================================
 
-func (s *Server) assetCounts(w http.ResponseWriter, r *http.Request) {
-	as := s.assetStore()
+func (s *Server) componentCounts(w http.ResponseWriter, r *http.Request) {
+	as := s.componentStore()
 	if as == nil {
 		writeErr(w, 503, "database unavailable")
 		return
 	}
-	var counts map[string]int
-	var err error
-	if taskID, _ := strconv.ParseInt(r.URL.Query().Get("task_id"), 10, 64); taskID > 0 {
-		counts, err = as.CountsByTypeForTask(taskID)
-	} else {
-		counts, err = as.CountsByType()
-	}
+	taskID, _ := strconv.ParseInt(r.URL.Query().Get("task_id"), 10, 64)
+	counts, err := as.CountsByType(taskID)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -414,11 +391,11 @@ func (s *Server) assetCounts(w http.ResponseWriter, r *http.Request) {
 }
 
 // =====================================================================
-// DELETE /api/assets
+// DELETE /api/components
 // =====================================================================
 
-func (s *Server) deleteAssets(w http.ResponseWriter, r *http.Request) {
-	as := s.assetStore()
+func (s *Server) deleteComponents(w http.ResponseWriter, r *http.Request) {
+	as := s.componentStore()
 	if as == nil {
 		writeErr(w, 503, "database unavailable")
 		return
@@ -443,108 +420,56 @@ func (s *Server) deleteAssets(w http.ResponseWriter, r *http.Request) {
 }
 
 // =====================================================================
-// POST /api/assets
+// POST /api/components
 // =====================================================================
 
-func (s *Server) insertAssets(w http.ResponseWriter, r *http.Request) {
-	as := s.assetStore()
+func (s *Server) insertComponents(w http.ResponseWriter, r *http.Request) {
+	as := s.componentStore()
 	if as == nil {
 		writeErr(w, 503, "database unavailable")
 		return
 	}
 	var req struct {
-		TaskID int64 `json:"task_id"`
-		Assets []struct {
-			Type string `json:"type"`
-			// root_domain / subdomain
-			Domain      string   `json:"domain"`
-			ICP         string   `json:"icp"`
-			RecordType  string   `json:"record_type"`
-			RecordValue []string `json:"record_value"`
-			// ip
-			IP           string           `json:"ip"`
-			BoundDomains []string         `json:"bound_domains"`
-			OpenPorts    []db.PortService `json:"open_ports"`
-			// app
-			AppName     string `json:"app_name"`
-			BundleID    string `json:"bundle_id"`
-			Category    string `json:"category"`
-			Description string `json:"description"`
-			AppICP      string `json:"app_icp"`
-			// service http
-			URL           string           `json:"url"`
-			Technologies  []string         `json:"technologies"`
-			StatusCode    *int             `json:"status_code"`
-			ContentLength *int64           `json:"content_length"`
-			PageTitle     string           `json:"page_title"`
-			FaviconMMH3   string           `json:"favicon_mmh3"`
-			Auth          []map[string]any `json:"auth"`
-			ServiceIP     string           `json:"service_ip"`
-			// service other
-			Port        int    `json:"port"`
-			ServiceName string `json:"service_name"`
-			// endpoint
-			Method string           `json:"method"`
-			Params []map[string]any `json:"params"`
-		} `json:"assets"`
+		TaskID     int64              `json:"task_id"`
+		Components []db.ComponentInput `json:"components"`
+		Type           string   `json:"type"`
+		ComponentName  string   `json:"component_name"`
+		Version        string   `json:"version"`
+		Vendor         string   `json:"vendor"`
+		BinaryPath     string   `json:"binary_path"`
+		ConfigPath     string   `json:"config_path"`
+		StartedBy      string   `json:"started_by"`
+		FirmwareSha256 string   `json:"firmware_sha256"`
+		Port           int      `json:"port"`
+		Technologies   []string `json:"technologies"`
+		Notes          string   `json:"notes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
-
-	type result struct {
-		Index int    `json:"index"`
-		ID    int64  `json:"id"`
-		Type  string `json:"type"`
+	items := req.Components
+	if len(items) == 0 {
+		items = []db.ComponentInput{{
+			Type: req.Type, Name: req.ComponentName, Version: req.Version,
+			Vendor: req.Vendor, BinaryPath: req.BinaryPath, ConfigPath: req.ConfigPath,
+			StartedBy: req.StartedBy, FirmwareSha256: req.FirmwareSha256,
+			Port: req.Port, Technologies: req.Technologies, Notes: req.Notes,
+		}}
 	}
-	type errEntry struct {
-		Index int    `json:"index"`
-		Error string `json:"error"`
+	var taskIDs []int64
+	if req.TaskID > 0 {
+		taskIDs = []int64{req.TaskID}
 	}
-	var results []result
-	var errs []errEntry
-
-	for i, a := range req.Assets {
-		var id int64
-		var err error
-		switch a.Type {
-		case "root_domain":
-			id, err = as.UpsertRootDomain(db.UpsertRootDomainReq{Domain: a.Domain, ICP: a.ICP, TaskID: req.TaskID})
-		case "ip":
-			id, err = as.UpsertIP(db.UpsertIPReq{IP: a.IP, BoundDomains: a.BoundDomains, OpenPorts: a.OpenPorts, TaskID: req.TaskID})
-		case "subdomain":
-			id, err = as.UpsertSubdomain(db.UpsertSubdomainReq{Domain: a.Domain, RecordType: a.RecordType, RecordValue: a.RecordValue, ICP: a.ICP, TaskID: req.TaskID})
-		case "app":
-			id, err = as.UpsertApp(db.UpsertAppReq{Name: a.AppName, BundleID: a.BundleID, Category: a.Category, Description: a.Description, ICP: a.AppICP, TaskID: req.TaskID})
-		case "service":
-			if a.URL != "" {
-				svcIP := a.ServiceIP
-				if svcIP == "" {
-					svcIP = a.IP
-				}
-				id, err = as.UpsertHTTPService(db.UpsertHTTPServiceReq{URL: a.URL, Technologies: a.Technologies, StatusCode: a.StatusCode, ContentLength: a.ContentLength, PageTitle: a.PageTitle, FaviconMMH3: a.FaviconMMH3, Auth: a.Auth, IP: svcIP, TaskID: req.TaskID})
-			} else {
-				id, err = as.UpsertOtherService(db.UpsertOtherServiceReq{Domain: a.Domain, IP: a.IP, Port: a.Port, ServiceName: a.ServiceName, Auth: a.Auth, TaskID: req.TaskID})
-			}
-		case "endpoint":
-			svcIP := a.ServiceIP
-			if svcIP == "" {
-				svcIP = a.IP
-			}
-			id, err = as.UpsertEndpoint(db.UpsertEndpointReq{URL: a.URL, Method: a.Method, Params: a.Params, IP: svcIP, TaskID: req.TaskID})
-		default:
-			errs = append(errs, errEntry{Index: i, Error: "unknown type: " + a.Type})
-			continue
-		}
-		if err != nil {
-			errs = append(errs, errEntry{Index: i, Error: err.Error()})
-			continue
-		}
-		if req.TaskID > 0 {
-			_ = as.SetTaskAssetSource(req.TaskID, id, "api", "通过资产 API 登记", nil)
-		}
-		results = append(results, result{Index: i, ID: id, Type: a.Type})
+	inserted, updated, ids, err := as.UpsertComponents(taskIDs, items)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
 	}
-	writeJSON(w, 200, map[string]any{"results": results, "errors": errs})
+	if req.TaskID > 0 {
+		for _, id := range ids {
+			_ = as.SetTaskComponentSource(req.TaskID, id, "api", "通过组件 API 登记", nil)
+		}
+	}
+	writeJSON(w, 200, map[string]any{"inserted": inserted, "updated": updated, "ids": ids})
 }

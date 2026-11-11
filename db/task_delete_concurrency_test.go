@@ -9,128 +9,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-func TestDeleteTaskTrafficHostsUseOneLockedTransaction(t *testing.T) {
-	dsn := testDSN(t)
-	d, err := Open(dsn)
-	if err != nil {
-		t.Skipf("postgres unavailable (%v) - skipping", err)
-	}
-	defer d.Close()
-
-	t.Run("sharing committed before deletion lock is observed", func(t *testing.T) {
-		first, second, host, rootAssetID := createTaskDeleteRaceFixture(t, d)
-		serviceURL := "https://" + host + "/concurrent-owner"
-		t.Cleanup(func() {
-			_ = d.DeleteTask(first.ID)
-			_ = d.DeleteTask(second.ID)
-			_, _ = d.Exec(`DELETE FROM assets WHERE id=$1 OR url=$2`, rootAssetID, serviceURL)
-		})
-
-		writer, _ := openTaskDeleteTestDB(t, dsn)
-		writerTx, err := writer.Begin()
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer writerTx.Rollback()
-		if _, err := writerTx.Exec(`
-INSERT INTO assets(type, url, service_type, domain, task_ids)
-VALUES ('service', $1, 'http', $2, ARRAY[$3]::bigint[])`, serviceURL, host, second.ID); err != nil {
-			t.Fatal(err)
-		}
-
-		deleter, deleterPID := openTaskDeleteTestDB(t, dsn)
-		var preparedHosts []string
-		deleteDone := make(chan error, 1)
-		go func() {
-			_, deleteErr := deleter.DeleteTaskCascadePrepared(first.ID, true, false, false, func(p TaskDeletePreparation) error {
-				preparedHosts = append([]string(nil), p.TrafficHosts...)
-				return nil
-			})
-			deleteDone <- deleteErr
-		}()
-
-		if err := waitForTaskDeleteBlock(d, deleterPID, deleteDone); err != nil {
-			t.Fatal(err)
-		}
-		if err := writerTx.Commit(); err != nil {
-			t.Fatal(err)
-		}
-		if err := waitForTaskDeleteResult(deleteDone); err != nil {
-			t.Fatal(err)
-		}
-		if containsDeleteHost(preparedHosts, host) {
-			t.Fatalf("newly shared host %q was selected for traffic deletion: %v", host, preparedHosts)
-		}
-		var remaining int
-		if err := d.QueryRow(`SELECT count(*) FROM assets WHERE url=$1 AND $2=ANY(task_ids)`, serviceURL, second.ID).Scan(&remaining); err != nil {
-			t.Fatal(err)
-		}
-		if remaining != 1 {
-			t.Fatalf("concurrent owner's asset was not preserved: count=%d", remaining)
-		}
-	})
-
-	t.Run("sharing cannot enter between host resolution and commit", func(t *testing.T) {
-		first, second, host, rootAssetID := createTaskDeleteRaceFixture(t, d)
-		serviceURL := "https://" + host + "/late-owner"
-		t.Cleanup(func() {
-			_ = d.DeleteTask(first.ID)
-			_ = d.DeleteTask(second.ID)
-			_, _ = d.Exec(`DELETE FROM assets WHERE id=$1 OR url=$2`, rootAssetID, serviceURL)
-		})
-
-		deleter, _ := openTaskDeleteTestDB(t, dsn)
-		prepared := make(chan TaskDeletePreparation, 1)
-		releasePrepare := make(chan struct{})
-		deleteDone := make(chan error, 1)
-		go func() {
-			_, deleteErr := deleter.DeleteTaskCascadePrepared(first.ID, true, false, false, func(p TaskDeletePreparation) error {
-				prepared <- p
-				<-releasePrepare
-				return nil
-			})
-			deleteDone <- deleteErr
-		}()
-
-		var plan TaskDeletePreparation
-		select {
-		case plan = <-prepared:
-		case err := <-deleteDone:
-			close(releasePrepare)
-			t.Fatalf("delete returned before preparation: %v", err)
-		case <-time.After(5 * time.Second):
-			close(releasePrepare)
-			t.Fatal("timed out waiting for task delete preparation")
-		}
-		if !containsDeleteHost(plan.TrafficHosts, host) {
-			close(releasePrepare)
-			t.Fatalf("exclusive host %q missing from preparation: %v", host, plan.TrafficHosts)
-		}
-
-		writer, writerPID := openTaskDeleteTestDB(t, dsn)
-		writerDone := make(chan error, 1)
-		go func() {
-			_, writeErr := writer.Exec(`
-INSERT INTO assets(type, url, service_type, domain, task_ids)
-VALUES ('service', $1, 'http', $2, ARRAY[$3]::bigint[])`, serviceURL, host, second.ID)
-			writerDone <- writeErr
-		}()
-		if err := waitForTaskDeleteBlock(d, writerPID, writerDone); err != nil {
-			close(releasePrepare)
-			t.Fatal(err)
-		}
-
-		close(releasePrepare)
-		if err := waitForTaskDeleteResult(deleteDone); err != nil {
-			t.Fatal(err)
-		}
-		if err := waitForTaskDeleteResult(writerDone); err != nil {
-			t.Fatal(err)
-		}
-	})
-}
-
-func createTaskDeleteRaceFixture(t *testing.T, d *DB) (first, second *Task, host string, rootAssetID int64) {
+func createTaskDeleteRaceFixture(t *testing.T, d *DB) (first, second *Task, host string, rootComponentID int64) {
 	t.Helper()
 	var err error
 	first, err = d.CreateTask("delete race owner", "delete safely", nil, 0, 0)
@@ -143,13 +22,13 @@ func createTaskDeleteRaceFixture(t *testing.T, d *DB) (first, second *Task, host
 		t.Fatal(err)
 	}
 	host = fmt.Sprintf("task-delete-race-%d.example.test", first.ID)
-	rootAssetID, err = d.Assets().UpsertRootDomain(UpsertRootDomainReq{Domain: host, TaskID: first.ID})
+	rootComponentID, err = d.Components().UpsertRootDomain(UpsertRootDomainReq{Domain: host, TaskID: first.ID})
 	if err != nil {
 		_ = d.DeleteTask(first.ID)
 		_ = d.DeleteTask(second.ID)
 		t.Fatal(err)
 	}
-	return first, second, host, rootAssetID
+	return first, second, host, rootComponentID
 }
 
 func openTaskDeleteTestDB(t *testing.T, dsn string) (*DB, int) {

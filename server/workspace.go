@@ -305,9 +305,9 @@ func (s *Server) taskFirmwareUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "task not found")
 		return
 	}
-	as := s.m.Assets()
+	as := s.m.Components()
 	if as == nil {
-		writeErr(w, 503, "asset store 未启用")
+		writeErr(w, 503, "component store 未启用")
 		return
 	}
 	taskID, err := strconv.ParseInt(t.ID, 10, 64)

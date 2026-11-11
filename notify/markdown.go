@@ -169,7 +169,7 @@ func writeItem(b *strings.Builder, it Item, prefix string, single bool) {
 	if !single {
 		// 汇总模式：单行呈现，资产与摘要压缩后跟在后面。
 		var extras []string
-		if a := assetLine(it.Assets, maxAssetsShown); a != "" {
+		if a := assetLine(it.Components, maxAssetsShown); a != "" {
 			extras = append(extras, markdownText(a, 0))
 		}
 		if it.Summary != "" {
@@ -189,7 +189,7 @@ func writeItem(b *strings.Builder, it Item, prefix string, single bool) {
 	if it.VulnClass != "" && it.VulnClass != it.Title() {
 		fmt.Fprintf(b, "**类型**：%s\n", markdownText(it.VulnClass, 0))
 	}
-	if a := assetLine(it.Assets, maxAssetsShown); a != "" {
+	if a := assetLine(it.Components, maxAssetsShown); a != "" {
 		fmt.Fprintf(b, "**资产**：%s\n", markdownText(a, 0))
 	}
 	if it.Summary != "" {

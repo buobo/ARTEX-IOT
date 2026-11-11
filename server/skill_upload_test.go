@@ -43,7 +43,7 @@ func TestSkillRelPath(t *testing.T) {
 		"参考/中文说明.md":         "参考/中文说明.md",
 		"references/a b.txt": "references/a b.txt",
 		"./SKILL.md":         "SKILL.md",
-		"assets/图片-1_v2.png": "assets/图片-1_v2.png",
+		"components/图片-1_v2.png": "components/图片-1_v2.png",
 	}
 	for in, want := range ok {
 		got, msg := skillRelPath(in)

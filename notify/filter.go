@@ -12,9 +12,9 @@ import (
 type Filter struct {
 	// MinSeverity 是最低级别门槛（low/medium/high/critical），空=不设门槛。
 	MinSeverity string `json:"min_severity"`
-	// TaskIDs / AssetIDs 为空数组表示不限；非空则要求事件与它有交集。
+	// TaskIDs / ComponentIDs 为空数组表示不限；非空则要求事件与它有交集。
 	TaskIDs  []int64 `json:"task_ids"`
-	AssetIDs []int64 `json:"asset_ids"`
+	ComponentIDs []int64 `json:"component_ids"`
 	// VulnClassInclude 为空表示全收；非空则要求 vulnclass 命中其中任一关键词。
 	// VulnClassExclude 命中任一关键词即排除（排除优先于包含）。
 	// 匹配方式为大小写不敏感的子串——比正则安全：用户配错正则不会让渠道静默失效。
@@ -82,7 +82,7 @@ func Match(f Filter, s Snapshot) bool {
 	if len(f.TaskIDs) > 0 && !slices.Contains(f.TaskIDs, s.TaskID) {
 		return false
 	}
-	if len(f.AssetIDs) > 0 && !intersectsInt(f.AssetIDs, s.AssetIDs) {
+	if len(f.ComponentIDs) > 0 && !intersectsInt(f.ComponentIDs, s.ComponentIDs) {
 		return false
 	}
 	// 排除优先：命中任一排除关键词即出局，即便同时命中了包含列表。

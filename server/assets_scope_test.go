@@ -188,7 +188,7 @@ func TestCompanyScopeHTTPErrorClassificationAndBounds(t *testing.T) {
 	})
 }
 
-func TestListAssetsClassifiesValidationAndDatabaseErrors(t *testing.T) {
+func TestListComponentsClassifiesValidationAndDatabaseErrors(t *testing.T) {
 	m, err := NewManager(t.TempDir(), "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
@@ -196,9 +196,9 @@ func TestListAssetsClassifiesValidationAndDatabaseErrors(t *testing.T) {
 	defer m.Close()
 	s := &Server{m: m}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/assets?dsl=(", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/components?dsl=(", nil)
 	rec := httptest.NewRecorder()
-	s.listAssets(rec, req)
+	s.listComponents(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid DSL status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -206,9 +206,9 @@ func TestListAssetsClassifiesValidationAndDatabaseErrors(t *testing.T) {
 	if err := m.pg.Close(); err != nil {
 		t.Fatal(err)
 	}
-	req = httptest.NewRequest(http.MethodGet, "/api/assets?type=root_domain", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/components?type=root_domain", nil)
 	rec = httptest.NewRecorder()
-	s.listAssets(rec, req)
+	s.listComponents(rec, req)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("database failure status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -230,7 +230,7 @@ func TestDeleteCompanyRejectsBadJSONAndReportsMissing(t *testing.T) {
 	}
 	defer func() { _ = m.pg.Companies().DeleteCompany(companyID) }()
 
-	for _, body := range []string{`{"delete_assets":`, `{}` + `{}`} {
+	for _, body := range []string{`{"delete_components":`, `{}` + `{}`} {
 		req := httptest.NewRequest(http.MethodDelete, "/api/companies/1", strings.NewReader(body))
 		req.SetPathValue("id", i64s(companyID))
 		rec := httptest.NewRecorder()

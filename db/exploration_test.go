@@ -130,13 +130,13 @@ func TestIntentPauseResumeAndCancelCleanup(t *testing.T) {
 	defer d.Exec(`DELETE FROM explorations WHERE id=$1`, expID)
 	es := d.Exploration(expID)
 
-	assetID, err := d.Assets().UpsertRootDomain(UpsertRootDomainReq{
+	componentID, err := d.Components().UpsertRootDomain(UpsertRootDomainReq{
 		Domain: fmt.Sprintf("cancel-intent-%d.invalid", expID),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer deleteAsset(d, assetID)
+	defer deleteComponent(d, componentID)
 
 	otherIntent, err := es.AddIntent(map[string]any{"summary": "keep intent"}, 1, nil, "planner")
 	if err != nil {
@@ -175,7 +175,7 @@ func TestIntentPauseResumeAndCancelCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	directFact, err := es.AddNode("fact", map[string]any{"summary": "remove fact"}, 0, "confirmed", "worker", []int64{assetID})
+	directFact, err := es.AddNode("fact", map[string]any{"summary": "remove fact"}, 0, "confirmed", "worker", []int64{componentID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestIntentPauseResumeAndCancelCleanup(t *testing.T) {
 	if err := es.Link(intentID, RelYields, directFinding); err != nil {
 		t.Fatal(err)
 	}
-	findingRowID, err := es.AddStandaloneFinding(0, directFinding, "test", "cancelled finding", SeverityHigh, "summary", "evidence", "worker", []int64{assetID})
+	findingRowID, err := es.AddStandaloneFinding(0, directFinding, "test", "cancelled finding", SeverityHigh, "summary", "evidence", "worker", []int64{componentID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestIntentPauseResumeAndCancelCleanup(t *testing.T) {
 	assertCount(`SELECT COUNT(*) FROM activity WHERE id=$1`, 1, keptActivityID)
 	assertCount(`SELECT COUNT(*) FROM exploration_edges WHERE exploration_id=$1 AND (src_id=$2 OR dst_id=$2)`, 0, expID, intentID)
 	assertCount(`SELECT COUNT(*) FROM exploration_anchors WHERE node_id=$1`, 0, directFact)
-	assertCount(`SELECT COUNT(*) FROM assets WHERE id=$1`, 1, assetID)
+	assertCount(`SELECT COUNT(*) FROM components WHERE id=$1`, 1, componentID)
 }
 
 // TestNodesPageQueryMatchesID verifies the 播报板 search filters on node id (both

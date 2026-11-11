@@ -17,7 +17,7 @@ func TestPoolProfilesOrder(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { d.Close() })
 
 	mk := func(name string, priority int, exclude bool, key string) int64 {
 		id, err := d.SaveProfile(&LLMProfile{
@@ -69,7 +69,7 @@ func TestConfigStores(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { d.Close() })
 
 	// LLM profile: save, active, key never serialized
 	pid, err := d.SaveProfile(&LLMProfile{Name: "t-default", Format: "openai", Model: "gpt-x", APIKey: "secret123"})
@@ -123,7 +123,7 @@ func TestConfigStores(t *testing.T) {
 		t.Fatalf("want >=2 versions, got %d", len(vers))
 	}
 	pv, _ := d.PromptVars(ag.ID)
-	// planner must have at least the seeded catalog vars (Goal, AssetSummary)
+	// planner must have at least the seeded catalog vars (Goal, ComponentSummary)
 	if len(pv) < 2 {
 		t.Fatalf("planner catalog want >=2 vars, got %d", len(pv))
 	}

@@ -220,9 +220,9 @@ func (s *ExplorationStore) SupersedeDigests(ids []int64) error {
 	return tx.Commit()
 }
 
-// NodeAssets maps each of the given node ids → the asset ids it is anchored to
-// (exploration_anchors). Used to group cold digests by asset (§6.2 index).
-func (s *ExplorationStore) NodeAssets(ids []int64) (map[int64][]int64, error) {
+// NodeComponents maps each of the given node ids → the component ids it is anchored to
+// (exploration_anchors). Used to group cold digests by component (§6.2 index).
+func (s *ExplorationStore) NodeComponents(ids []int64) (map[int64][]int64, error) {
 	out := map[int64][]int64{}
 	if len(ids) == 0 {
 		return out, nil
@@ -234,7 +234,7 @@ func (s *ExplorationStore) NodeAssets(ids []int64) (map[int64][]int64, error) {
 		placeholders[i] = fmt.Sprintf("$%d", i+2)
 		args = append(args, id)
 	}
-	rows, err := s.db.Query(`SELECT a.node_id, a.asset_id
+	rows, err := s.db.Query(`SELECT a.node_id, a.component_id
 		FROM exploration_anchors a
 		JOIN exploration_nodes n ON n.id=a.node_id
 		WHERE n.exploration_id=$1 AND a.node_id IN (`+strings.Join(placeholders, ",")+`)`, args...)
@@ -243,11 +243,11 @@ func (s *ExplorationStore) NodeAssets(ids []int64) (map[int64][]int64, error) {
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var node, asset int64
-		if err := rows.Scan(&node, &asset); err != nil {
+		var node, component int64
+		if err := rows.Scan(&node, &component); err != nil {
 			return nil, err
 		}
-		out[node] = append(out[node], asset)
+		out[node] = append(out[node], component)
 	}
 	return out, rows.Err()
 }

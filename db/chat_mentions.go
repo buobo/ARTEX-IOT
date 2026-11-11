@@ -34,13 +34,13 @@ type chatMentionCursor struct {
 
 func ValidChatMentionKind(kind string) bool {
 	switch kind {
-	case "finding", "company", "asset", "endpoint", "ip", "app", "root_domain", "subdomain", "service":
+	case "finding", "company", "component":
 		return true
 	}
 	return false
 }
 
-// SearchChatMentions searches the shared catalog, just like the asset/finding
+// SearchChatMentions searches the shared catalog, just like the component/finding
 // pages. Values remain SQL parameters; %, _ and backslash are literal search text.
 func (d *DB) SearchChatMentions(ctx context.Context, kind, query string) ([]ChatMention, error) {
 	page, err := d.SearchChatMentionsPage(ctx, kind, query, "")
@@ -81,11 +81,10 @@ SELECT kind, id, left(label, 160), left(description, 240) FROM (
   ORDER BY (id::text=$2) DESC, id DESC LIMIT 21)
  UNION ALL
  (SELECT type, id,
-    CASE WHEN type='endpoint' THEN concat_ws(' ',NULLIF(method,''),url)
-         ELSE COALESCE(NULLIF(app_name,''),NULLIF(url,''),NULLIF(domain,''),NULLIF(ip,''),NULLIF(bundle_id,''),'资产 #'||id::text) END,
-    concat_ws(' · ',type,NULLIF(page_title,''),NULLIF(service_name,''),NULLIF(bundle_id,''),NULLIF(ip,''),port::text)
-  FROM assets WHERE ($1='' OR $1='asset' OR type=$1) AND
-    ($2='' OR id::text=$2 OR concat_ws(' ',domain,root_domain,ip,url,app_name,bundle_id,page_title,service_name,method) ILIKE $3)
+    COALESCE(NULLIF(component_name,''),'组件 #'||id::text),
+    concat_ws(' · ',type,NULLIF(version,''),NULLIF(vendor,''),NULLIF(binary_path,''),port::text)
+  FROM components WHERE ($1='' OR $1='component' OR type=$1) AND
+    ($2='' OR id::text=$2 OR concat_ws(' ',component_name,version,vendor,binary_path,config_path,started_by,notes) ILIKE $3)
     AND ($4::bigint=0 OR (id::text=$2)<$6 OR ((id::text=$2)=$6 AND (id<$4 OR (id=$4 AND type>$5))))
   ORDER BY (id::text=$2) DESC, id DESC LIMIT 21)
 ) matches ORDER BY (id::text=$2) DESC, id DESC, kind LIMIT 21`, kind, query, pattern, after.ID, after.Kind, after.Exact)

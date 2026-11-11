@@ -37,79 +37,178 @@ DROP TRIGGER IF EXISTS trg_companies_upd ON companies;
 CREATE TRIGGER trg_companies_upd BEFORE UPDATE ON companies
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
-CREATE TABLE IF NOT EXISTS assets (
+-- 组件层：一行 = 固件里的一个软件实体（web 服务、mqtt broker、ros 节点…）。
+-- 复用系统既有的语义字段，避免另起一套词汇：
+--   type         组件类型（取代原网络资产类型枚举）
+--   component_name 组件名（lighttpd / mosquitto / roscore）
+--   port/open_ports 监听端口
+--   technologies 相关库/指纹（openssl、busybox…）
+--   status       复用 tasks/findings 的状态词：pending 待挖 / running 挖掘中 /
+--                completed 挖完 / ignored 不适用
+-- 新增列都是系统里原本没有、又确实必需的：version/vendor/binary/config_path/
+-- started_by/firmware_sha256/notes。
+-- 老库迁移：assets 就地改名为 components（不新建表、不搬数据）
+DO $$
+BEGIN
+    IF to_regclass('assets') IS NOT NULL AND to_regclass('components') IS NULL THEN
+        ALTER TABLE assets RENAME TO components;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS components (
     id              BIGSERIAL PRIMARY KEY,
-    type            TEXT NOT NULL CHECK (type IN (
-                        'root_domain','ip','subdomain','app','service','endpoint'
-                    )),
+    type            TEXT DEFAULT 'other',
     company_id      BIGINT REFERENCES companies(id) ON DELETE SET NULL,
-    -- explicit: caller/user selected the company; scope: derived from company_scope.
-    -- Existing installations are conservatively migrated as explicit so a scope
-    -- rebuild can never erase a historical manual association.
-    company_source  TEXT NOT NULL DEFAULT 'explicit'
-                    CHECK (company_source IN ('explicit','scope')),
     task_ids        BIGINT[] NOT NULL DEFAULT '{}',
-    domain          TEXT,
-    root_domain     TEXT,
-    ip              TEXT,
-    c_segment       CIDR,
+    component_name  TEXT,
     port            INTEGER CHECK (port BETWEEN 1 AND 65535),
-    icp             TEXT,
-    bound_domains   TEXT[]  NOT NULL DEFAULT '{}',
     open_ports      JSONB[] NOT NULL DEFAULT '{}',
-    record_type     TEXT,
-    record_value    TEXT[],
-    bundle_id       TEXT,
-    app_name        TEXT,
-    category        TEXT,
-    app_description TEXT,
-    app_icp         TEXT,
-    url             TEXT,
-    service_type    TEXT CHECK (service_type IN ('http','other')),
-    service_name    TEXT,
-    favicon_mmh3    TEXT,
-    status_code     INTEGER,
-    content_length  BIGINT,
-    page_title      TEXT,
-    technologies    TEXT[]  NOT NULL DEFAULT '{}',
-    auth            JSONB[] NOT NULL DEFAULT '{}',
-    method          TEXT,
-    params          JSONB[] NOT NULL DEFAULT '{}',
+    technologies    TEXT[] NOT NULL DEFAULT '{}',
+    firmware_sha256 TEXT,
+    version         TEXT,
+    vendor          TEXT,
+    binary_path     TEXT,
+    config_path     TEXT,
+    started_by      TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    notes           TEXT NOT NULL DEFAULT '',
     extra           JSONB   NOT NULL DEFAULT '{}',
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_root_domain  ON assets(domain) WHERE type = 'root_domain';
-CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_ip           ON assets(ip)     WHERE type = 'ip';
-CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_subdomain    ON assets(domain, COALESCE(record_type,'')) WHERE type = 'subdomain';
-CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_app_bundle   ON assets(bundle_id) WHERE type = 'app' AND bundle_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_app_name     ON assets(app_name)  WHERE type = 'app' AND bundle_id IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_service_http ON assets(url) WHERE type = 'service' AND service_type = 'http';
-CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_service_other
-    ON assets(COALESCE(domain,''), COALESCE(ip,''), port, service_name) WHERE type = 'service' AND service_type = 'other';
-CREATE UNIQUE INDEX IF NOT EXISTS uq_av2_endpoint     ON assets(url, method) WHERE type = 'endpoint';
-CREATE INDEX IF NOT EXISTS idx_av2_company      ON assets(company_id)       WHERE company_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_av2_company_type ON assets(company_id, type) WHERE company_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_av2_task_ids     ON assets USING GIN(task_ids);
-CREATE INDEX IF NOT EXISTS idx_av2_domain       ON assets(domain)      WHERE domain IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_av2_root_domain  ON assets(root_domain) WHERE root_domain IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_av2_ip           ON assets(ip)          WHERE ip IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_av2_c_segment    ON assets USING GIST(c_segment inet_ops) WHERE c_segment IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_av2_technologies ON assets USING GIN(technologies) WHERE type = 'service';
-CREATE INDEX IF NOT EXISTS idx_av2_bound_domains ON assets USING GIN(bound_domains) WHERE type = 'ip';
-CREATE INDEX IF NOT EXISTS idx_av2_open_ports   ON assets USING GIN(open_ports)    WHERE type = 'ip';
-CREATE INDEX IF NOT EXISTS idx_av2_last_seen    ON assets(last_seen DESC);
-CREATE INDEX IF NOT EXISTS idx_av2_type_seen    ON assets(type, last_seen DESC);
-ALTER TABLE assets ADD COLUMN IF NOT EXISTS company_source TEXT;
-UPDATE assets SET company_source = 'explicit' WHERE company_source IS NULL;
-ALTER TABLE assets ALTER COLUMN company_source SET DEFAULT 'explicit';
-ALTER TABLE assets ALTER COLUMN company_source SET NOT NULL;
-ALTER TABLE assets DROP CONSTRAINT IF EXISTS assets_company_source_check;
-ALTER TABLE assets ADD CONSTRAINT assets_company_source_check
-    CHECK (company_source IN ('explicit','scope'));
-DROP TRIGGER IF EXISTS trg_av2_upd ON assets;
-CREATE TRIGGER trg_av2_upd BEFORE UPDATE ON assets
+
+
+-- 删掉网络资产专用列（DROP COLUMN 会连带清掉引用它们的索引与约束）
+ALTER TABLE components
+    DROP COLUMN IF EXISTS domain,
+    DROP COLUMN IF EXISTS root_domain,
+    DROP COLUMN IF EXISTS ip,
+    DROP COLUMN IF EXISTS c_segment,
+    DROP COLUMN IF EXISTS icp,
+    DROP COLUMN IF EXISTS bound_domains,
+    DROP COLUMN IF EXISTS record_type,
+    DROP COLUMN IF EXISTS record_value,
+    DROP COLUMN IF EXISTS bundle_id,
+    DROP COLUMN IF EXISTS app_name,
+    DROP COLUMN IF EXISTS category,
+    DROP COLUMN IF EXISTS app_description,
+    DROP COLUMN IF EXISTS app_icp,
+    DROP COLUMN IF EXISTS url,
+    DROP COLUMN IF EXISTS service_type,
+    DROP COLUMN IF EXISTS favicon_mmh3,
+    DROP COLUMN IF EXISTS status_code,
+    DROP COLUMN IF EXISTS content_length,
+    DROP COLUMN IF EXISTS page_title,
+    DROP COLUMN IF EXISTS auth,
+    DROP COLUMN IF EXISTS method,
+    DROP COLUMN IF EXISTS params,
+    DROP COLUMN IF EXISTS company_source;
+
+-- 老库补齐组件列
+ALTER TABLE components
+    ADD COLUMN IF NOT EXISTS firmware_sha256 TEXT,
+    ADD COLUMN IF NOT EXISTS version     TEXT,
+    ADD COLUMN IF NOT EXISTS vendor      TEXT,
+    ADD COLUMN IF NOT EXISTS binary_path TEXT,
+    ADD COLUMN IF NOT EXISTS config_path TEXT,
+    ADD COLUMN IF NOT EXISTS started_by  TEXT,
+    ADD COLUMN IF NOT EXISTS component_name TEXT,
+    ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending',
+    ADD COLUMN IF NOT EXISTS notes  TEXT NOT NULL DEFAULT '';
+
+-- 老库列名对齐：service_name → component_name（组件名）
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'components' AND column_name = 'service_name')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'components' AND column_name = 'component_name') THEN
+        ALTER TABLE components RENAME COLUMN service_name TO component_name;
+    END IF;
+END $$;
+
+-- type 值域换成组件类型（先把老数据迁正，再加 CHECK，否则老值会挡住约束）
+ALTER TABLE components ALTER COLUMN type SET DEFAULT 'other';
+ALTER TABLE components DROP CONSTRAINT IF EXISTS assets_type_check;
+ALTER TABLE components DROP CONSTRAINT IF EXISTS components_type_check;
+ALTER TABLE components DROP CONSTRAINT IF EXISTS components_status_check;
+
+-- 老库列名对齐：service_name → component_name（组件名）
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'components' AND column_name = 'service_name')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'components' AND column_name = 'component_name') THEN
+        ALTER TABLE components RENAME COLUMN service_name TO component_name;
+    END IF;
+END $$;
+
+-- 把老数据里已写进 extra 的组件信息迁成正式列
+UPDATE components SET
+    type = CASE WHEN extra->>'component_kind' IN
+                     ('web','mqtt','ros','ssh','telnet','upnp','onvif','rtsp','ftp')
+                THEN extra->>'component_kind' ELSE 'other' END,
+    component_name = COALESCE(NULLIF(component_name,''), NULLIF(extra->>'name',''),
+                              NULLIF(extra->>'component_name',''), 'unknown'),
+    version      = COALESCE(NULLIF(version,''), NULLIF(extra->>'version','')),
+    binary_path  = COALESCE(NULLIF(binary_path,''),  NULLIF(extra->>'binary','')),
+    started_by   = COALESCE(NULLIF(started_by,''), NULLIF(extra->>'started_by',''))
+WHERE extra ? 'component_kind';
+
+-- 剩下的网络资产行（域名/IP/子域/APP/端点）没有组件语义，删除
+DELETE FROM components
+ WHERE COALESCE(component_name,'') = ''
+    OR type NOT IN ('web','mqtt','ros','ssh','telnet','upnp','onvif','rtsp','ftp','other');
+
+-- 收紧约束
+ALTER TABLE components ADD CONSTRAINT components_type_check
+    CHECK (type IN ('web','mqtt','ros','ssh','telnet','upnp','onvif','rtsp','ftp','other'));
+-- 状态词沿用系统既有枚举（tasks: pending/running/completed；findings: ignored）
+ALTER TABLE components ADD CONSTRAINT components_status_check
+    CHECK (status IN ('pending','running','completed','ignored'));
+ALTER TABLE components ALTER COLUMN type SET NOT NULL;
+ALTER TABLE components ALTER COLUMN component_name SET NOT NULL;
+
+-- 索引：唯一键 = (固件, 类型, 组件名, 版本)；同任务多固件的同名组件各占一行
+DROP INDEX IF EXISTS uq_av2_root_domain;
+DROP INDEX IF EXISTS uq_av2_ip;
+DROP INDEX IF EXISTS uq_av2_subdomain;
+DROP INDEX IF EXISTS uq_av2_app_bundle;
+DROP INDEX IF EXISTS uq_av2_app_name;
+DROP INDEX IF EXISTS uq_av2_service_http;
+DROP INDEX IF EXISTS uq_av2_service_other;
+DROP INDEX IF EXISTS uq_av2_endpoint;
+DROP INDEX IF EXISTS idx_av2_company;
+DROP INDEX IF EXISTS idx_av2_company_type;
+DROP INDEX IF EXISTS idx_av2_task_ids;
+DROP INDEX IF EXISTS idx_av2_domain;
+DROP INDEX IF EXISTS idx_av2_root_domain;
+DROP INDEX IF EXISTS idx_av2_ip;
+DROP INDEX IF EXISTS idx_av2_c_segment;
+DROP INDEX IF EXISTS idx_av2_technologies;
+DROP INDEX IF EXISTS idx_av2_bound_domains;
+DROP INDEX IF EXISTS idx_av2_open_ports;
+DROP INDEX IF EXISTS idx_av2_last_seen;
+DROP INDEX IF EXISTS idx_av2_type_seen;
+
+-- 老库的 assets 表是 RENAME 过来的，列默认值随原表定义；task_ids 在老表里可空，
+-- 组件表要求非空数组，这里补默认值（幂等）。
+ALTER TABLE components ALTER COLUMN task_ids SET DEFAULT '{}';
+UPDATE components SET task_ids = '{}' WHERE task_ids IS NULL;
+ALTER TABLE components ALTER COLUMN task_ids SET NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_components_v1 ON components(
+    COALESCE(firmware_sha256,''), type, component_name, COALESCE(version,''));
+CREATE INDEX IF NOT EXISTS idx_components_task_ids ON components USING GIN(task_ids);
+CREATE INDEX IF NOT EXISTS idx_components_type      ON components(type);
+CREATE INDEX IF NOT EXISTS idx_components_status    ON components(status);
+CREATE INDEX IF NOT EXISTS idx_components_last_seen ON components(last_seen DESC);
+
+DROP TRIGGER IF EXISTS trg_av2_upd ON components;
+DROP TRIGGER IF EXISTS trg_components_upd ON components;
+CREATE TRIGGER trg_components_upd BEFORE UPDATE ON components
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TABLE IF NOT EXISTS company_scope (
@@ -274,11 +373,21 @@ BEGIN
 END $$;
 
 CREATE TABLE IF NOT EXISTS exploration_anchors (
-    node_id   BIGINT NOT NULL REFERENCES exploration_nodes(id) ON DELETE CASCADE,
-    asset_id  BIGINT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
-    PRIMARY KEY (node_id, asset_id)
+    node_id      BIGINT NOT NULL REFERENCES exploration_nodes(id) ON DELETE CASCADE,
+    component_id BIGINT NOT NULL REFERENCES components(id) ON DELETE CASCADE,
+    PRIMARY KEY (node_id, component_id)
 );
-CREATE INDEX IF NOT EXISTS idx_anchor_asset ON exploration_anchors(asset_id);
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'exploration_anchors' AND column_name = 'asset_id')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'exploration_anchors' AND column_name = 'component_id') THEN
+        ALTER TABLE exploration_anchors RENAME COLUMN asset_id TO component_id;
+    END IF;
+END $$;
+DROP INDEX IF EXISTS idx_anchor_asset;
+CREATE INDEX IF NOT EXISTS idx_anchor_component ON exploration_anchors(component_id);
 
 -- task_constraints: operator-authored operation constraints (allow/deny) for a task.
 -- Extracted by the goals decomposer at round 0 (from goal/description), editable at
@@ -642,54 +751,60 @@ CREATE TABLE IF NOT EXISTS task_relations (
 );
 CREATE INDEX IF NOT EXISTS idx_task_relations_source ON task_relations(source_task_id);
 
--- Task/asset provenance supplements the legacy assets.task_ids association. The
--- array remains the compatibility source for existing query and cleanup paths;
--- this relation records how each association was obtained for operator review.
-CREATE TABLE IF NOT EXISTS task_asset_links (
+-- 任务↔组件关联（记录关联来源，供运维核对）。components.task_ids 仍是兼容主索引。
+DO $$
+BEGIN
+    IF to_regclass('task_asset_links') IS NOT NULL
+       AND to_regclass('task_component_links') IS NULL THEN
+        ALTER TABLE task_asset_links RENAME TO task_component_links;
+        ALTER TABLE task_component_links RENAME COLUMN asset_id TO component_id;
+    END IF;
+END $$;
+DROP INDEX IF EXISTS idx_task_asset_links_asset;
+CREATE TABLE IF NOT EXISTS task_component_links (
     task_id        BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    asset_id       BIGINT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    component_id   BIGINT NOT NULL REFERENCES components(id) ON DELETE CASCADE,
     source         TEXT NOT NULL DEFAULT 'system',
     source_summary TEXT NOT NULL DEFAULT '',
     source_node_id BIGINT REFERENCES exploration_nodes(id) ON DELETE SET NULL,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (task_id, asset_id)
+    PRIMARY KEY (task_id, component_id)
 );
-CREATE INDEX IF NOT EXISTS idx_task_asset_links_asset ON task_asset_links(asset_id, task_id);
-CREATE INDEX IF NOT EXISTS idx_task_asset_links_node ON task_asset_links(source_node_id)
+CREATE INDEX IF NOT EXISTS idx_task_component_links_component ON task_component_links(component_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_task_component_links_node ON task_component_links(source_node_id)
     WHERE source_node_id IS NOT NULL;
-DROP TRIGGER IF EXISTS trg_task_asset_links_upd ON task_asset_links;
-CREATE TRIGGER trg_task_asset_links_upd BEFORE UPDATE ON task_asset_links
+DROP TRIGGER IF EXISTS trg_task_asset_links_upd ON task_component_links;
+DROP TRIGGER IF EXISTS trg_task_component_links_upd ON task_component_links;
+CREATE TRIGGER trg_task_component_links_upd BEFORE UPDATE ON task_component_links
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- Keep provenance rows synchronized when existing asset upsert paths append or
--- remove task ids. Detailed callers overwrite the generic source after upsert.
-CREATE OR REPLACE FUNCTION sync_task_asset_links() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION sync_task_component_links() RETURNS trigger AS $$
 BEGIN
-    INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
+    INSERT INTO task_component_links(task_id, component_id, source, source_summary)
     SELECT task.id, NEW.id, 'system', '任务执行期间自动关联'
     FROM unnest(NEW.task_ids) AS requested(task_id)
     JOIN tasks task ON task.id=requested.task_id AND task.deleted_at IS NULL
-    ON CONFLICT (task_id, asset_id) DO NOTHING;
+    ON CONFLICT (task_id, component_id) DO NOTHING;
 
-    DELETE FROM task_asset_links link
-    WHERE link.asset_id=NEW.id
+    DELETE FROM task_component_links link
+    WHERE link.component_id=NEW.id
       AND NOT (link.task_id=ANY(NEW.task_ids));
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
-DROP TRIGGER IF EXISTS trg_assets_task_links ON assets;
-CREATE TRIGGER trg_assets_task_links AFTER INSERT OR UPDATE OF task_ids ON assets
-    FOR EACH ROW EXECUTE FUNCTION sync_task_asset_links();
+DROP TRIGGER IF EXISTS trg_assets_task_links ON components;
+DROP TRIGGER IF EXISTS trg_components_task_links ON components;
+CREATE TRIGGER trg_components_task_links AFTER INSERT OR UPDATE OF task_ids ON components
+    FOR EACH ROW EXECUTE FUNCTION sync_task_component_links();
+DROP FUNCTION IF EXISTS sync_task_asset_links();
 
--- Existing installations receive an auditable legacy source without rewriting
--- task_ids. Ignore stale array ids that no longer resolve to a live task.
-INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
-SELECT task.id, asset.id, 'legacy', '由历史任务资产关联迁移'
-FROM assets asset
-CROSS JOIN LATERAL unnest(asset.task_ids) AS requested(task_id)
+INSERT INTO task_component_links(task_id, component_id, source, source_summary)
+SELECT task.id, comp.id, 'legacy', '由历史任务资产关联迁移'
+FROM components comp
+CROSS JOIN LATERAL unnest(comp.task_ids) AS requested(task_id)
 JOIN tasks task ON task.id=requested.task_id AND task.deleted_at IS NULL
-ON CONFLICT (task_id, asset_id) DO NOTHING;
+ON CONFLICT (task_id, component_id) DO NOTHING;
 
 -- Ordered task-level LLM failover chain. A quota-exhausted entry is skipped
 -- until the user saves/resets the chain, which clears all failure state.
@@ -731,30 +846,8 @@ WHERE t.active_llm_profile_id IS NULL
 
 -- =====================================================================
 -- 资产合集（Asset Collections）：以 FOFA 查询语法命名、精确冻结一次收集到的
--- 那批资产的「显式成员清单」。与「企业」不同，合集是显式成员(asset_collection_members)
--- 而非按规则归并，也不参与 assets.company_id 归属；可作为任务目标
--- (task_scope kind='collection')。目前由 FOFA 资产同步写入。
--- =====================================================================
-CREATE TABLE IF NOT EXISTS asset_collections (
-    id         BIGSERIAL PRIMARY KEY,
-    name       TEXT NOT NULL,
-    nkey       TEXT NOT NULL UNIQUE,
-    query      TEXT NOT NULL DEFAULT '',
-    source     TEXT NOT NULL DEFAULT 'fofa',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-DROP TRIGGER IF EXISTS trg_asset_collections_upd ON asset_collections;
-CREATE TRIGGER trg_asset_collections_upd BEFORE UPDATE ON asset_collections
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
-CREATE TABLE IF NOT EXISTS asset_collection_members (
-    collection_id BIGINT NOT NULL REFERENCES asset_collections(id) ON DELETE CASCADE,
-    asset_id      BIGINT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (collection_id, asset_id)
-);
-CREATE INDEX IF NOT EXISTS idx_collection_members_asset ON asset_collection_members(asset_id);
+-- 资产合集（FOFA 同步产物）随资产概念一起下线，DDL 已删除；
+-- 老库的 asset_collections / asset_collection_members 在下面 task_scope 段落里 DROP。
 
 -- 任务测试范围（资产覆盖度的分母 + 授权边界）。
 --   自动填(source='auto')：insertAssets 顶层按 worker 显式插入的资产类型加保守范围
@@ -767,7 +860,6 @@ CREATE TABLE IF NOT EXISTS task_scope (
     task_id     BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     kind        TEXT NOT NULL CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword','collection','firmware','device')),
     company_id  BIGINT REFERENCES companies(id) ON DELETE CASCADE,  -- kind='company'
-    collection_id BIGINT REFERENCES asset_collections(id) ON DELETE CASCADE,  -- kind='collection'
     domain      TEXT,          -- root_domain / subdomain
     net         CIDR,          -- ip / cidr
     value       TEXT,          -- icp / keyword / firmware(文件名) / device(型号)
@@ -778,25 +870,27 @@ CREATE TABLE IF NOT EXISTS task_scope (
 );
 -- 旧库升级：扩展任务范围，使其与企业范围的单文本框识别能力一致。
 ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS value TEXT;
--- 资产合集作为任务目标：补列 collection_id + 扩 kind 白名单。
-ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS collection_id BIGINT REFERENCES asset_collections(id) ON DELETE CASCADE;
 -- 固件/靶机作为任务目标：固件靠 value(文件名) + sha256 唯一标识；靶机用 net 存 IP、value 存型号。
--- 两者都不与 assets 匹配，不进覆盖度分母（靶机若另登记 kind='ip'，覆盖度只认 ip 那行）。
+-- 组件已由 components 表承载，任务范围只记录授权边界，不再用于覆盖度匹配。
 ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS sha256 TEXT;
+-- 资产合集下线：先摘列（连带外键）再删表。
+ALTER TABLE task_scope DROP COLUMN IF EXISTS collection_id;
+DROP INDEX IF EXISTS idx_ts_collection;
+DROP TABLE IF EXISTS asset_collection_members;
+DROP TABLE IF EXISTS asset_collections;
 ALTER TABLE task_scope DROP CONSTRAINT IF EXISTS task_scope_kind_check;
 ALTER TABLE task_scope ADD CONSTRAINT task_scope_kind_check
-    CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword','collection','firmware','device'));
--- 去重：同一 task 的同一条范围只存一次（自动填批量插入靠它幂等）。纳入 collection_id 与 sha256。
+    CHECK (kind IN ('company','root_domain','subdomain','ip','cidr','icp','keyword','firmware','device'));
+-- 去重：同一 task 的同一条范围只存一次（自动填批量插入靠它幂等）。
 DROP INDEX IF EXISTS uq_task_scope;
 DROP INDEX IF EXISTS uq_task_scope_v2;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope_v4 ON task_scope(
-    task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0), COALESCE(collection_id,0), COALESCE(value,''), COALESCE(sha256,''));
--- 先建 v4 再删 v3：反过来的话，万一 v4 建失败，表上就没有唯一索引了。
 DROP INDEX IF EXISTS uq_task_scope_v3;
+DROP INDEX IF EXISTS uq_task_scope_v4;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope_v5 ON task_scope(
+    task_id, kind, COALESCE(domain,''), COALESCE(net::text,''), COALESCE(company_id,0), COALESCE(value,''), COALESCE(sha256,''));
 CREATE INDEX IF NOT EXISTS idx_ts_domain  ON task_scope(domain) WHERE kind IN ('root_domain','subdomain');
 CREATE INDEX IF NOT EXISTS idx_ts_net     ON task_scope USING GIST(net inet_ops) WHERE kind IN ('ip','cidr');
 CREATE INDEX IF NOT EXISTS idx_ts_company ON task_scope(company_id) WHERE kind = 'company';
-CREATE INDEX IF NOT EXISTS idx_ts_collection ON task_scope(collection_id) WHERE kind = 'collection';
 
 -- =====================================================================
 -- E. Agents / 提示词模板 / 变量目录
@@ -1128,7 +1222,7 @@ CREATE TABLE IF NOT EXISTS findings (
     summary     TEXT NOT NULL DEFAULT '',
     evidence    TEXT NOT NULL DEFAULT '',
     worker      TEXT NOT NULL DEFAULT '',
-    asset_ids   JSONB NOT NULL DEFAULT '[]',
+    component_ids JSONB NOT NULL DEFAULT '[]',
     -- 处置状态：pending 待处理 / in_progress 处理中 / confirmed 已确认 / resolved 已处理 / fixed 已修复 /
     -- false_positive 误报 / ignored 忽略 / duplicate 重复 / risk_accepted 风险接受。
     -- 取值不加 CHECK：旧库靠下面的 ALTER 补列,CHECK 无法回填,统一由 server 侧白名单校验。
@@ -1143,8 +1237,20 @@ ALTER TABLE findings ADD COLUMN IF NOT EXISTS report TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_findings_task ON findings(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_time ON findings(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status, created_at DESC);
--- 「按资产」视图靠 asset_ids @> '[<id>]' 反查发现,没有这个 GIN 索引就是全表扫。
-CREATE INDEX IF NOT EXISTS idx_findings_asset_ids ON findings USING GIN(asset_ids jsonb_path_ops);
+-- 「按组件」视图靠 component_ids @> '[<id>]' 反查发现,没有这个 GIN 索引就是全表扫。
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'findings' AND column_name = 'asset_ids')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'findings' AND column_name = 'component_ids') THEN
+        ALTER TABLE findings RENAME COLUMN asset_ids TO component_ids;
+    END IF;
+END $$;
+-- 老值存的是资产 id，语义已错位，清空避免误挂。
+UPDATE findings SET component_ids = '[]' WHERE component_ids::text <> '[]';
+DROP INDEX IF EXISTS idx_findings_asset_ids;
+CREATE INDEX IF NOT EXISTS idx_findings_component_ids ON findings USING GIN(component_ids jsonb_path_ops);
 
 -- 手动复测属于独立会话；结论与原漏洞处置状态分开保存。
 CREATE TABLE IF NOT EXISTS finding_retests (
@@ -1299,61 +1405,12 @@ ALTER TABLE side_question_sessions ADD COLUMN IF NOT EXISTS memory JSONB NOT NUL
 ALTER TABLE side_question_requests ADD COLUMN IF NOT EXISTS context_info JSONB NOT NULL DEFAULT '{}';
 
 -- =====================================================================
--- 资产拦截规则（全局黑名单）
--- 独立于 §K 命令拦截(intercept_rules)：intercept_rules 匹配工具名/入参文本，
--- 这张表匹配「目标资产」——全等/模糊的域名·IP·URL 以及 CIDR 网段。
--- 仅存规则；具体的匹配/拦截逻辑在别处实现。
--- kind 七种：
---   exact_domain / exact_ip / exact_url  —— 全等匹配
---   fuzzy_domain / fuzzy_ip / fuzzy_url  —— 模糊匹配
---   cidr                                 —— CIDR 网段
+-- 资产拦截（全局 asset_intercept_rules + 任务级 task_intercept_rules）整块下线：
+-- 组件没有域名/IP/URL/CIDR 语义，这套规则再也匹配不到任何对象。
+-- 命令拦截（intercept_rules / 审批）不在此列，照常保留。
 -- =====================================================================
-CREATE TABLE IF NOT EXISTS asset_intercept_rules (
-    id          BIGSERIAL PRIMARY KEY,
-    enabled     BOOLEAN NOT NULL DEFAULT true,
-    kind        TEXT NOT NULL CHECK (kind IN (
-                    'exact_domain', 'exact_ip', 'exact_url',
-                    'fuzzy_domain', 'fuzzy_ip', 'fuzzy_url',
-                    'cidr')),
-    pattern     TEXT NOT NULL,
-    note        TEXT NOT NULL DEFAULT '',
-    builtin     BOOLEAN NOT NULL DEFAULT false,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_asset_intercept_enabled ON asset_intercept_rules(enabled);
-DROP TRIGGER IF EXISTS trg_asset_intercept_rules_upd ON asset_intercept_rules;
-CREATE TRIGGER trg_asset_intercept_rules_upd BEFORE UPDATE ON asset_intercept_rules
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
--- =====================================================================
--- 任务级资产拦截/允许规则
--- 与全局 asset_intercept_rules 同构（kind/pattern/note/enabled），但按 task_id
--- 关联、随任务级联删除；创建任务时录入、任务详情里可编辑。
--- action: 'block'=拦截(禁止测试)  'allow'=允许(白名单)。
--- 执行判定：先按 拦截规则(全局 ∪ 任务block) 匹配，命中即禁止；未命中且该任务存在
--- 启用的 allow 规则时，须命中某条 allow 才放行，否则「不允许测试」。
--- =====================================================================
-CREATE TABLE IF NOT EXISTS task_intercept_rules (
-    id          BIGSERIAL PRIMARY KEY,
-    task_id     BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    enabled     BOOLEAN NOT NULL DEFAULT true,
-    action      TEXT NOT NULL DEFAULT 'block' CHECK (action IN ('block','allow')),
-    kind        TEXT NOT NULL CHECK (kind IN (
-                    'exact_domain', 'exact_ip', 'exact_url',
-                    'fuzzy_domain', 'fuzzy_ip', 'fuzzy_url',
-                    'cidr')),
-    pattern     TEXT NOT NULL,
-    note        TEXT NOT NULL DEFAULT '',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_task_intercept_task ON task_intercept_rules(task_id);
--- 补旧库(本会话早前建过该表、无 action 列)：加列(带 IF NOT EXISTS)。
-ALTER TABLE task_intercept_rules ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'block';
-DROP TRIGGER IF EXISTS trg_task_intercept_rules_upd ON task_intercept_rules;
-CREATE TRIGGER trg_task_intercept_rules_upd BEFORE UPDATE ON task_intercept_rules
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+DROP TABLE IF EXISTS task_intercept_rules;
+DROP TABLE IF EXISTS asset_intercept_rules;
 
 -- =====================================================================
 -- M. 漏洞 IM 推送

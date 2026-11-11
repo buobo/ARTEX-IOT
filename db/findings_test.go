@@ -420,21 +420,21 @@ func TestAddFindingFollowUpIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.DeleteTask(task.ID)
-	assetID, err := d.Assets().UpsertRootDomain(UpsertRootDomainReq{
+	componentID, err := d.Components().UpsertRootDomain(UpsertRootDomainReq{
 		Domain: fmt.Sprintf("follow-up-%d.example.test", time.Now().UnixNano()),
 		TaskID: task.ID,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Exec(`DELETE FROM assets WHERE id=$1`, assetID)
+	defer d.Exec(`DELETE FROM components WHERE id=$1`, componentID)
 
 	store := d.Exploration(task.ExplorationID)
-	findingNodeID, err := store.AddNode(KindFinding, map[string]any{"summary": "source"}, 5, "confirmed", "worker", []int64{assetID})
+	findingNodeID, err := store.AddNode(KindFinding, map[string]any{"summary": "source"}, 5, "confirmed", "worker", []int64{componentID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	findingID, err := d.AddFinding(task.ID, findingNodeID, "test", "source", SeverityHigh, "source", "", "worker", []int64{assetID})
+	findingID, err := d.AddFinding(task.ID, findingNodeID, "test", "source", SeverityHigh, "source", "", "worker", []int64{componentID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +465,7 @@ func TestAddFindingFollowUpIntent(t *testing.T) {
 		t.Fatalf("follow-up intent metadata: %+v", node)
 	}
 	var anchorCount, edgeCount int
-	if err := d.QueryRow(`SELECT COUNT(*) FROM exploration_anchors WHERE node_id=$1 AND asset_id=$2`, intentID, assetID).Scan(&anchorCount); err != nil {
+	if err := d.QueryRow(`SELECT COUNT(*) FROM exploration_anchors WHERE node_id=$1 AND component_id=$2`, intentID, componentID).Scan(&anchorCount); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.QueryRow(`SELECT COUNT(*) FROM exploration_edges

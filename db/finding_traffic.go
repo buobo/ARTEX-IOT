@@ -328,7 +328,7 @@ func (d *DB) EditFindingTraffic(ctx context.Context, findingID, bindingID, versi
 type RecordFindingInput struct {
 	TaskID, ExplorationID, IntentID                      int64
 	VulnClass, Name, Severity, Summary, Evidence, Worker string
-	AssetIDs                                             []int64
+	ComponentIDs                                             []int64
 }
 
 type RecordedFinding struct {
@@ -367,8 +367,8 @@ func RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, pre
 VALUES($1,'finding',$2,9,'confirmed',$3) RETURNING id`, in.ExplorationID, string(payload), in.Worker).Scan(&out.NodeID); err != nil {
 		return nil, err
 	}
-	for _, asset := range in.AssetIDs {
-		if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id,asset_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, out.NodeID, asset); err != nil {
+	for _, component := range in.ComponentIDs {
+		if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id,component_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, out.NodeID, component); err != nil {
 			return nil, err
 		}
 	}
@@ -377,12 +377,12 @@ VALUES($1,'finding',$2,9,'confirmed',$3) RETURNING id`, in.ExplorationID, string
 			return nil, err
 		}
 	}
-	assets := in.AssetIDs
-	if assets == nil {
-		assets = []int64{}
+	components := in.ComponentIDs
+	if components == nil {
+		components = []int64{}
 	}
-	raw, _ := json.Marshal(assets)
-	if err := tx.QueryRow(`INSERT INTO findings(task_id,node_id,vulnclass,name,severity,summary,evidence,worker,asset_ids)
+	raw, _ := json.Marshal(components)
+	if err := tx.QueryRow(`INSERT INTO findings(task_id,node_id,vulnclass,name,severity,summary,evidence,worker,component_ids)
 VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, in.TaskID, out.NodeID, in.VulnClass, in.Name, in.Severity, in.Summary, in.Evidence, in.Worker, string(raw)).Scan(&out.FindingID); err != nil {
 		return nil, err
 	}
@@ -397,7 +397,7 @@ VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, in.TaskID, out.NodeI
 		Name:      in.Name,
 		Severity:  in.Severity,
 		Summary:   in.Summary,
-		AssetIDs:  assets,
+		ComponentIDs:  components,
 	})
 	if err := AddFindingTrafficTx(tx, out.FindingID, prepared); err != nil {
 		return nil, err

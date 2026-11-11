@@ -379,17 +379,17 @@ FROM notification_channels WHERE enabled ORDER BY id`)
 	return out, rows.Err()
 }
 
-// NotificationAssetNames 把资产 id 解析成简短展示名，供推送消息使用。
+// NotificationComponentNames 把资产 id 解析成简短展示名，供推送消息使用。
 //
 // 返回顺序与入参一致、长度可能小于入参（不存在的 id 被跳过）。保持入参顺序是
 // 为了让同一条漏洞的消息在多次投递里资产顺序稳定——否则重试后收到的消息里
 // 资产次序变了，会被误读成「资产变了」。
-func (d *DB) NotificationAssetNames(ctx context.Context, ids []int64) ([]string, error) {
+func (d *DB) NotificationComponentNames(ctx context.Context, ids []int64) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	ph, args := placeholders(1, ids)
-	rows, err := d.QueryContext(ctx, `SELECT id, type, domain, ip, url, app_name, bundle_id FROM assets WHERE id IN (`+ph+`)`, args...)
+	rows, err := d.QueryContext(ctx, `SELECT id, type, component_name, COALESCE(version, ''), COALESCE(binary_path, '') FROM components WHERE id IN (`+ph+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -397,15 +397,16 @@ func (d *DB) NotificationAssetNames(ctx context.Context, ids []int64) ([]string,
 	labels := map[int64]string{}
 	for rows.Next() {
 		var (
-			id                int64
-			typ               string
-			domain, ip, url   sql.NullString
-			appName, bundleID sql.NullString
+			id      int64
+			typ     string
+			name    sql.NullString
+			version sql.NullString
+			binary  sql.NullString
 		)
-		if err := rows.Scan(&id, &typ, &domain, &ip, &url, &appName, &bundleID); err != nil {
+		if err := rows.Scan(&id, &typ, &name, &version, &binary); err != nil {
 			return nil, err
 		}
-		labels[id] = assetDisplayName(typ, domain.String, ip.String, url.String, appName.String, bundleID.String)
+		labels[id] = componentDisplayName(typ, name.String, version.String, binary.String)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -424,30 +425,21 @@ func (d *DB) NotificationAssetNames(ctx context.Context, ids []int64) ([]string,
 	return out, nil
 }
 
-// assetDisplayName 按资产类型挑选最具辨识度的标识。
+// componentDisplayName 按资产类型挑选最具辨识度的标识。
 // 兜底返回空串，由调用方决定怎么呈现「名字取不到的资产」——本函数不臆造占位符，
 // 否则「资产#42」这种噪音会混进推送消息里，读者还以为是真实域名。
-func assetDisplayName(typ, domain, ip, url, appName, bundleID string) string {
-	pick := func(vals ...string) string {
-		for _, v := range vals {
-			if strings.TrimSpace(v) != "" {
-				return v
-			}
-		}
-		return ""
+func componentDisplayName(typ, name, version, binary string) string {
+	label := strings.TrimSpace(name)
+	if label == "" {
+		label = strings.TrimSpace(binary)
 	}
-	switch typ {
-	case "root_domain", "subdomain":
-		return domain
-	case "ip":
-		return ip
-	case "app":
-		return pick(appName, bundleID)
-	case "service", "endpoint":
-		return pick(url, domain, ip)
-	default:
-		return pick(domain, ip, url, appName)
+	if label == "" {
+		label = typ
 	}
+	if v := strings.TrimSpace(version); v != "" {
+		label += " " + v
+	}
+	return label
 }
 
 // SetFindingStatusWithNotify 更新漏洞处置状态，并在同一事务里登记一条状态变更
@@ -484,11 +476,11 @@ func SetFindingStatusTx(ctx context.Context, tx *sql.Tx, id int64, status string
 	var (
 		vulnclass, name, severity, summary string
 		taskID                             sql.NullInt64
-		assetIDs                           []byte
+		componentIDs                           []byte
 	)
-	scanErr := tx.QueryRowContext(ctx, `SELECT vulnclass, name, severity, summary, task_id, asset_ids, status
+	scanErr := tx.QueryRowContext(ctx, `SELECT vulnclass, name, severity, summary, task_id, component_ids, status
 FROM findings WHERE id=$1 FOR UPDATE`, id).
-		Scan(&vulnclass, &name, &severity, &summary, &taskID, &assetIDs, &from)
+		Scan(&vulnclass, &name, &severity, &summary, &taskID, &componentIDs, &from)
 	if scanErr == sql.ErrNoRows {
 		return "", false, false, false, nil
 	}
@@ -504,8 +496,8 @@ FROM findings WHERE id=$1 FOR UPDATE`, id).
 	if _, err := tx.ExecContext(ctx, `UPDATE findings SET status=$2 WHERE id=$1`, id, status); err != nil {
 		return from, true, false, false, err
 	}
-	var assets []int64
-	_ = json.Unmarshal(assetIDs, &assets)
+	var components []int64
+	_ = json.Unmarshal(componentIDs, &components)
 	notified = RecordNotificationEventTx(ctx, tx, notify.EventFindingStatusChanged, id, notify.Snapshot{
 		Kind:       notify.EventFindingStatusChanged,
 		FindingID:  id,
@@ -514,7 +506,7 @@ FROM findings WHERE id=$1 FOR UPDATE`, id).
 		Name:       name,
 		Severity:   severity,
 		Summary:    summary,
-		AssetIDs:   assets,
+		ComponentIDs:   components,
 		FromStatus: from,
 		ToStatus:   status,
 	})

@@ -151,7 +151,7 @@ func (w *Worker) SetRunTimeout(run time.Duration) {
 // settleWrapUpPrompt is injected by the SDK settlement phase when a worker hits its
 // turn/time budget: stop probing, write back what was found, then end with a
 // plain-text one-liner (which becomes this run's displayed result).
-const settleWrapUpPrompt = "你即将因预算耗尽被终止。不要再运行任何命令/探测。请依次：(1) 把你上面已识别但还没写回的内容逐条写回——新资产用 insert_assets、探索结论/事实用 record_fact、确认漏洞用 report_finding；(2) **最后单独用一句话纯文本**总结你做了什么、得到哪些关键结论（这句会作为本次运行的结果展示，务必输出）。"
+const settleWrapUpPrompt = "你即将因预算耗尽被终止。不要再运行任何命令/探测。请依次：(1) 把你上面已识别但还没写回的内容逐条写回——新组件用 insert_components、探索结论/事实用 record_fact、确认漏洞用 report_finding；(2) **最后单独用一句话纯文本**总结你做了什么、得到哪些关键结论（这句会作为本次运行的结果展示，务必输出）。"
 
 func NewWorker(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int, extra ...actool.CoreTool) *Worker {
 	return &Worker{prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns, extraTools: extra}
@@ -230,14 +230,14 @@ func proxyEnv(proxyAddr, caCert string) []string {
 const workerDefaultTmpl = `你是固件漏洞挖掘系统的"执行者"(work agent)。你领到【一条意图】(一句话挖掘方向：组件 + 入口 + 手法)，唯一职责：**完成这一条意图、把发现写回知识图谱、然后停止返回。**
 
 **边界（红线）**：
-1. **只做你领到的这一条意图**。**探本意图时若瞥见本意图之外值得深挖的线索**（报错泄露的路径、可能与其它资产联动的点、疑似另一条利用链的入口），**在 fact 的 summary 里点一句交给规划者**。
+1. **只做你领到的这一条意图**。**探本意图时若瞥见本意图之外值得深挖的线索**（报错泄露的路径、可能与其它组件联动的点、疑似另一条利用链的入口），**在 fact 的 summary 里点一句交给规划者**。
 2. 初次受阻（payload 被过滤 / 404 / 注入无回显）不代表已探透——把本意图的所有绕过手段走完再输出结论；
 3. 只在授权范围内操作。系统提示顶部若附【操作约束】，那是最高优先级红线：每条命令/探测执行前先自检，违反即不做（哪怕它落在你领到的意图里）。
 
 **动手前先认组件**：先说清这条意图指向哪个组件——名字、版本、怎么启动（init 脚本/配置）、配置文件在哪。一律从解包产物里读（ls / file / strings / 读配置文件），不许凭版本号或外部资料猜；认不出来就先 record_fact 记一条 inferred 事实，把"怎么认"作为新问题写回去。
 
 **边发现边写回**（写进图才算数，脑子/文字里的不算；每得一个结果立刻写，别攒到最后被步数耗尽丢掉）。三种写回，别串图：
-- **新资产/资源 → insert_assets（资产图）**：子域 / service / endpoint / 指纹 / 凭据 等一切资产【本身】。**这里只登记资产；探索结论/判断不写这里，用 record_fact。** 组件也走这里登记——一个组件一条，type=service，extra 里带 component_kind（web/mqtt/ros/ssh…）、name、version、binary、config、started_by。
+- **组件 → insert_components（组件库）**：固件里的一个可指认组件登记一行——type（web/mqtt/ros/ssh/telnet/upnp/onvif/rtsp/ftp/other）、component_name、version、vendor、binary_path、config_path、started_by、port、technologies、notes。**这里只登记组件本身；探索结论/判断不写这里，用 record_fact。** 同一组件不会重复建行（按 firmware_sha256+type+name+version 去重，重复登记只补空字段）。
 - **探索结论/事实 → record_fact（探索图，传 intent_id）**：都用它。**多个观察汇总成【一条】事实**（summary 一句总结 + detail写对总结的拓展，依靠真实的执行过程），不要一个属性一条、一意图通常只一条，拆碎会让图谱无限膨胀——**默认就写一条，能并进 detail 的都并进去**；仅当确有【彼此完全独立、无法归并】的结论时才用 facts 数组分条，这是极少数例外，不是常规。**只写增量**：只记这次【新得到】的，别把已有事实换措辞重记（只印证已有、无新增就不必记）。**只写真实看到的**：给 evidence（一行：命令+最能证明的一两行输出，简洁，细节在 detail）、标 confidence（observed=直接看到 / inferred=据现象推断）。
 - **确认漏洞 → report_finding（探索图，传 intent_id）**：**只有你本次真实触发过、拿到可复现证据（请求/响应或命令输出）才用**。**触发成功后必须把 PoC 存成文件**（脚本或命令序列，统一写到本任务的 poc/ 目录，目录不存在先建），并在 evidence 里单独写一行 PoC: poc/<文件名>；只贴一段请求、没有能重跑的脚本，不算 PoC。**同时在该目录的 INDEX.md 追加一行**（| 文件名 | 组件 | 一句话漏洞 | finding id |；只追加、不重写，文件不存在就先写表头）。**结论分两层**：PoC 能跑通、有回包/输出 → 才登记 finding；只从版本号、字符串、代码推出来的 → 只能 record_fact 标 inferred。严禁把"版本/指纹匹配到 CVE""参数看起来可注入""外部漏洞库/更新日志/代码 diff 推断"当已确认，也不要用查 CVE 库或对比补丁版本替代实际触发。触发不了但有嫌疑 → 用 record_fact 记一条 inferred 事实（嫌疑点+为何未触发）交规划者，别硬记成 finding。
 
@@ -299,20 +299,20 @@ func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 // the intent is the worker's whole job. It used to live in the system prompt; it now
 // rides in the first user turn (together with the situational overview) so the system
 // prompt stays static/role-only — same move as the planner's situational block.
-// intentAssetIDs pulls the intent's target asset ids out of its payload
-// (planner's add_intent stores them as a numeric asset_ids array). nil on absence
+// intentComponentIDs pulls the intent's target component ids out of its payload
+// (planner's add_intent stores them as a numeric component_ids array). nil on absence
 // or malformed payload.
-func intentAssetIDs(intent *db.Node) []int64 {
+func intentComponentIDs(intent *db.Node) []int64 {
 	if intent == nil {
 		return nil
 	}
 	var p struct {
-		AssetIDs []int64 `json:"asset_ids"`
+		ComponentIDs []int64 `json:"component_ids"`
 	}
 	if err := json.Unmarshal(intent.Payload, &p); err != nil {
 		return nil
 	}
-	return p.AssetIDs
+	return p.ComponentIDs
 }
 
 func renderIntentTask(intent *db.Node) string {
@@ -322,7 +322,7 @@ func renderIntentTask(intent *db.Node) string {
 // renderWorkerGraphOverview folds the global situational snapshot into the worker's
 // launch USER message for AWARENESS ONLY. The framing is deliberately strong: the overview
 // must NOT widen the worker's job — it still does only its assigned intent. Its sole
-// purpose is letting the worker read context (existing facts/assets/hints)
+// purpose is letting the worker read context (existing facts/components/hints)
 // so it avoids redundant work and doesn't re-derive what others already found.
 func renderWorkerGraphOverview(data map[string]any) string {
 	// coverage 是给规划者判断「哪类测得少 / 要不要扩范围」的信号，与 worker「只做领到的
@@ -335,7 +335,7 @@ func renderWorkerGraphOverview(data map[string]any) string {
 	}
 	return "\n\n【全局探索态势（只读，帮你把自己这条意图放进大局看）】：\n" +
 		"下面是整个任务当前的探索概况。用途有两个：一是知道别人已发现什么，别重复；二是让你探自己这条意图时，能联想到它和全局的关系。\n" +
-		"**发散是好事**：探本意图时尽管深想、多联想。唯一的界线是——别真的动手去执行别的意图（那是别的 worker 的事，由规划者调度）。但凡你联想到有价值的线索（跨资产的联动、疑似另一条利用链的入口、全局层面的可疑点），**务必写进 fact 交规划者**——这是你重要的产出，不是可有可无。宁可多报一条让规划者判断，也别自己咽下去。\n" +
+		"**发散是好事**：探本意图时尽管深想、多联想。唯一的界线是——别真的动手去执行别的意图（那是别的 worker 的事，由规划者调度）。但凡你联想到有价值的线索（跨组件的联动、疑似另一条利用链的入口、全局层面的可疑点），**务必写进 fact 交规划者**——这是你重要的产出，不是可有可无。宁可多报一条让规划者判断，也别自己咽下去。\n" +
 		string(b)
 }
 
@@ -347,8 +347,8 @@ func renderWorkerGraphOverview(data map[string]any) string {
 // Returns the terminal reason (so the engine can distinguish completed vs
 // max_turns) and a per-kind breakdown of what was written back (so an intent that
 // explored but persisted nothing isn't mistaken for done, and the engine can log
-// facts/assets/findings separately instead of lumping them under "facts").
-func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string)) (harness.TerminalReason, WriteCounts, error) {
+// facts/components/findings separately instead of lumping them under "facts").
+func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.ComponentStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string)) (harness.TerminalReason, WriteCounts, error) {
 	return w.execute(ctx, name, taskID, as, ts, intent, hooks, emit, enr, notifyFinding, "", "")
 }
 
@@ -356,21 +356,21 @@ func (w *Worker) Execute(ctx context.Context, name string, taskID int64, as *db.
 // human-authored message. The HTTP handler does not edit the transcript;
 // agentcore records the message as a normal user turn when this Worker starts.
 // This keeps Worker continuation identical to the regular agent chat flow.
-func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
+func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int64, as *db.ComponentStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
 	return w.execute(ctx, name, taskID, as, ts, intent, hooks, emit, enr, notifyFinding, strings.TrimSpace(requestID), strings.TrimSpace(message))
 }
 
-func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
+func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.ComponentStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
 	tsx := NewToolSet(ts, name)
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
 	tsx.SetCoverageEnabled(coverageEnabled)
 	if as != nil {
-		tsx.SetAssetStore(as, as.Companies())
+		tsx.SetComponentStore(as, as.Companies())
 	}
-	tsx.SetOwnerNode(intent.ID)         // assets this worker discovers anchor to its intent → visible to the task
-	tsx.SetEnrich(enr)                  // async DNS/HTTP auto-completion for assets this worker writes
+	tsx.SetOwnerNode(intent.ID)         // components this worker discovers anchor to its intent → visible to the task
+	tsx.SetEnrich(enr)                  // async DNS/HTTP auto-completion for components this worker writes
 	tsx.SetNotifyFinding(notifyFinding) // report_finding 落库时当场唤醒 planner，带上「哪个意图+finding」
 	// base = built-in worker tools ∪ host tools (traffic) ∪ default tools (incl. Bash);
 	// then augment with the agent's visible skills/MCP. During the SDK settlement
@@ -383,7 +383,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
 
-	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标资产
+	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标组件
 	// 原始数据一起放进 system prompt：system 每次 run 都重新拼一遍、绝不会被 compaction 压掉，
 	// 长 run 里意图永远在场，续跑时也不依赖 transcript 历史是否留住那条首消息。代价是 system
 	// 混入 per-intent 易变数据、失去跨意图缓存复用；这是刻意的取舍（意图丢失比省 token 严重得多）。
@@ -399,27 +399,22 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}
-	// 意图块 → 意图锚定资产块 → 启动指令，依次追加到 system 尾部（与 constraintBlock 同一套追加法）。
+	// 意图块 → 意图锚定组件块 → 启动指令，依次追加到 system 尾部（与 constraintBlock 同一套追加法）。
 	sysBody += renderIntentTask(intent)
 	if as != nil {
-		if ids := intentAssetIDs(intent); len(ids) > 0 {
-			if assets, err := as.GetByIDs(ids); err == nil && len(assets) > 0 {
-				if b, err := json.Marshal(assets); err == nil {
-					sysBody += "\n\n本意图 asset_ids 对应的目标资产：\n" + string(b)
+		if ids := intentComponentIDs(intent); len(ids) > 0 {
+			if components, err := as.GetByIDs(ids); err == nil && len(components) > 0 {
+				if b, err := json.Marshal(components); err == nil {
+					sysBody += "\n\n本意图 component_ids 对应的目标组件：\n" + string(b)
 				}
-				// 意图明确针对的这些资产 → 自动纳入任务测试范围（与 insertAssets 同一套
+				// 意图明确针对的这些组件 → 自动纳入任务测试范围（与 insert_components 同一套
 				// 保守粒度）。upsertTaskScope 的 ON CONFLICT DO NOTHING + uq_task_scope
 				// 唯一索引保证不会重复添加；重跑/重试同样是幂等 no-op。
-				// 资产覆盖度功能关闭时不再累积测试范围(分母)。
-				if coverageEnabled {
-					for _, a := range assets {
-						_ = as.AddAutoScope(taskID, a.Type, a.Domain, a.URL, a.IP)
-					}
-				}
+				// 覆盖度功能关闭时不再累积测试范围(分母)。
 			}
 		}
 	}
-	sysBody += "\n\n开始执行上面这条意图：只做它、只产生事实、assets、finding、做完即停。"
+	sysBody += "\n\n开始执行上面这条意图：只做它、只产生事实、components、finding、做完即停。"
 	system, boundary := deferredSystem(sysBody, def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
@@ -484,12 +479,12 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 			emit(r)
 		}
 	}
-	// 意图 / 启动指令 / 意图锚定资产已随 system prompt 下发（见上方 sysBody 组装）。
+	// 意图 / 启动指令 / 意图锚定组件已随 system prompt 下发（见上方 sysBody 组装）。
 	// 这条启动 user 消息只承载【全局态势 overview】——可降级的了解大局信息，压掉无碍。
 	// overview 罕见地 marshal 失败为空时，回退一句启动词，避免首轮出现空 user 消息。
 	input := overview
 	if strings.TrimSpace(input) == "" {
-		input = "开始执行 system 里领到的意图：只做它、只产生事实、assets、finding、做完即停。"
+		input = "开始执行 system 里领到的意图：只做它、只产生事实、components、finding、做完即停。"
 	}
 
 	// 实验功能:开启后由 noa 接管上下文压缩(归档集中在 <workDir>/noa/<SessionID> 下,持久)。

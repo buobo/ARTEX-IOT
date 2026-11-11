@@ -230,3 +230,13 @@ UPDATE tools SET description=$2, schema=$3, agents=$4, enabled=$5 WHERE key=$1`,
 		key, desc, schema, agents, enabled)
 	return err
 }
+
+// PruneBuiltinTools removes code-shipped builtin tool rows that no longer exist
+// (system=true only). User-defined tools (system=false) are never touched.
+func (d *DB) PruneBuiltinTools(keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	_, err := d.Exec(`DELETE FROM tools WHERE system AND key = ANY($1::text[])`, keys)
+	return err
+}

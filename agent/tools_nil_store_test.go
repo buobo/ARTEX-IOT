@@ -17,7 +17,7 @@ import (
 func TestDomainToolsSurviveNilStores(t *testing.T) {
 	inputs := []string{
 		`{}`,
-		`{"id":379,"asset_id":1,"goal_id":1,"evidence_id":1,"intent_id":1,"node_id":1,"work_id":1,` +
+		`{"id":379,"component_id":1,"goal_id":1,"evidence_id":1,"intent_id":1,"node_id":1,"work_id":1,` +
 			`"summary":"x","reason":"x","name":"x","severity":"low","vulnclass":"x","text":"x","q":"x"}`,
 	}
 	for _, tool := range NewToolSet(nil, "").AllDomainTools() {

@@ -24,7 +24,7 @@ func singleMsg() Message {
 			VulnClass: "SQL注入",
 			Severity:  "high",
 			Summary:   "参数 id\n未过滤 导致注入",
-			Assets:    []string{"a.example.com", "b.example.com"},
+			Components:    []string{"a.example.com", "b.example.com"},
 			DetailURL: "https://artex.local/function/findings/detail?id=42",
 		}},
 	}
@@ -40,7 +40,7 @@ func batchMsg(n int) Message {
 			VulnClass: "XSS",
 			Severity:  "medium",
 			Summary:   "反射型跨站脚本",
-			Assets:    []string{"target.example.com"},
+			Components:    []string{"target.example.com"},
 		})
 	}
 	return m
