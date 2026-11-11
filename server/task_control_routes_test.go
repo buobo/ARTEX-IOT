@@ -13,7 +13,7 @@ func TestWorkerControlRoutes(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { m.Close() })
 
 	td := t.TempDir()
 	s := New(context.Background(), m, td, td, td)

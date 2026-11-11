@@ -23,7 +23,7 @@ func TestRecorderPersistsRawWireBodies(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { m.Close() })
 	pg := m.PG()
 	if err := pg.EnsureLLMRecordsTable(); err != nil {
 		t.Fatalf("ensure table: %v", err)

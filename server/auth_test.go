@@ -18,7 +18,7 @@ func TestAuthStatusFailsClosedWhenDataSourceUnavailable(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { m.Close() })
 	// 关掉池子，让后续 GetSetting 返回 error 而不是 sql.ErrNoRows。
 	if err := m.pg.Close(); err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestAuthInitFailsClosedWhenDataSourceUnavailable(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { m.Close() })
 	if err := m.pg.Close(); err != nil {
 		t.Fatal(err)
 	}

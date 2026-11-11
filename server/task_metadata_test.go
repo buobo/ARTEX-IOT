@@ -17,7 +17,7 @@ func TestTaskMetadataPatchReturnsRenameAndPin(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { m.Close() })
 	task, err := m.CreateTask("metadata patch", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestConversationBatchDeleteReportsMissing(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { m.Close() })
 	s := New(context.Background(), m, t.TempDir(), t.TempDir(), t.TempDir())
 	first, err := m.pg.CreateConversation("mainagent", "batch-http-first", nil)
 	if err != nil {
