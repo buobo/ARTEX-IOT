@@ -62,6 +62,7 @@ export default function ComponentsPage() {
   const [type, setType] = React.useState("");
   const [status, setStatus] = React.useState("");
   const [firmware, setFirmware] = React.useState("");
+  const [taskId, setTaskId] = React.useState(""); // 按任务筛选（空 = 全部）
   const [dsl, setDsl] = React.useState("");
   const [loading, setLoading] = React.useState(false);
   const [selected, setSelected] = React.useState<number[]>([]);
@@ -69,6 +70,15 @@ export default function ComponentsPage() {
   const [confirmDelete, setConfirmDelete] = React.useState(false);
   const [counts, setCounts] = React.useState<Record<string, number>>({});
   const [firmwareCounts, setFirmwareCounts] = React.useState<Record<string, number>>({});
+  // 任务 id → 任务名（列表里显示名字，重名靠 id 兜底）
+  const [taskNames, setTaskNames] = React.useState<Record<string, string>>({});
+  // 固件 sha256 → 固件文件名（值取自 task_scope.kind=firmware 的 value）
+  const [firmwareName, setFirmwareName] = React.useState<Record<string, string>>({});
+  const scopeDone = React.useRef(false);
+  // 表格列宽：先用现有自适应宽度量一次，之后交给 colgroup + 拖拽
+  const headRowRef = React.useRef<HTMLTableRowElement | null>(null);
+  const [colW, setColW] = React.useState<number[] | null>(null);
+  const dragCol = React.useRef<{ idx: number; startX: number; startW: number } | null>(null);
   const [addOpen, setAddOpen] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [batchStatus, setBatchStatus] = React.useState<ComponentStatus | "">("");
@@ -89,9 +99,14 @@ export default function ComponentsPage() {
     setLoading(true);
     try {
       const offset = (page - 1) * PAGE_SIZE;
-      const res = dsl.trim()
-        ? await api.searchComponents(dsl.trim(), type, status, firmware, PAGE_SIZE, offset)
-        : await api.components(type, status, firmware, PAGE_SIZE, offset);
+      const kw = dsl.trim();
+      const res = taskId
+        ? kw
+          ? await api.searchTaskComponents(taskId, kw, type, status, firmware, PAGE_SIZE, offset)
+          : await api.taskComponents(taskId, type, status, firmware, PAGE_SIZE, offset)
+        : kw
+          ? await api.searchComponents(kw, type, status, firmware, PAGE_SIZE, offset)
+          : await api.components(type, status, firmware, PAGE_SIZE, offset);
       setRows(res.components);
       setTotal(res.total);
       setSelected([]);
@@ -100,11 +115,41 @@ export default function ComponentsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, type, status, firmware, dsl]);
+  }, [page, type, status, firmware, dsl, taskId]);
 
   React.useEffect(() => {
     void load();
   }, [load]);
+
+  // 全量固件名：下拉要列所有固件，所以按任务列表把所有 scope 取一遍（sha256 → 固件文件名）
+  React.useEffect(() => {
+    if (scopeDone.current) return;
+    scopeDone.current = true;
+    void (async () => {
+      try {
+        const { tasks } = await api.tasks();
+        const names: Record<string, string> = {};
+        const fw: Record<string, string> = {};
+        for (const t of tasks) names[String(t.id)] = (t.name || "").trim() || `#${t.id}`;
+        setTaskNames(names);
+        await Promise.all(
+          tasks.map(async (t) => {
+            try {
+              const { scope } = await api.taskScope(String(t.id));
+              for (const r of scope) {
+                if (r.kind === "firmware" && r.sha256 && r.value) fw[r.sha256] = r.value;
+              }
+            } catch {
+              /* 单个任务取不到不影响其他 */
+            }
+          }),
+        );
+        setFirmwareName(fw);
+      } catch {
+        /* 拉不到就退回只显示 sha 前缀 */
+      }
+    })();
+  }, []);
 
   React.useEffect(() => {
     api
@@ -116,6 +161,43 @@ export default function ComponentsPage() {
       .then((c) => setFirmwareCounts(c ?? {}))
       .catch(() => setFirmwareCounts({}));
   }, []);
+
+  // 首次渲染后量一次各列实际宽度（保持现在的观感），再切到固定列宽模式
+  React.useLayoutEffect(() => {
+    if (colW || rows.length === 0) return;
+    const tr = headRowRef.current;
+    if (!tr) return;
+    const cells = Array.from(tr.querySelectorAll("th")) as HTMLElement[];
+    if (cells.length !== 9) return;
+    const widths = cells.map((c) => Math.round(c.getBoundingClientRect().width));
+    if (widths.some((w) => w <= 0)) return;
+    setColW(widths);
+  });
+
+  const startColDrag = (idx: number) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startW = colW?.[idx] ?? 120;
+    dragCol.current = { idx, startX: e.clientX, startW };
+    const move = (ev: MouseEvent) => {
+      const d = dragCol.current;
+      if (!d) return;
+      setColW((prev) => {
+        const arr = [...(prev ?? [])];
+        arr[d.idx] = Math.max(56, d.startW + (ev.clientX - d.startX));
+        return arr;
+      });
+    };
+    const up = () => {
+      dragCol.current = null;
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.style.cursor = "";
+    };
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const pageIDs = React.useMemo(() => rows.map((r) => r.id), [rows]);
@@ -330,7 +412,7 @@ export default function ComponentsPage() {
               setFirmware(v === "__all__" ? "" : v);
             }}
           >
-            <SelectTrigger className="w-56">
+            <SelectTrigger className="w-[26rem] max-w-full">
               <SelectValue placeholder="全部固件" />
             </SelectTrigger>
             <SelectContent>
@@ -338,13 +420,34 @@ export default function ComponentsPage() {
               {Object.entries(firmwareCounts)
                 .filter(([sha]) => sha !== "")
                 .map(([sha, n]) => (
-                  <SelectItem key={sha} value={sha}>
-                    {sha.slice(0, 12)}… ({n})
+                  <SelectItem key={sha} value={sha} title={`${firmwareName[sha] ?? "固件"} sha256: ${sha}`}>
+                    {firmwareName[sha] ?? "固件"} · {sha.slice(0, 12)} ({n})
                   </SelectItem>
                 ))}
             </SelectContent>
           </Select>
-          <div className="min-w-[220px] flex-1">
+          <Select
+            value={taskId || "__all__"}
+            onValueChange={(v) => {
+              setPage(1);
+              setTaskId(v === "__all__" ? "" : v);
+            }}
+          >
+            <SelectTrigger className="w-48">
+              <SelectValue placeholder="全部任务" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">全部任务</SelectItem>
+              {Object.entries(taskNames)
+                .sort((a, b) => Number(b[0]) - Number(a[0]))
+                .map(([id, name]) => (
+                  <SelectItem key={id} value={id} title={`ID: ${id}`}>
+                    {name}
+                  </SelectItem>
+                ))}
+            </SelectContent>
+          </Select>
+          <div className="min-w-[160px] max-w-[320px] flex-1">
             <ComponentDslSearch
               value={dsl}
               onChange={(v) => {
@@ -354,20 +457,24 @@ export default function ComponentsPage() {
               placeholder="DSL 查询，如 component_name=lighttpd、status==pending AND type==web"
             />
           </div>
-          <Input
-            className="w-24 text-right"
-            readOnly
-            value={`${total}`}
-            aria-label="命中总数"
-          />
+          <span className="text-muted-foreground w-24 shrink-0 text-right text-xs tabular-nums" aria-label="命中总数">
+            共 <b className="text-foreground">{total}</b> 条
+          </span>
         </div>
       </Card>
 
       <Card className="overflow-hidden p-0">
-        <Table>
+        <Table className={colW ? "table-fixed" : undefined}>
+          {colW && (
+            <colgroup>
+              {colW.map((w, i) => (
+                <col key={i} style={{ width: w }} />
+              ))}
+            </colgroup>
+          )}
           <TableHeader>
-            <TableRow>
-              <TableHead className="w-8">
+            <TableRow ref={headRowRef}>
+              <TableHead className="relative w-8">
                 <input
                   ref={(el) => {
                     if (el) el.indeterminate = someChecked;
@@ -378,20 +485,108 @@ export default function ComponentsPage() {
                   onChange={toggleAll}
                   className="size-4 cursor-pointer align-middle accent-sky-500"
                 />
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  onMouseDown={startColDrag(0)}
+                  onClick={(e) => e.stopPropagation()}
+                  title="拖动调整列宽"
+                  className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
+                />
               </TableHead>
-              <TableHead className="w-20">类型</TableHead>
-              <TableHead>组件名</TableHead>
-              <TableHead className="w-24">版本</TableHead>
-              <TableHead className="w-32">厂商</TableHead>
-              <TableHead>二进制</TableHead>
-              <TableHead className="w-24">状态</TableHead>
-              <TableHead className="w-20 text-right">任务</TableHead>
+              <TableHead className="relative w-20 text-left">
+                类型
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  onMouseDown={startColDrag(1)}
+                  onClick={(e) => e.stopPropagation()}
+                  title="拖动调整列宽"
+                  className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
+                />
+
+              </TableHead>
+              <TableHead className="relative  text-left">
+                组件名
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  onMouseDown={startColDrag(2)}
+                  onClick={(e) => e.stopPropagation()}
+                  title="拖动调整列宽"
+                  className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
+                />
+
+              </TableHead>
+              <TableHead className="relative w-36 text-left">
+                任务
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  onMouseDown={startColDrag(3)}
+                  onClick={(e) => e.stopPropagation()}
+                  title="拖动调整列宽"
+                  className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
+                />
+
+              </TableHead>
+              <TableHead className="relative w-56 text-left">
+                固件
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  onMouseDown={startColDrag(4)}
+                  onClick={(e) => e.stopPropagation()}
+                  title="拖动调整列宽"
+                  className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
+                />
+
+              </TableHead>
+              <TableHead className="relative w-32 text-left">
+                二进制
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  onMouseDown={startColDrag(5)}
+                  onClick={(e) => e.stopPropagation()}
+                  title="拖动调整列宽"
+                  className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
+                />
+
+              </TableHead>
+              <TableHead className="relative w-24 text-left">
+                版本
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  onMouseDown={startColDrag(6)}
+                  onClick={(e) => e.stopPropagation()}
+                  title="拖动调整列宽"
+                  className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
+                />
+
+              </TableHead>
+              <TableHead className="relative w-32 text-left">
+                厂商
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  onMouseDown={startColDrag(7)}
+                  onClick={(e) => e.stopPropagation()}
+                  title="拖动调整列宽"
+                  className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
+                />
+
+              </TableHead>
+              <TableHead className="relative w-24 text-left">
+                状态
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={8} className="text-muted-foreground py-10 text-center text-sm">
+                <TableCell colSpan={9} className="text-muted-foreground py-10 text-center text-sm">
                   {loading ? "加载中…" : "没有组件。上传固件并让 agent 解包登记后，组件会出现在这里。"}
                 </TableCell>
               </TableRow>
@@ -411,17 +606,37 @@ export default function ComponentsPage() {
                   </TableCell>
                   <TableCell className="font-mono text-xs">{c.type}</TableCell>
                   <TableCell className="font-medium">{c.component_name || "—"}</TableCell>
-                  <TableCell className="font-mono text-xs">{c.version || "—"}</TableCell>
-                  <TableCell className="text-xs">{c.vendor || "—"}</TableCell>
-                  <TableCell className="text-muted-foreground truncate font-mono text-xs">
+                  <TableCell className="max-w-[9rem] text-xs">
+                    <span className="block truncate" title={`ID: ${(c.task_ids ?? []).join(", ")}`}>
+                      {(c.task_ids ?? []).length === 0
+                        ? "—"
+                        : (c.task_ids ?? [])
+                            .map((tid) => taskNames[String(tid)] || `#${tid}`)
+                            .join("、")}
+                    </span>
+                  </TableCell>
+                  <TableCell className="max-w-[14rem] font-mono text-xs">
+                    {(() => {
+                      const fw = c.firmware_sha256 ? firmwareName[c.firmware_sha256] : undefined;
+                      if (!c.firmware_sha256) return <span className="text-muted-foreground">—</span>;
+                      return (
+                        <span className="block truncate" title={`${fw ?? "固件"} sha256: ${c.firmware_sha256}`}>
+                          {fw ?? "固件"}
+                          <span className="text-muted-foreground"> · {c.firmware_sha256.slice(0, 12)}</span>
+                        </span>
+                      );
+                    })()}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground max-w-[8rem] truncate font-mono text-xs">
                     {c.binary_path || "—"}
                   </TableCell>
+                  <TableCell className="font-mono text-xs">{c.version || "—"}</TableCell>
+                  <TableCell className="text-xs">{c.vendor || "—"}</TableCell>
                   <TableCell>
                     <span className={`rounded px-2 py-0.5 text-xs ${STATUS_STYLE[st]}`}>
                       {STATUS_LABELS[st]}
                     </span>
                   </TableCell>
-                  <TableCell className="text-right text-xs">{c.task_ids?.length ?? 0}</TableCell>
                 </TableRow>
               );
             })}
@@ -561,7 +776,7 @@ export default function ComponentsPage() {
                 </SheetDescription>
               </SheetHeader>
 
-              <div className="mt-4 flex flex-wrap items-center gap-2">
+              <div className="mt-4 flex flex-wrap items-center gap-2 px-4">
                 {(Object.keys(STATUS_LABELS) as ComponentStatus[]).map((st) => (
                   <Button
                     key={st}
@@ -574,7 +789,7 @@ export default function ComponentsPage() {
                 ))}
               </div>
 
-              <dl className="mt-5 grid grid-cols-[110px_1fr] gap-x-3 gap-y-2 text-sm">
+              <dl className="mt-5 grid grid-cols-[110px_1fr] gap-x-3 gap-y-2 px-4 pb-2 text-sm">
                 <Field label="二进制" value={detail.binary_path} mono />
                 <Field label="配置" value={detail.config_path} mono />
                 <Field label="启动脚本" value={detail.started_by} mono />

@@ -40,6 +40,7 @@ import { api } from "@/lib/api";
 import type { LLMProfile, Task } from "@/lib/types";
 
 import { ComponentsTab } from "./_tabs/components-tab";
+import { DecompileTab } from "./_tabs/decompile-tab";
 import { BroadcastTab } from "./_tabs/broadcast-tab";
 import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
 import { FindingsTab } from "./_tabs/findings-tab";
@@ -60,6 +61,7 @@ const TABS = [
   { value: "retests", label: "复测" },
   { value: "poc", label: "PoC" },
   { value: "components", label: "测试组件" },
+  { value: "decompile", label: "反编译" },
   { value: "coverage", label: "组件覆盖图" },
   { value: "intercept", label: "拦截审批" },
   { value: "report", label: "报告" },
@@ -442,6 +444,9 @@ function TaskDetailInner() {
         </TabsContent>
         <TabsContent value="components" className="mt-0">
           <ComponentsTab taskId={id} />
+        </TabsContent>
+        <TabsContent value="decompile" className="mt-0 min-h-0 overflow-hidden">
+          <DecompileTab taskId={id} />
         </TabsContent>
         <TabsContent value="coverage" className="mt-0">
           <CoverageGraphTab taskId={id} coverageEnabled={task?.coverage_enabled !== false} />

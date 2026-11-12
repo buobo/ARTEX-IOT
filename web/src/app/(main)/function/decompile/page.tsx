@@ -2,32 +2,16 @@
 
 import * as React from "react";
 
-import {
-  ArrowLeftIcon,
-  BinaryIcon,
-  ChevronDownIcon,
-  CopyIcon,
-  DownloadIcon,
-  RefreshCwIcon,
-  RotateCcwIcon,
-  SearchIcon,
-  Trash2Icon,
-} from "lucide-react";
+import { BinaryIcon, RefreshCwIcon, SearchIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
-import type {
-  DecompileCode,
-  DecompileFunc,
-  DecompileJob,
-  DecompileJobDetail,
-  DecompileStatus,
-} from "@/lib/types";
+import type { Component, DecompileFunc, DecompileJob, DecompileStatus } from "@/lib/types";
 
-import { HighlightedCode } from "../tasks/detail/_tabs/poc-tab";
+import { DecompileCodePanel, type DecompileCodePanelHandle } from "@/components/decompile-code-panel";
 
 const STATUS_LABEL: Record<DecompileStatus, string> = {
   pending: "排队中",
@@ -61,47 +45,40 @@ export default function DecompilePage() {
   const [funcs, setFuncs] = React.useState<DecompileFunc[]>([]);
   const [funcTotal, setFuncTotal] = React.useState(0);
   const [q, setQ] = React.useState("");
-  const [code, setCode] = React.useState<DecompileCode | null>(null);
   const [loadingJobs, setLoadingJobs] = React.useState(false);
   const [loadingFuncs, setLoadingFuncs] = React.useState(false);
   const [loadingCode, setLoadingCode] = React.useState(false);
-  // 调用关系跳转的返回栈（面包屑）
-  const [history, setHistory] = React.useState<{ addr: string; name: string }[]>([]);
-  // 刚从哪个函数跳过来：它会被提到 callers 第一位并高亮，点一下就能跳回去
-  const [jumpFrom, setJumpFrom] = React.useState<{ addr: string; name: string } | null>(null);
-  // 未完成的 job 只能看日志尾部
-  const [logText, setLogText] = React.useState("");
-  // 完成态的产物大小（状态条用）
-  const [detail, setDetail] = React.useState<DecompileJobDetail | null>(null);
   // 三栏宽度（可拖拽）：默认 280 / 320，最小 160 / 200
   const [w1, setW1] = React.useState(280);
   const [w2, setW2] = React.useState(320);
   const [wide, setWide] = React.useState(false);
   const dragRef = React.useRef<{ which: 1 | 2; startX: number; startW: number } | null>(null);
-  // callers/callees 默认只占一行，展开按钮看全部
-  const [callsOpen, setCallsOpen] = React.useState(false);
   // 函数列表虚拟滚动
   const funcBoxRef = React.useRef<HTMLDivElement | null>(null);
-  // 可跳转函数名集合：双击跳转 + 悬停手型光标都靠它
-  const [fnNames, setFnNames] = React.useState<Set<string>>(new Set());
-  // 代码滚动容器（换函数时回到顶部，否则跳转后停在上一段的滚动位置）
-  const codeBoxRef = React.useRef<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = React.useState(0);
+  // ?task=<id>：任务内视图（只列本任务的组件/函数/代码，不混别的任务）
+  const panelRef = React.useRef<DecompileCodePanelHandle | null>(null);
+  const [codeAddr, setCodeAddr] = React.useState<string | null>(null);
+  const [taskScope, setTaskScope] = React.useState<string | null>(null);
+  const [comps, setComps] = React.useState<Component[]>([]);
   const [boxH, setBoxH] = React.useState(600);
 
   const job = jobs.find((j) => j.id === jobId) ?? null;
 
   // 首次进入：?job=<id> 直接选中（组件页行内图标跳过来）
   React.useEffect(() => {
-    const raw = new URLSearchParams(window.location.search).get("job");
+    const sp = new URLSearchParams(window.location.search);
+    const raw = sp.get("job");
     const id = raw ? Number(raw) : NaN;
     if (Number.isFinite(id) && id > 0) setJobId(id);
+    const t = sp.get("task");
+    if (t && t.trim()) setTaskScope(t.trim());
   }, []);
 
   const loadJobs = React.useCallback(async () => {
     setLoadingJobs(true);
     try {
-      const { jobs: list } = await api.decompileJobs();
+      const { jobs: list } = await api.decompileJobs(taskScope ?? undefined);
       setJobs(list);
       setJobId((cur) => cur ?? null);
     } catch (e) {
@@ -109,7 +86,38 @@ export default function DecompilePage() {
     } finally {
       setLoadingJobs(false);
     }
-  }, []);
+  }, [taskScope]);
+
+  // 任务内视图：把本任务登记过的二进制组件也列出来（未导出的可直接发起导出）
+  const loadComps = React.useCallback(async () => {
+    if (!taskScope) {
+      setComps([]);
+      return;
+    }
+    try {
+      const r = await api.taskComponents(taskScope, "", "", "", 200, 0);
+      setComps(r.components.filter((c) => !!c.binary_path));
+    } catch {
+      setComps([]);
+    }
+  }, [taskScope]);
+
+  React.useEffect(() => {
+    void loadComps();
+  }, [loadComps]);
+
+  // 未导出 → 发起导出（复用组件页同一个接口）
+  const exportComponent = async (c: Component) => {
+    if (!taskScope) return;
+    try {
+      const res = await api.decompileCreate(taskScope, { component_ids: [c.id] });
+      const skipped = res.skipped?.length ? `，跳过 ${res.skipped.length} 个` : "";
+      toast.success(`已加入导出队列（${res.jobs.length} 个${skipped}）`);
+      await loadJobs();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "发起导出失败");
+    }
+  };
 
   React.useEffect(() => {
     void loadJobs();
@@ -147,96 +155,9 @@ export default function DecompilePage() {
     void loadFuncs(job.id, q.trim());
   }, [job, q, loadFuncs]);
 
-  const openFunc = React.useCallback(
-    async (id: number, addr: string, push = true) => {
-      setLoadingCode(true);
-      const prev = code;
-      try {
-        const c = await api.decompileCode(id, addr);
-        if (push && prev && prev.addr !== c.addr) setHistory((h) => [...h, { addr: prev.addr, name: prev.name }]);
-        if (prev && prev.addr !== c.addr) setJumpFrom({ addr: prev.addr, name: prev.name });
-        setCode(c);
-      } catch (e) {
-        toast.error(e instanceof Error ? e.message : "读取函数失败");
-      } finally {
-        setLoadingCode(false);
-      }
-    },
-    [code],
-  );
 
-  const goBack = () => {
-    const last = history[history.length - 1];
-    if (!last || !job) return;
-    setHistory(history.slice(0, -1));
-    void openFunc(job.id, last.addr, false);
-  };
 
-  // 双击代码里的函数名 → 跳到那个函数（索引里没有就静默不动，避免误报）
-  const onCodeDoubleClick = React.useCallback(async () => {
-    if (!job || !code || job.status !== "completed") return;
-    const word = (window.getSelection()?.toString() ?? "").trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(word)) return;
-    if (word === code.name) return;
-    // 只对"被调用形态"的标识符跳转：双击变量名/关键字只是选词，别弹提示
-    const called = new RegExp(`(^|[^A-Za-z0-9_])${word}\\s*\\(`).test(code.code);
-    if (!called) return;
-    try {
-      // 精确匹配优先：接口按名字/地址模糊搜，这里再筛一次同名
-      const res = await api.decompileFunctions(job.id, word, 1, 200);
-      const hit =
-        res.items.find((f) => f.name === word) ??
-        res.items.find((f) => f.name.toLowerCase() === word.toLowerCase());
-      if (!hit) {
-        toast.info(`索引里没有 ${word}（外部库函数不导出）`);
-        return;
-      }
-      await openFunc(job.id, hit.addr);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "跳转失败");
-    }
-  }, [job, code, openFunc]);
 
-  // 未完成的 job：轮询日志尾部（进度可见，别让人以为卡死）
-  React.useEffect(() => {
-    if (!job || job.status === "completed" || job.status === "canceled") {
-      setLogText("");
-      return;
-    }
-    let stop = false;
-    const tick = async () => {
-      try {
-        const r = await api.decompileLog(job.id);
-        if (!stop) setLogText(r.log);
-      } catch {
-        /* 日志是辅助信息 */
-      }
-    };
-    void tick();
-    const timer = setInterval(() => void tick(), 3000);
-    return () => {
-      stop = true;
-      clearInterval(timer);
-    };
-  }, [job]);
-
-  // 完成态取一眼产物大小（单 job 接口才带 artifact_bytes）
-  React.useEffect(() => {
-    if (!job || job.status !== "completed") {
-      setDetail(null);
-      return;
-    }
-    let stop = false;
-    api
-      .decompileJob(job.id)
-      .then((d) => {
-        if (!stop) setDetail(d);
-      })
-      .catch(() => setDetail(null));
-    return () => {
-      stop = true;
-    };
-  }, [job]);
 
   // 容器高度变化（窗口缩放/折叠侧栏）要重算可视窗口
   React.useEffect(() => {
@@ -248,18 +169,12 @@ export default function DecompilePage() {
     return () => ro.disconnect();
   }, [job?.id]);
 
-  // 切 job：清空右侧代码与返回栈
-  React.useEffect(() => {
-    setCode(null);
-    setHistory([]);
-    setJumpFrom(null);
-  }, [jobId]);
 
   // 完成态且还没选函数：自动打开列表第一个（首屏就有内容）
   React.useEffect(() => {
-    if (code || !job || job.status !== "completed" || funcs.length === 0) return;
-    void openFunc(job.id, funcs[0].addr);
-  }, [code, job, funcs, openFunc]);
+    if (codeAddr || !job || job.status !== "completed" || funcs.length === 0) return;
+    panelRef.current?.open(funcs[0].addr);
+  }, [codeAddr, job, funcs]);
 
   const cancelJob = async () => {
     if (!job) return;
@@ -290,7 +205,6 @@ export default function DecompilePage() {
       await api.decompileDelete(job.id);
       toast.success("已删除");
       setJobId(null);
-      setCode(null);
       await loadJobs();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "删除失败");
@@ -322,24 +236,6 @@ export default function DecompilePage() {
   }, [jobs]);
   const [collapsed, setCollapsed] = React.useState<Record<number, boolean>>({});
 
-  // 代码面板里"cursor 变手型"的判定：优先用索引函数名；名字表还没到时，
-  // 退化成「出现 name( 形态的标识符」，至少让调用点先有手型（双击再做真正的查表）
-  const isJumpableToken = React.useCallback(
-    (t: string) => {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(t)) return false;
-      if (fnNames.size > 0) return fnNames.has(t);
-      const src = code?.code;
-      return !!src && new RegExp(`(^|[^A-Za-z0-9_])${t}\\s*\\(`).test(src);
-    },
-    [fnNames, code],
-  );
-
-  // callers 列表 = 「来源函数」（高亮、置顶、去重）+ 原有的 callers
-  const callerAddrs = React.useMemo(() => {
-    const base = code?.callers ?? [];
-    if (!jumpFrom || jumpFrom.addr === code?.addr) return base;
-    return [jumpFrom.addr, ...base.filter((a) => a !== jumpFrom.addr)];
-  }, [code, jumpFrom]);
 
   // 只有 lg 以上才分栏拖拽；窄屏仍是单列
   React.useEffect(() => {
@@ -370,16 +266,17 @@ export default function DecompilePage() {
     window.addEventListener("mouseup", up);
   };
 
-  // 换函数时 callers/callees 回到「一行」，代码滚回顶部
-  React.useEffect(() => {
-    setCallsOpen(false);
-    if (codeBoxRef.current) codeBoxRef.current.scrollTop = 0;
-  }, [code?.addr]);
-
   // 虚拟滚动窗口：只渲染可视区 + 上下各 8 行缓冲
   const FUNC_ROW = 28;
   const visibleRows = Math.ceil(boxH / FUNC_ROW);
   const funcStart = Math.max(0, Math.floor(scrollTop / FUNC_ROW) - 8);
+  const jobOfComp = (c: Component) =>
+    jobs.find(
+      (j) =>
+        (j.component_id != null && j.component_id === c.id) ||
+        (!!c.binary_path && j.binary_path === c.binary_path),
+    ) ?? null;
+
   const funcEnd = Math.min(funcs.length, funcStart + visibleRows + 16);
 
   return (
@@ -403,15 +300,75 @@ export default function DecompilePage() {
       >
         <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border">
           <div className="bg-muted/40 text-muted-foreground border-b px-3 py-2 text-xs">
-            导出任务 {jobs.length ? `（${jobs.length}）` : ""}
+            {taskScope ? `任务内组件（${comps.length}）` : `导出任务${jobs.length ? `（${jobs.length}）` : ""}`}
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
-            {jobs.length === 0 && (
+            {taskScope &&
+              comps.map((c) => {
+                const j = jobOfComp(c);
+                const name = (c.binary_path ?? "").split("/").pop() || c.component_name;
+                return (
+                  <div
+                    key={`comp-${c.id}`}
+                    className={`flex w-full flex-col gap-1 border-b px-3 py-2 text-left text-sm ${
+                      j && j.id === jobId ? "bg-muted/60" : ""
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      disabled={!j}
+                      onClick={() => {
+                        if (!j) return;
+                        setJobId(j.id);
+                        setQ("");
+                      }}
+                      className={`flex w-full items-center gap-2 text-left ${j ? "cursor-pointer hover:opacity-90" : ""}`}
+                    >
+                      <span className="truncate font-mono text-xs" title={c.binary_path}>
+                        {name}
+                      </span>
+                      {j ? (
+                        <Badge
+                          variant="secondary"
+                          className={`ml-auto shrink-0 text-[10px] ${STATUS_CLASS[j.status]}`}
+                        >
+                          {STATUS_LABEL[j.status]}
+                        </Badge>
+                      ) : (
+                        <Badge variant="secondary" className="ml-auto shrink-0 text-[10px]">
+                          未导出
+                        </Badge>
+                      )}
+                    </button>
+                    <span className="text-muted-foreground truncate font-mono text-[11px]">
+                      {j
+                        ? j.status === "completed"
+                          ? `${j.func_done} 个函数`
+                          : `${j.func_done} 个已导出`
+                        : c.binary_path}
+                    </span>
+                    {!j && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mt-0.5 h-7 self-start text-xs"
+                        onClick={() => void exportComponent(c)}
+                      >
+                        <BinaryIcon className="size-3.5" /> 导出反编译
+                      </Button>
+                    )}
+                  </div>
+                );
+              })}
+            {taskScope && comps.length === 0 && (
+              <p className="text-muted-foreground p-3 text-sm">本任务还没有登记可导出的二进制组件。</p>
+            )}
+            {!taskScope && jobs.length === 0 && (
               <p className="text-muted-foreground p-3 text-sm">
                 {loadingJobs ? "加载中…" : "还没有导出任务。在任务详情的组件页勾选组件导出。"}
               </p>
             )}
-            {groups.map(({ taskId, list, label }) => {
+            {!taskScope && groups.map(({ taskId, list, label }) => {
               const folded = !!collapsed[taskId];
               const running = list.some((j) => j.status === "running" || j.status === "pending");
               return (
@@ -521,9 +478,9 @@ export default function DecompilePage() {
                       key={f.addr}
                       type="button"
                       style={{ height: FUNC_ROW }}
-                      onClick={() => void openFunc(job!.id, f.addr)}
+                      onClick={() => panelRef.current?.open(f.addr)}
                       className={`hover:bg-muted/50 flex w-full items-center gap-2 border-b px-3 text-left ${
-                        code?.addr === f.addr ? "bg-muted/60" : ""
+                        codeAddr === f.addr ? "bg-muted/60" : ""
                       }`}
                     >
                       <span className="truncate font-mono text-xs">{f.name}</span>
@@ -548,179 +505,14 @@ export default function DecompilePage() {
           />
         )}
 
-        <section className="flex min-h-0 flex-col overflow-hidden rounded-lg border">
-          <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
-            {history.length > 0 && (
-              <Button variant="ghost" size="sm" onClick={goBack} title={`返回 ${history[history.length - 1].name}`}>
-                <ArrowLeftIcon className="size-4" />
-              </Button>
-            )}
-            {code ? (
-              <>
-                <span className="font-mono text-sm font-medium">{code.name}</span>
-                <span className="text-muted-foreground font-mono text-[11px]">0x{code.addr}</span>
-                <span className="text-muted-foreground text-[11px]">{humanSize(code.size)}</span>
-                {code.truncated && <Badge variant="secondary" className="text-[10px]">已截断</Badge>}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  title="复制这段代码"
-                  onClick={() => {
-                    void navigator.clipboard?.writeText(code.code).then(
-                      () => toast.success("已复制"),
-                      () => toast.error("复制失败"),
-                    );
-                  }}
-                >
-                  <CopyIcon className="size-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  title="下载为 .c 文件"
-                  onClick={() => {
-                    const blob = new Blob([code.code], { type: "text/plain;charset=utf-8" });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = `${code.name}.c`;
-                    a.click();
-                    URL.revokeObjectURL(url);
-                  }}
-                >
-                  <DownloadIcon className="size-4" />
-                </Button>
-              </>
-            ) : (
-              <span className="text-muted-foreground text-xs">
-                {job && job.status !== "completed" ? "导出未完成：只显示进度与日志" : "选中左侧函数查看代码"}
-              </span>
-            )}
-            {job && (job.status === "running" || job.status === "pending") && (
-              <Button variant="outline" size="sm" className="ml-auto" onClick={() => void cancelJob()}>
-                取消导出
-              </Button>
-            )}
-            {job && (job.status === "failed" || job.status === "canceled") && (
-              <Button variant="outline" size="sm" className="ml-auto" onClick={() => void retryJob()}>
-                <RotateCcwIcon className="size-4" /> 重试
-              </Button>
-            )}
-            {job && job.status !== "running" && job.status !== "pending" && (
-              <Button variant="ghost" size="sm" className="ml-auto text-red-400" onClick={() => void deleteJob()}>
-                <Trash2Icon className="size-4" /> 删除
-              </Button>
-            )}
-          </div>
-          {job?.status === "completed" && (
-            <div className="text-muted-foreground border-b px-3 py-1 text-[11px]">
-              已完成 · {job.func_done} 个函数
-              {job.finished_at ? ` · ${new Date(job.finished_at).toLocaleString()}` : ""}
-              {detail?.artifact_bytes ? ` · ${humanSize(detail.artifact_bytes)}` : ""}
-            </div>
-          )}
-          {code && (
-            <div className="flex cursor-default select-none items-start gap-1 border-b px-3 py-1.5 text-[11px]">
-              {/* 默认一行：装不下就裁掉，右侧「展开」把整组调用关系铺开，「收起」收回一行。
-                  容器用 items-start，展开时按钮仍钉在顶上一行，不随内容变高而上下漂。 */}
-              <div
-                className={
-                  callsOpen
-                    ? "flex min-w-0 flex-1 flex-wrap items-center gap-1"
-                    : "flex min-w-0 flex-1 items-center gap-1 overflow-hidden whitespace-nowrap"
-                }
-              >
-                <span className="text-muted-foreground shrink-0">callers</span>
-                {callerAddrs.length === 0 && <span className="text-muted-foreground/60">none</span>}
-                {callerAddrs.map((a) => {
-                  const from = jumpFrom && a === jumpFrom.addr;
-                  return (
-                    <button
-                      key={`c-${a}`}
-                      type="button"
-                      title={from ? `返回 ${jumpFrom?.name}（刚从这跳过来）` : undefined}
-                      className={
-                        from
-                          ? "shrink-0 cursor-pointer rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-emerald-300 hover:bg-emerald-500/25"
-                          : "shrink-0 cursor-pointer rounded bg-sky-500/15 px-1.5 py-0.5 font-mono text-sky-300 hover:bg-sky-500/25"
-                      }
-                      onClick={() => void openFunc(job!.id, a)}
-                    >
-                      {from ? `↩ 0x${a}` : `0x${a}`}
-                    </button>
-                  );
-                })}
-                <span className="text-muted-foreground ml-3 shrink-0">callees</span>
-                {(code.callees ?? []).length === 0 && (
-                  <span className="text-muted-foreground/60">none</span>
-                )}
-                {(code.callees ?? []).map((a) => (
-                  <button
-                    key={`d-${a}`}
-                    type="button"
-                    className="shrink-0 cursor-pointer rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-amber-300 hover:bg-amber-500/25"
-                    onClick={() => void openFunc(job!.id, a)}
-                  >
-                    0x{a}
-                  </button>
-                ))}
-              </div>
-              {callerAddrs.length + (code.callees?.length ?? 0) > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setCallsOpen((v) => !v)}
-                  aria-expanded={callsOpen}
-                  className="text-muted-foreground hover:text-foreground flex shrink-0 items-center gap-0.5 self-start rounded border px-1.5 py-0.5"
-                  title={
-                    callsOpen
-                      ? "收起到一行"
-                      : `展开全部（callers ${callerAddrs.length} · callees ${code.callees?.length ?? 0}）`
-                  }
-                >
-                  <ChevronDownIcon
-                    className={`size-3 transition-transform ${callsOpen ? "rotate-180" : ""}`}
-                  />
-                  {callsOpen ? "收起" : "展开"}
-                </button>
-              )}
-            </div>
-          )}
-          <div ref={codeBoxRef} className="min-h-0 flex-1 overflow-auto p-2">
-            {job && job.status !== "completed" && (
-              <>
-                <p className="text-muted-foreground mb-2 px-1 text-xs">
-                  {job.status === "running"
-                    ? `导出中：已导出 ${job.func_done} 个函数。未完成不给看半成品，下面是 idat 日志尾部。`
-                    : job.status === "pending"
-                      ? "排队中：IDA 串行执行。下面是日志尾部。"
-                      : `导出${STATUS_LABEL[job.status]}${job.error ? `：${job.error}` : ""}`}
-                </p>
-                <pre className="bg-muted/30 max-h-full overflow-auto rounded border p-2 font-mono text-[11px] leading-5 whitespace-pre-wrap">
-                  {logText || "（还没有日志）"}
-                </pre>
-              </>
-            )}
-            {loadingCode && <p className="text-muted-foreground p-2 text-sm">读取中…</p>}
-            {job?.status === "completed" && !code && !loadingCode && (
-              <p className="text-muted-foreground p-2 text-sm">
-                这里显示 IDA 导出的伪 C 代码，头部注释里的 callers / callees 可点击跳转。
-              </p>
-            )}
-            {code && (
-              <div onDoubleClick={() => void onCodeDoubleClick()} title="双击函数名跳转到该函数">
-                <HighlightedCode
-                  code={code.code}
-                  name={`${code.name}.c`}
-                  tokenHint={(t) =>
-                    isJumpableToken(t)
-                      ? "cursor-pointer hover:underline decoration-dotted"
-                      : undefined
-                  }
-                />
-              </div>
-            )}
-          </div>
-        </section>
+        <DecompileCodePanel
+          ref={panelRef}
+          job={job}
+          onAddrChange={setCodeAddr}
+          onCancel={() => void cancelJob()}
+          onRetry={() => void retryJob()}
+          onDelete={() => void deleteJob()}
+        />
       </div>
     </div>
   );
