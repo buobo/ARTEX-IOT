@@ -18,6 +18,7 @@ import {
 } from "@dnd-kit/core";
 import {
   ArchiveIcon,
+  AlertTriangleIcon,
   ArrowDownIcon,
   ArrowUpDownIcon,
   ArrowUpIcon,
@@ -3110,6 +3111,14 @@ function CreateTaskSheet({
   const [uploadCount, setUploadCount] = React.useState(0);
   // 固件：独立按钮选择（不按后缀猜），建任务后直接上传到 tasks/<id>/firmware/ 并登记 scope。
   const [firmwareFile, setFirmwareFile] = React.useState<File | null>(null);
+  // 建任务成功但固件上传失败 → 阻断态：任务已存在、firmware/ 却是空的。
+  // 关掉抽屉静默继续会让 worker 自己满盘找固件，所以这里保留任务 id 让用户重试/放弃。
+  const [pendingFirmware, setPendingFirmware] = React.useState<{
+    taskID: string;
+    name: string;
+    error: string;
+  } | null>(null);
+  const [firmwareBusy, setFirmwareBusy] = React.useState(false);
   const firmwareInputRef = React.useRef<HTMLInputElement>(null);
   const draftIdRef = React.useRef<string>("");
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -3178,33 +3187,18 @@ function CreateTaskSheet({
         coverageEnabled,
       });
       // 固件：任务已建好，再把独立选中的固件直接传到 tasks/<id>/firmware/（后端算 sha256 并登记范围）。
-      // 失败不删任务——任务本身有效，固件之后可以在范围卡片里手动补。
+      // 上传失败必须【阻断】：任务已存在但 firmware/ 里没有文件，若静默继续，worker 会自己
+      // 满盘搜宿主机找固件（真发生过）。这里停住，让用户在抽屉里重试或明确放弃。
       if (firmwareFile) {
         try {
           await api.uploadFirmware(created.id, firmwareFile);
         } catch (e) {
-          toast.error(`固件上传失败（${firmwareFile.name}）：${(e as Error).message}`);
+          setPendingFirmware({ taskID: created.id, name: firmwareFile.name, error: (e as Error).message });
+          return; // 不重置表单、不关抽屉：由用户决定重试还是放弃
         }
       }
       toast.success("任务已创建");
-      setName("");
-      setCategoryID(undefined);
-      setDescription("");
-      setGoal("");
-      setCredentials("");
-      setSelectedTemplateID(null);
-      setSourceTaskIDs([]);
-      setCompanyIDs([]);
-      setLLMProfileIDs([]);
-      setTimeoutMin("");
-      setHeartbeatMin("10");
-      setSeedFirstIntent(false);
-      setCoverageEnabled(true);
-      setUploadCount(0);
-      setFirmwareFile(null);
-      draftIdRef.current = "";
-      setOpen(false);
-      onCreated();
+      resetAndClose();
     } catch (e) {
       toast.error("创建失败：" + (e as Error).message);
     } finally {
@@ -3212,8 +3206,63 @@ function CreateTaskSheet({
     }
   }
 
+  // resetAndClose 是「建任务流程彻底结束」的唯一收尾：清表单、关抽屉、通知列表刷新。
+  // 固件上传失败时【不调用它】——任务已存在但缺固件，必须让用户先处理（重试/放弃）。
+  function resetAndClose() {
+    setName("");
+    setCategoryID(undefined);
+    setDescription("");
+    setGoal("");
+    setCredentials("");
+    setSelectedTemplateID(null);
+    setSourceTaskIDs([]);
+    setCompanyIDs([]);
+    setLLMProfileIDs([]);
+    setTimeoutMin("");
+    setHeartbeatMin("10");
+    setSeedFirstIntent(false);
+    setCoverageEnabled(true);
+    setUploadCount(0);
+    setFirmwareFile(null);
+    setPendingFirmware(null);
+    draftIdRef.current = "";
+    setOpen(false);
+    onCreated();
+  }
+
+  // retryPendingFirmware 把同一个文件重传给「已创建」的那个任务（不再建新任务）。
+  async function retryPendingFirmware() {
+    if (!pendingFirmware || !firmwareFile) return;
+    setFirmwareBusy(true);
+    try {
+      await api.uploadFirmware(pendingFirmware.taskID, firmwareFile);
+      resetAndClose();
+      toast.success("任务已创建，固件已上传");
+    } catch (e) {
+      setPendingFirmware((prev) => (prev ? { ...prev, error: (e as Error).message } : prev));
+    } finally {
+      setFirmwareBusy(false);
+    }
+  }
+
+  // abandonPendingFirmware 是用户显式放弃：任务保留（其它字段都有效），
+  // 固件之后可在任务概览的「固件」处补传。
+  function abandonPendingFirmware() {
+    setPendingFirmware(null);
+    resetAndClose();
+    toast.warning("任务已创建，但固件未上传：可在任务概览的「固件」处补传");
+  }
+
   return (
-    <Sheet open={open} onOpenChange={setOpen}>
+    <Sheet
+      open={open}
+      onOpenChange={(next) => {
+        // 固件上传失败还没处理时不准关抽屉：关掉就等于"任务建好了、也不知道缺固件"，
+        // 正是这次踩坑的路径。要走就走下面的「重试 / 放弃」两个显式动作。
+        if (!next && pendingFirmware) return;
+        setOpen(next);
+      }}
+    >
       <SheetTrigger asChild>
         <Button size="sm">
           <PlusIcon /> 新建任务
@@ -3477,11 +3526,42 @@ function CreateTaskSheet({
           </div>
         </div>
 
+        {pendingFirmware && (
+          <div className="border-destructive/40 bg-destructive/5 border-t px-6 py-4">
+            <div className="border-destructive/40 flex flex-col gap-2 rounded-md border p-3">
+              <p className="text-destructive flex items-center gap-1.5 text-sm font-medium">
+                <AlertTriangleIcon className="size-4" />
+                任务 #{pendingFirmware.taskID} 已创建，但固件「{pendingFirmware.name}」上传失败
+              </p>
+              <p className="text-muted-foreground text-xs break-all">{pendingFirmware.error}</p>
+              <p className="text-xs">
+                现在 firmware/ 目录里是空的，直接继续会让 agent 自己到宿主机上满盘找固件。
+                请先重试上传，或明确放弃后到任务概览里补传。
+              </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  disabled={firmwareBusy || !firmwareFile}
+                  onClick={() => void retryPendingFirmware()}
+                >
+                  {firmwareBusy && <Spinner data-icon="inline-start" />}
+                  {firmwareBusy ? "重传中" : "重试上传"}
+                </Button>
+                <Button size="sm" variant="outline" disabled={firmwareBusy} onClick={abandonPendingFirmware}>
+                  放弃（固件缺失，稍后补传）
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <SheetFooter className="flex-row justify-end gap-2 border-t p-4">
           <SheetClose asChild>
-            <Button variant="outline">取消</Button>
+            <Button variant="outline" disabled={!!pendingFirmware}>
+              取消
+            </Button>
           </SheetClose>
-          <Button onClick={createTask} disabled={creating || uploading}>
+          <Button onClick={createTask} disabled={creating || uploading || !!pendingFirmware}>
             {creating && <Spinner data-icon="inline-start" />}
             {creating ? "创建中" : "创建"}
           </Button>

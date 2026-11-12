@@ -17,6 +17,7 @@ import {
   ShieldCheckIcon,
   TargetIcon,
   Trash2Icon,
+  UploadIcon,
   XIcon,
 } from "lucide-react";
 
@@ -132,6 +133,11 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   // 解包状态：探测 tasks/<id>/ 下有没有 extract / _extracted / squashfs-root 之类的目录。
   // null = 还没查到或查询失败，只影响显示，不阻塞页面。
   const [firmwareUnpacked, setFirmwareUnpacked] = React.useState<boolean | null>(null);
+  // 固件补传：建任务时上传失败/漏传时，这里能补上（复用 POST /api/tasks/{id}/firmware），
+  // 不必重开任务，也不会让 agent 到宿主机满盘找固件。
+  const [firmwareBusy, setFirmwareBusy] = React.useState(false);
+  const [firmwareErr, setFirmwareErr] = React.useState("");
+  const firmwareInputRef = React.useRef<HTMLInputElement>(null);
   // 按模型的 token 用量（来自常开的 llm_usage 计量账本，逐次精确）。
   const [modelTokens, setModelTokens] = React.useState<ModelTokenStat[]>([]);
   // 目标管理：目标列表 + 新增表单 + 行内编辑状态。
@@ -170,6 +176,21 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       // 忽略：无 asset store 时接口 503，范围卡片自然为空
     }
   }, [taskId]);
+
+  // 补传固件：POST /api/tasks/{id}/firmware，后端落盘到 tasks/<id>/firmware/ 并登记范围，
+  // 成功后重新拉一次 scope（固件行出现/更新），解包状态 effect 也会随之重算。
+  async function uploadFirmwareFile(file: File) {
+    setFirmwareBusy(true);
+    setFirmwareErr("");
+    try {
+      await api.uploadFirmware(taskId, file);
+      await loadScope();
+    } catch (e) {
+      setFirmwareErr(`上传失败：${(e as Error).message}`);
+    } finally {
+      setFirmwareBusy(false);
+    }
+  }
 
   // 固件行（来自 scope）+ 解包状态（看 tasks/<id>/ 里有没有解包产物目录）。
   const firmwareRow = scope.find((s) => s.kind === "firmware");
@@ -479,22 +500,53 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             <div className="text-xs font-medium text-muted-foreground">目标</div>
             <p className="text-sm whitespace-pre-wrap break-words">{task?.goal?.trim() || "—"}</p>
           </div>
-          {firmwareRow && (
-            <div className="flex flex-col gap-1.5 sm:col-span-2">
-              <div className="text-xs font-medium text-muted-foreground">固件</div>
-              <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-                <span className="font-mono break-all">{firmwareRow.value || "—"}</span>
-                {firmwareRow.sha256 && (
-                  <span className="font-mono text-xs text-muted-foreground" title={firmwareRow.sha256}>
-                    sha256 {firmwareRow.sha256.slice(0, 12)}
+          <div className="flex flex-col gap-1.5 sm:col-span-2">
+            <div className="text-xs font-medium text-muted-foreground">固件</div>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+              {firmwareRow ? (
+                <>
+                  <span className="font-mono break-all">{firmwareRow.value || "—"}</span>
+                  {firmwareRow.sha256 && (
+                    <span className="font-mono text-xs text-muted-foreground" title={firmwareRow.sha256}>
+                      sha256 {firmwareRow.sha256.slice(0, 12)}
+                    </span>
+                  )}
+                  <span className="text-xs text-muted-foreground">
+                    {firmwareUnpacked === null ? "解包状态 —" : firmwareUnpacked ? "已解包" : "未解包"}
                   </span>
-                )}
-                <span className="text-xs text-muted-foreground">
-                  {firmwareUnpacked === null ? "解包状态 —" : firmwareUnpacked ? "已解包" : "未解包"}
+                </>
+              ) : (
+                <span className="text-muted-foreground text-xs">
+                  未上传固件（上传后落到 tasks/{taskId}/firmware/，并自动登记为测试范围）
                 </span>
-              </p>
+              )}
+              <input
+                ref={firmwareInputRef}
+                type="file"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void uploadFirmwareFile(f);
+                  if (firmwareInputRef.current) firmwareInputRef.current.value = "";
+                }}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-6 px-2 text-xs"
+                disabled={firmwareBusy}
+                onClick={() => firmwareInputRef.current?.click()}
+              >
+                {firmwareBusy ? (
+                  <RefreshCwIcon className="size-3 animate-spin" />
+                ) : (
+                  <UploadIcon className="size-3" />
+                )}
+                {firmwareBusy ? "上传中" : firmwareRow ? "补传固件" : "上传固件"}
+              </Button>
+              {firmwareErr && <span className="text-xs text-red-500">{firmwareErr}</span>}
             </div>
-          )}
+          </div>
         </CardContent>
       </Card>
       {/* 目标管理：查看/新增/修改/删除本任务的探索目标。新增与修改会通知规划者并复活任务，
