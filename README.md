@@ -1,39 +1,19 @@
 <div align="center">
-
 <img src="logo.png" width="250" height="250">
 
-# ARTEX - God
+# ARTEX-IOT
 
-AI 自主渗透测试系统 ARTEX **增强**版（Go 后端 + Next.js 前端）
+本项目基于 [ARTEX-God](https://github.com/Xiao1an/ARTEX-God) 二开，感谢原作者的开源。
 
-核心增强：**固件解包与组件登记**、**组件级覆盖度**、**PoC 复测与证据留痕**、**高危操作卡点收紧**
+重心放在 **IoT 固件审计**：移除了面向公网资产的探测与扫描渗透，把“资产”换成“组件”——围绕固件里一个个可指认的组件（httpd、busybox、upnpd、MQTT 服务……）去做解包、逆向、漏洞验证与复现。
 
-**能挖到漏洞的Agent，才是好Agent** 
+**支持：固件解包 · 二进制逆向（IDA 无头反编译，Web 端直接读函数源码）· PoC 生成与复现（可录屏）· 组件级漏洞挖掘与覆盖度追踪。**
 
-开箱即用，任何使用、部署问题、直接提issue
+反编译导出的前提是 **IDA 9.0+**（提供无头 `idat`）与 **INP.py**。IDA 出于版权考虑请自行安装，只要保证 9.0 及以上；INP 插件来源于开源项目 IDA-NO-MCP，但本项目的 `INP.py` 有改动，**请使用仓库根目录的这一份**。
 
-接受**任何**程度的批评与评论
+把 `INP.py` 放到 IDA 安装目录的 `plugins/` 下，然后在「系统配置 → 反编译」里填写 IDA 安装目录（或设置环境变量 `ARTEX_IDA_DIR`，也可以把 `idat` 加进 `PATH`）。
 
-因为，**今天**如果我没更新，**下周**它就被淘汰了。
-
-**使用方法**：①Agent打开目录一键部署(首推)
-
-②下载后双击目录下install.bat即可傻瓜式一键部署安装
-
-</div>
-
----
-
-## 以下为原项目README，包含核心功能架构介绍，再次致敬伟大项目ARTEX
-
-<div align="center">
-
-# ARTEX
-
-AI 自主渗透测试系统（Go 后端 + Next.js 前端）
-
-
-🌐 **在线 Demo**： [https://artex-demo.vercel.app/](https://artex-demo.vercel.app/)
+![IDA 安装目录与 INP 插件配置](screenshots/ida-inp.png)
 
 </div>
 
@@ -51,13 +31,13 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | :---: | :---: |
 | ![执行过程](screenshots/sessions.png) | ![探索链路](screenshots/graph.png) |
 
-| 发现 | 组件库（截图待更新） |
+| 发现（漏洞） | 组件库（组件版本 / 固件版本 / 厂商） |
 | :---: | :---: |
-| ![发现](screenshots/findings.png) | — |
+| ![发现](screenshots/findings.png) | ![组件库](screenshots/component.png) |
 
-| 流量录制 | 人在环路对话 |
+| 反编译（函数列表 + 源码） | 人在环路对话 |
 | :---: | :---: |
-| ![流量](screenshots/traffic.png) | ![对话](screenshots/chat.png) |
+| ![反编译](screenshots/decompile.png) | ![对话](screenshots/chat.png) |
 
 | Agent 管理 | LLM 配置 |
 | :---: | :---: |
@@ -70,11 +50,18 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 ---
 
-## 审批记录详情
+## 本分支相对上游的主要改动
 
-全局「审批记录」、任务内「拦截审批」及对话中的审批卡片均支持展开查看详情。展示结构参考
-[AegisHook 的审批详情组件](https://github.com/RuoJi6/AegisHook/blob/main/web/src/components/CallDetail.vue)，沿用 ARTEX 的组件和主题：
+- **方向收敛到 IoT 固件**：去掉资产探测与公网扫描渗透，工作单元从“资产”改为“组件”，覆盖度、漏洞、复测都围绕组件展开。
+- **固件厂商 / 版本人工可覆盖并锁定**：按 sha256 全局唯一，人改一次全库同步，Agent 只能补空（见下文「固件厂商与版本」）。
+- **IDA 无头反编译**：任务内「反编译」页签 + 跨任务「反编译」页，`idat` 逐个二进制导出 `.c`，Web 端函数搜索、callers/callees 跳转（见下文「IDA 无头反编译」）。
+- **组件库表格重做**：列序按审计习惯重排（任务/类型/组件名/组件版本/二进制/固件/固件版本/厂商/状态），列宽可拖拽、超宽省略、按任务筛选 + DSL 查询。
+- **固件上传不再静默失败**：上传失败会阻断建任务并给出原因，事后可在任务详情补传。
+- **品牌与资产**：更名 ARTEX-IOT，logo、favicon、应用图标统一替换。
 
+## 审批记录
+
+全局「审批记录」、任务内「拦截审批」以及对话里的审批卡片都支持展开查看详情（命令、参数、命中规则与放行理由），展示结构参考 [AegisHook 的审批详情组件](https://github.com/RuoJi6/AegisHook/blob/main/web/src/components/CallDetail.vue)，配色与组件沿用 ARTEX 主题。
 
 ## 安装
 
@@ -83,8 +70,9 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 ### 方式一：一键安装脚本（推荐）
 
 ```bash
-git clone https://github.com/Xiao1an/ARTEX-God.git
-cd ARTEX-God
+# 本项目是 ARTEX-God 的 IoT 分支，克隆地址换成你自己的仓库
+git clone <本仓库地址> ARTEX-IOT
+cd ARTEX-IOT
 ./install.sh
 ```
 
@@ -145,7 +133,7 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 
 ### 本仓库的私有 Release 更新源
 
-页面一键更新固定从 [Xiao1an/ARTEX-God Releases](https://github.com/Xiao1an/ARTEX-God/releases) 检查和下载版本。克隆或通过 Git 更新源码也使用 `Xiao1an/ARTEX-God`；原项目的 Go module 路径保持不变。
+更新源目前在代码里写死为上游 [Xiao1an/ARTEX-God Releases](https://github.com/Xiao1an/ARTEX-God/releases)（`selfupdate/github.go` 的 `const Repo`），Go module 路径也沿用上游。本分支若发布自己的 Release，需要先改这一行（或后续加环境变量覆盖），否则「检查更新」会拿上游版本号与本项目比较。
 
 若仓库为私有，请为运行 ARTEX 的后端进程设置 `ARTEX_UPDATE_GITHUB_TOKEN`，令牌只需本仓库的 **Contents: read** 权限。令牌由后端用于查询 Release 和下载附件，不发送给浏览器，也不要提交到 Git。公开仓库则无需令牌。
 
@@ -252,7 +240,29 @@ server {
 
 ---
 
+## 固件厂商与版本
 
+固件级的「厂商 / 版本」不挂在任务上，而是按**固件内容 sha256** 存一份权威值（落在 `task_scope` 中 `kind='firmware'` 的那一行）：同一个固件在所有任务里只有一份值，写入时按 sha 全量同步，不会出现“这行有值、那行空”的分叉。
+
+- **两个填写入口**：新建任务抽屉里的「固件厂商 / 固件版本」（此刻还没上传固件、没有 sha，先暂存在任务上，上传后自动绑定）；任务详情「测试范围 · 固件」行的「修改」。
+- **人填的可以覆盖**：改完该 sha256 的所有记录一起变，来源标记 `manual`。
+- **Agent 只能补空**：已有值不会被覆盖（来源标记 `agent`），避免不同 worker 给同一固件写出多个版本。
+- **厂商统一规范化**为首字母大写、其余小写（`TENDA` / `tenda` → `Tenda`）。
+- **与组件版本区分**：组件自己的 `version / vendor` 是组件属性（`busybox 1.19.2`、`nginx 1.2.2`、厂商自研 httpd …），与固件版本是两套字段，表格里分别显示为「组件版本」和「固件版本」。
+
+组件库表格：**任务 · 类型 · 组件名 · 组件版本 · 二进制 · 固件 · 固件版本 · 厂商 · 状态**。列宽可拖拽、超出列宽省略（悬停看全），支持按任务筛选，以及 DSL 查询（`component_name=lighttpd`、`status==pending AND type==web`、`port>=8000`）。
+
+## IDA 无头反编译
+
+可选能力，依赖本机的 **IDA 9.0+**（`idat`）与仓库根目录的 `INP.py`（放进 IDA 的 `plugins/`）。
+
+- **入口**：任务详情「反编译」页签（只列本任务组件）→ 勾选组件 → 建导出任务；侧边栏「反编译」整页可跨任务查看所有导出任务。
+- **配置**：系统配置 → 反编译。IDA 安装目录（留空回退 `ARTEX_IDA_DIR`，再回退 PATH 里的 `idat`）、INP 插件路径（默认 `<ida>/plugins/INP.py`）、单任务超时（默认 1800s）、单次勾选组件上限（默认 8）、任务产物配额（默认 2048 MB）。
+- **队列**：每个二进制一个 job，唯一键 `(task_id, binary_sha256)`；并发固定 1（IDA 许可限制）；失败/取消的 job 可重试；程序退出时会终止正在跑的 `idat` 进程组。
+- **产物**：`data/tasks/<任务 id>/decompile/<sha 前 8 位>/`，内含 `index.json`（函数名 / 地址 / callers / callees）与每函数一个 `.c`。
+- **浏览**：函数搜索、callers/callees 芯片、双击函数名跳转并可一键跳回；代码面板只按 `index.json` 取地址，不做路径拼接。
+
+---
 
 ## 开发
 
@@ -269,12 +279,13 @@ server {
 ### 本地运行与测试
 
 ```bash
-./dev.sh    # 后端(:8787) + 流量代理(:8788) + 前端 next dev(:5173) → http://localhost:5173
+./dev.sh    # 后端(:8787) + 流量代理(:8788) + 前端 next dev(默认 :3000) → http://localhost:3000
 ```
 
 - 后端：`go run ./cmd/artex`（不带 `-tags embedui` 则不内嵌前端）
 - 前端：`cd web && npm run dev`（`/api` 反代到后端，带热更新）
-- 测试：`go test ./...`
+- 测试：`go test ./...`（**务必指向独立测试库**：`ARTEX_PG_DSN=postgres://…/artex_test`，`db` / `server` 的用例会真写库）
+- 反编译：先在「系统配置 → 反编译」填 IDA 目录并点「测试」，它会实际解析 `idat` 与 `INP.py`
 - Mock 预览（无后端）：`cd web && NEXT_PUBLIC_MOCK=1 npm run dev`
 
 ---
@@ -310,6 +321,7 @@ flowchart TB
     GUARD["guard / intercept　工具审批门"]
     ENR["enrich　DNS / HTTP 异步补全"]
     EXT["MCP · skills · memory · report"]
+    DEC["反编译　idat 无头导出 + 函数索引"]
   end
 
   UI -->|HTTP| API
@@ -328,6 +340,8 @@ flowchart TB
   PL -.-> EXT
   WK -.-> EXT
   MA -.-> EXT
+  API --> DEC
+  DEC --> DB
 ```
 
 | 层 | 职责 |
@@ -337,7 +351,7 @@ flowchart TB
 | **engine** | 每任务一个 `plannerLoop` + N 个 worker goroutine；意图领取、超时/暂停/drain |
 | **agent** | goals / planner / worker / mainagent，`ToolSet` 把双图暴露成 LLM 工具 |
 | **db** | 双图的 Postgres 落地（pgx）；schema 随 `go:embed` 每次启动幂等建表 |
-| **支撑** | 记录型 MITM 代理、审批门、异步补全、MCP/技能/记忆/报告 |
+| **支撑** | 记录型 MITM 代理、审批门、异步补全、MCP/技能/记忆/报告、`idat` 无头反编译（job 队列 + `index.json` 索引） |
 
 ### 双图架构：探索图 + 组件库
 
@@ -345,6 +359,7 @@ flowchart TB
 
 - **组件库（components，全局共享）**：跨任务同一份的组件清单。一行 = 固件里的一个可指认组件（`type / component_name / version / vendor / binary_path / config_path / started_by / port / status`），按 `(firmware_sha256, type, component_name, version)` 去重；`status` 就是挖掘进度（`pending / running / completed / ignored`）。
 - **探索图（Exploration Graph，每任务独立）**：一次任务的“思考与推进”过程。节点为 `goal（目标）/ intent（意图）/ fact（事实）/ finding（漏洞）/ hint（提示）`，靠 `spawns / derived_from / yields / proves` 等边连成**血缘链**，回答“哪个方向派生自哪些事实、产出了什么”。
+- **固件元信息**：`task_scope` 里 `kind='firmware'` 的那一行不仅有文件名、`sha256` 和解包路径 `extract_path`，还存**固件级的 `vendor / version`**——按 sha 全局唯一，人工可覆盖、Agent 只补空（详见上文「固件厂商与版本」）。
 - **两边靠锚点相连**：`exploration_anchors(node_id, component_id)` 把意图/事实/漏洞锚定到具体组件上——于是既能从“探索方向”看它打的是哪些组件，也能从“某个组件”反查它在本任务被哪些意图测过、得出过哪些事实。这也支撑了**组件测试覆盖度**与**组件覆盖图**（组件类型 → 组件两层 + 已测高亮）。
 
 ```mermaid
@@ -454,6 +469,8 @@ flowchart TB
 https://github.com/oritera/Cairn
 
 https://github.com/Autumn-27/ARTEX
+
+https://github.com/Xiao1an/ARTEX-God
 
 
 ## 许可与免责声明

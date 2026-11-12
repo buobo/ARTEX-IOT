@@ -282,6 +282,9 @@ export interface TaskScopeRow {
   net?: string;
   value?: string;
   sha256?: string; // 仅 kind=firmware
+  vendor?: string; // 仅 kind=firmware：固件厂商（同 sha 全局一致）
+  version?: string; // 仅 kind=firmware：固件版本
+  meta_source?: string; // manual | agent：谁最后定的厂商/版本
   source: "auto" | "agent" | "manual";
   reason?: string;
 }

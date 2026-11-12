@@ -865,6 +865,16 @@ ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS value TEXT;
 -- 固件/靶机作为任务目标：固件靠 value(文件名) + sha256 唯一标识；靶机用 net 存 IP、value 存型号。
 -- 组件已由 components 表承载，任务范围只记录授权边界，不再用于覆盖度匹配。
 ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS sha256 TEXT;
+-- 固件的厂商/版本：只对 kind='firmware' 有意义。同一 sha256 的所有行保持同一份值
+-- （写入时按 sha 全量同步）；人可覆盖（meta_source='manual'），agent 只能补空。
+ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS vendor TEXT;
+ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS version TEXT;
+ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS meta_source TEXT;
+ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS meta_updated_at TIMESTAMPTZ;
+-- 建任务时人填的固件厂商/版本：此刻还没有 sha，先落在任务上暂存，
+-- 上传固件拿到 sha 后写进 task_scope 并清空这两列。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS firmware_vendor TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS firmware_version TEXT;
 -- 资产合集下线：先摘列（连带外键）再删表。
 ALTER TABLE task_scope DROP COLUMN IF EXISTS collection_id;
 DROP INDEX IF EXISTS idx_ts_collection;
@@ -1236,16 +1246,23 @@ CREATE INDEX IF NOT EXISTS idx_findings_time ON findings(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status, created_at DESC);
 -- 「按组件」视图靠 component_ids @> '[<id>]' 反查发现,没有这个 GIN 索引就是全表扫。
 DO $$
+DECLARE
+    renamed BOOLEAN := false;
 BEGIN
     IF EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'findings' AND column_name = 'asset_ids')
        AND NOT EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'findings' AND column_name = 'component_ids') THEN
         ALTER TABLE findings RENAME COLUMN asset_ids TO component_ids;
+        renamed := true;
+    END IF;
+    -- 老列存的是资产 id，语义已错位，清空避免误挂。
+    -- 必须只在「刚完成 asset_ids → component_ids 改名」的那一次执行：
+    -- schema.sql 每次启动都整份跑，写在外面会把所有漏洞的组件关联每次重启清空。
+    IF renamed THEN
+        UPDATE findings SET component_ids = '[]' WHERE component_ids::text <> '[]';
     END IF;
 END $$;
--- 老值存的是资产 id，语义已错位，清空避免误挂。
-UPDATE findings SET component_ids = '[]' WHERE component_ids::text <> '[]';
 DROP INDEX IF EXISTS idx_findings_asset_ids;
 CREATE INDEX IF NOT EXISTS idx_findings_component_ids ON findings USING GIN(component_ids jsonb_path_ops);
 

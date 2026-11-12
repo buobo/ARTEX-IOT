@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -375,9 +376,38 @@ func (s *Server) taskFirmwareUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+
+	// 固件厂商/版本：上传是人的操作，允许覆盖（同 sha 的所有行一起改）。
+	// 取值优先级：本次表单 > 建任务时的暂存；都没有就沿用库里已有的（不动）。
+	var vendor, version string
+	vendorOverride, versionOverride := false, false
+	if vs, ok := r.MultipartForm.Value["vendor"]; ok && len(vs) > 0 {
+		vendor, vendorOverride = strings.TrimSpace(vs[0]), true
+	}
+	if vs, ok := r.MultipartForm.Value["version"]; ok && len(vs) > 0 {
+		version, versionOverride = strings.TrimSpace(vs[0]), true
+	}
+	if !vendorOverride && !versionOverride {
+		if sv, sver := as.TaskFirmwareStaging(taskID); sv != "" || sver != "" {
+			vendor, version = sv, sver
+			vendorOverride, versionOverride = sv != "", sver != ""
+		}
+	}
+	if vendorOverride || versionOverride {
+		if _, _, mErr := as.SetFirmwareMeta(sum, vendor, version, true); mErr != nil {
+			log.Printf("[firmware] 写厂商/版本失败 task=%s sha=%s: %v", t.ID, sum, mErr)
+		}
+	}
+	// 暂存使命完成（不管这次有没有值，绑定后都清掉，避免下次上传被旧值污染）。
+	if sv, sver := as.TaskFirmwareStaging(taskID); sv != "" || sver != "" {
+		_ = as.SetTaskFirmwareStaging(taskID, "", "")
+	}
+	meta, _ := as.FirmwareMetaBySha(sum)
 	writeJSON(w, 200, map[string]any{
 		"name": name, "sha256": sum, "size": size, "path": s.wsRel(dest),
 		"scope_id": ts.ID, "reused": reused,
+		"vendor": meta.Vendor, "version": meta.Version, "meta_source": meta.Source,
+		"vendor_applied": vendorOverride, "version_applied": versionOverride,
 	})
 }
 

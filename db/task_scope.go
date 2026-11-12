@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // TaskScope is one row of a task's test scope — the coverage denominator and the
@@ -33,8 +34,15 @@ type TaskScope struct {
 	// Empty means "not unpacked yet" — upload never writes it; the first unpacking
 	// worker fills it in via the register_extract tool.
 	ExtractPath string `json:"extract_path,omitempty"`
-	Source      string `json:"source"`
-	Reason string `json:"reason,omitempty"`
+	// Vendor/Version 只对 kind=firmware 有意义：固件的厂商与版本。
+	// 同一个 sha256 的所有行始终写着同一份值（写入时按 sha 全量同步）；
+	// 人可以覆盖（MetaSource=manual），agent 只能补空。
+	Vendor  string `json:"vendor,omitempty"`
+	Version string `json:"version,omitempty"`
+	// MetaSource 记录固件厂商/版本是谁最后定的：manual | agent。
+	MetaSource string `json:"meta_source,omitempty"`
+	Source     string `json:"source"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 // stripHostPort drops a trailing :port from a host:port / ip:port / [ipv6]:port
@@ -91,17 +99,22 @@ func (s *ComponentStore) upsertTaskScopeResult(ts TaskScope) (bool, error) {
 		src = "auto"
 	}
 	query := `
-INSERT INTO task_scope(task_id, kind, company_id, domain, net, value, sha256, source, reason)
-VALUES ($1,$2,$3,$4,$5::cidr,$6,$7,$8,NULLIF($9,''))
+INSERT INTO task_scope(task_id, kind, company_id, domain, net, value, sha256, source, reason,
+                       vendor, version, meta_source, meta_updated_at)
+VALUES ($1,$2,$3,$4,$5::cidr,$6,$7,$8,NULLIF($9,''),
+        NULLIF($10,''), NULLIF($11,''), NULLIF($12,''),
+        CASE WHEN COALESCE($10,'')='' AND COALESCE($11,'')='' THEN NULL ELSE now() END)
 ON CONFLICT DO NOTHING`
 	var (
 		result sql.Result
 		err    error
 	)
 	if s.tx != nil {
-		result, err = s.tx.Exec(query, ts.TaskID, ts.Kind, companyVal, domainVal, netVal, valueVal, shaVal, src, ts.Reason)
+		result, err = s.tx.Exec(query, ts.TaskID, ts.Kind, companyVal, domainVal, netVal, valueVal, shaVal, src, ts.Reason,
+			ts.Vendor, ts.Version, ts.MetaSource)
 	} else {
-		result, err = s.db.Exec(query, ts.TaskID, ts.Kind, companyVal, domainVal, netVal, valueVal, shaVal, src, ts.Reason)
+		result, err = s.db.Exec(query, ts.TaskID, ts.Kind, companyVal, domainVal, netVal, valueVal, shaVal, src, ts.Reason,
+			ts.Vendor, ts.Version, ts.MetaSource)
 	}
 	if err != nil {
 		return false, err
@@ -233,6 +246,13 @@ func (s *ComponentStore) AddFirmwareScope(taskID int64, filename, sha256, reason
 	}
 	ts.Value = filename
 	ts.Sha256 = sha
+	// 同一个固件（sha）在所有任务里的厂商/版本必须一致：登记前先把已有值取出来，
+	// 新行直接带着写，避免出现"这行有值、那行空"。
+	if sha != "" {
+		if m, mErr := s.FirmwareMetaBySha(sha); mErr == nil {
+			ts.Vendor, ts.Version, ts.MetaSource = m.Vendor, m.Version, m.Source
+		}
+	}
 	// 同名固件只留一行：调用方没给 sha、或库里已有同名的无 sha 老行时，复用/升级那一行，
 	// 不再插新行（唯一键把 '' 和具体值当成两行，否则列表里会出现两条同名固件）。
 	var existingID int64
@@ -242,7 +262,11 @@ func (s *ComponentStore) AddFirmwareScope(taskID int64, filename, sha256, reason
  ORDER BY (COALESCE(sha256,'') <> '') DESC, id LIMIT 1`, taskID, filename).Scan(&existingID, &existingSha, &existingExtract)
 	switch {
 	case qerr == nil && existingSha == "" && sha != "":
-		if _, err := s.q().Exec(`UPDATE task_scope SET sha256=$2 WHERE id=$1`, existingID, sha); err != nil {
+		if _, err := s.q().Exec(`UPDATE task_scope SET sha256=$2,
+		       vendor=COALESCE(NULLIF(vendor,''), NULLIF($3,'')),
+		       version=COALESCE(NULLIF(version,''), NULLIF($4,'')),
+		       meta_source=COALESCE(NULLIF(meta_source,''), NULLIF($5,''))
+		     WHERE id=$1`, existingID, sha, ts.Vendor, ts.Version, ts.MetaSource); err != nil {
 			return ts, err
 		}
 		ts.ID = existingID
@@ -388,7 +412,8 @@ func (s *ComponentStore) ListTaskScope(taskID int64) ([]TaskScope, error) {
 	rows, err := s.db.Query(`
 SELECT ts.id, ts.kind, COALESCE(ts.company_id,0), COALESCE(c.name,''), COALESCE(ts.domain,''),
        COALESCE(ts.net::text,''), COALESCE(ts.value,''), COALESCE(ts.sha256,''), ts.source, COALESCE(ts.reason,''),
-       COALESCE(ts.extract_path,'')
+       COALESCE(ts.extract_path,''), COALESCE(ts.vendor,''), COALESCE(ts.version,''),
+       COALESCE(ts.meta_source,'')
 FROM task_scope ts
 LEFT JOIN companies c ON c.id=ts.company_id
 WHERE ts.task_id=$1 ORDER BY ts.id`, taskID)
@@ -400,7 +425,8 @@ WHERE ts.task_id=$1 ORDER BY ts.id`, taskID)
 	for rows.Next() {
 		var t TaskScope
 		var cid int64
-		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.CompanyName, &t.Domain, &t.Net, &t.Value, &t.Sha256, &t.Source, &t.Reason, &t.ExtractPath); err != nil {
+		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.CompanyName, &t.Domain, &t.Net, &t.Value, &t.Sha256, &t.Source, &t.Reason, &t.ExtractPath,
+			&t.Vendor, &t.Version, &t.MetaSource); err != nil {
 			return nil, err
 		}
 		t.TaskID = taskID
@@ -617,4 +643,151 @@ func (s *ComponentStore) BuildCoverageGraph(taskID, _ int64) (*CoverageGraphData
 		}
 	}
 	return g, nil
+}
+
+// ---- 固件的厂商/版本（vendor / version）-------------------------------
+//
+// 口径：只对 kind='firmware' 有意义，键是 sha256。
+//   · 同一个 sha256 的所有行（跨任务、跨文件名）始终写着同一份值——写入按 sha 全量同步，
+//     所以不存在"某行有值、某行空"的中间态，读任意一行都对。
+//   · 人的操作允许覆盖（meta_source='manual'）；agent 只能补空（meta_source='agent'）。
+//   · 组件的 vendor/version 是组件自身属性，与这里完全无关，互不写入。
+
+// normalizeVendor 把固件厂商统一成「首字母大写、其余小写」：
+// Tenda / TENDA / tenda → Tenda。空串保持空（表示没填）。
+func normalizeVendor(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	r := []rune(strings.ToLower(s))
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
+}
+
+// FirmwareMeta 是一次固件元信息读取的结果。
+type FirmwareMeta struct {
+	SHA       string `json:"sha256"`
+	Vendor    string `json:"vendor,omitempty"`
+	Version   string `json:"version,omitempty"`
+	Source    string `json:"meta_source,omitempty"`
+	Filename  string `json:"filename,omitempty"`
+	RowCount  int    `json:"row_count"`
+	UpdatedAt string `json:"meta_updated_at,omitempty"`
+}
+
+// FirmwareMetaBySha 读某个固件当前的厂商/版本（任取一行，因为所有行同步）。
+func (s *ComponentStore) FirmwareMetaBySha(sha string) (FirmwareMeta, error) {
+	out := FirmwareMeta{SHA: strings.ToLower(strings.TrimSpace(sha))}
+	if out.SHA == "" {
+		return out, nil
+	}
+	var vendor, version, src, updated sql.NullString
+	var filename sql.NullString
+	err := s.db.QueryRow(`SELECT COALESCE(vendor,''), COALESCE(version,''), COALESCE(meta_source,''),
+       COALESCE(to_char(meta_updated_at,'YYYY-MM-DD HH24:MI:SS'),''), COALESCE(value,'')
+  FROM task_scope
+ WHERE kind='firmware' AND sha256=$1
+ ORDER BY (COALESCE(vendor,'')<>'' OR COALESCE(version,'')<>'') DESC, id LIMIT 1`, out.SHA).
+		Scan(&vendor, &version, &src, &updated, &filename)
+	if errors.Is(err, sql.ErrNoRows) {
+		return out, nil
+	}
+	if err != nil {
+		return out, err
+	}
+	out.Vendor, out.Version = vendor.String, version.String
+	out.Source, out.UpdatedAt, out.Filename = src.String, updated.String, filename.String
+	_ = s.db.QueryRow(`SELECT count(*) FROM task_scope WHERE kind='firmware' AND sha256=$1`, out.SHA).Scan(&out.RowCount)
+	return out, nil
+}
+
+// FirmwareMetaByTask 读该任务固件行上的厂商/版本（顺带带回 sha 与文件名）。
+func (s *ComponentStore) FirmwareMetaByTask(taskID int64) (FirmwareMeta, error) {
+	out := FirmwareMeta{}
+	if taskID <= 0 {
+		return out, fmt.Errorf("需要 task_id")
+	}
+	var sha, vendor, version, src, updated, filename sql.NullString
+	err := s.db.QueryRow(`SELECT COALESCE(sha256,''), COALESCE(vendor,''), COALESCE(version,''),
+       COALESCE(meta_source,''), COALESCE(to_char(meta_updated_at,'YYYY-MM-DD HH24:MI:SS'),''), COALESCE(value,'')
+  FROM task_scope WHERE task_id=$1 AND kind='firmware'
+ ORDER BY (COALESCE(sha256,'')<>'') DESC, id DESC LIMIT 1`, taskID).
+		Scan(&sha, &vendor, &version, &src, &updated, &filename)
+	if errors.Is(err, sql.ErrNoRows) {
+		return out, nil
+	}
+	if err != nil {
+		return out, err
+	}
+	out.SHA, out.Vendor, out.Version = sha.String, vendor.String, version.String
+	out.Source, out.UpdatedAt, out.Filename = src.String, updated.String, filename.String
+	return out, nil
+}
+
+// SetFirmwareMeta 写固件的厂商/版本，并同步到该 sha 的所有固件行。
+//
+//	overwrite=true  人的操作：给定值原样写入（空串表示"这个字段不改"由调用方决定；
+//	                这里把空串也写进去 —— 调用方用指针区分"没传"和"传空"）。
+//	overwrite=false agent：只补空字段，已有值不动。
+//
+// 返回写完之后该 sha 的值（跨行一致的权威值）。
+func (s *ComponentStore) SetFirmwareMeta(sha, vendor, version string, overwrite bool) (string, string, error) {
+	sha = strings.ToLower(strings.TrimSpace(sha))
+	if !isHex64(sha) {
+		return "", "", fmt.Errorf("sha256 需要 64 位十六进制（小写）")
+	}
+	vendor = normalizeVendor(vendor)
+	version = strings.TrimSpace(version)
+	src := "agent"
+	if overwrite {
+		src = "manual"
+	}
+	var q string
+	if overwrite {
+		// 人的操作：传了哪个字段就覆盖哪个字段（空串=不动），并把所有行一起改。
+		q = `UPDATE task_scope SET
+		       vendor  = COALESCE(NULLIF($2,''), vendor),
+		       version = COALESCE(NULLIF($3,''), version),
+		       meta_source = $4,
+		       meta_updated_at = now()
+		     WHERE kind='firmware' AND sha256=$1`
+	} else {
+		// agent：只补空。
+		q = `UPDATE task_scope SET
+		       vendor  = COALESCE(NULLIF(vendor,''),  NULLIF($2,'')),
+		       version = COALESCE(NULLIF(version,''), NULLIF($3,'')),
+		       meta_source = COALESCE(NULLIF(meta_source,''), $4),
+		       meta_updated_at = now()
+		     WHERE kind='firmware' AND sha256=$1`
+	}
+	if _, err := s.db.Exec(q, sha, vendor, version, src); err != nil {
+		return "", "", err
+	}
+	// 没命中任何行 = 该 sha 还没登记过固件，值无处可落（调用方先登记固件行）。
+	meta, err := s.FirmwareMetaBySha(sha)
+	if err != nil {
+		return "", "", err
+	}
+	return meta.Vendor, meta.Version, nil
+}
+
+// TaskFirmwareStaging 读建任务时人填、还没绑定到某个 sha 的厂商/版本。
+func (s *ComponentStore) TaskFirmwareStaging(taskID int64) (vendor, version string) {
+	if taskID <= 0 {
+		return "", ""
+	}
+	_ = s.db.QueryRow(`SELECT COALESCE(firmware_vendor,''), COALESCE(firmware_version,'') FROM tasks WHERE id=$1`, taskID).
+		Scan(&vendor, &version)
+	return vendor, version
+}
+
+// SetTaskFirmwareStaging 写/清建任务时的暂存值（空串即清空）。
+func (s *ComponentStore) SetTaskFirmwareStaging(taskID int64, vendor, version string) error {
+	if taskID <= 0 {
+		return fmt.Errorf("需要 task_id")
+	}
+	_, err := s.db.Exec(`UPDATE tasks SET firmware_vendor=NULLIF($2,''), firmware_version=NULLIF($3,'') WHERE id=$1`,
+		taskID, normalizeVendor(vendor), strings.TrimSpace(version))
+	return err
 }

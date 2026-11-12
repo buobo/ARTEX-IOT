@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { useRouter } from "next/navigation";
 
+import { APP_CONFIG } from "@/config/app-config";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -67,8 +68,11 @@ export default function SetupPage() {
           <div className="absolute size-80 rounded-full border border-primary-foreground/10" />
           <div className="absolute size-60 rounded-full border border-primary-foreground/15" />
           <div className="absolute size-40 rounded-full border border-primary-foreground/20" />
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/logo.png" alt="ARTEX" width={160} height={160} className="relative brightness-0 invert" />
+          <div className="relative rounded-3xl bg-white p-3 shadow-xl">
+            {/* 新 logo 自带白底，不能再用 brightness-0 invert（那会把整块变成纯白） */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={APP_CONFIG.logo} alt="ARTEX-IOT" width={160} height={160} className="block" />
+          </div>
         </div>
       </div>
 

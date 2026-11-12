@@ -264,6 +264,8 @@ export const api = {
     seedFirstIntent?: boolean;
     planHeartbeatSeconds?: number;
     coverageEnabled?: boolean;
+    firmwareVendor?: string;
+    firmwareVersion?: string;
   }) =>
     post<Task>("/tasks", {
       name: input.name ?? "",
@@ -273,6 +275,8 @@ export const api = {
       llm_profile_ids: input.llmProfileIds ?? [],
       source_task_ids: input.sourceTaskIds ?? [],
       company_ids: input.companyIds ?? [],
+      firmware_vendor: input.firmwareVendor ?? "",
+      firmware_version: input.firmwareVersion ?? "",
       timeout_seconds: input.timeoutSeconds ?? 0,
       seed_first_intent: input.seedFirstIntent ?? false,
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
@@ -433,7 +437,11 @@ export const api = {
   workspaceMkdir: (path: string) => post<{ ok: boolean; path: string }>(`/workspace/mkdir`, { path }),
   workspaceDelete: (path: string) => del<{ ok: boolean }>(`/workspace/delete?path=${encodeURIComponent(path)}`),
   // 固件走独立上传入口：直接落到 tasks/<id>/firmware/，后端算 sha256 并登记 kind=firmware 范围。
-  uploadFirmware: async (id: string, file: File) => {
+  uploadFirmware: async (
+    id: string,
+    file: File,
+    meta?: { vendor?: string; version?: string },
+  ) => {
     if (MOCK) {
       return {
         name: file.name,
@@ -446,6 +454,8 @@ export const api = {
     }
     const fd = new FormData();
     fd.append("file", file);
+    if (meta?.vendor) fd.append("vendor", meta.vendor);
+    if (meta?.version) fd.append("version", meta.version);
     const token = getToken();
     const r = await fetch(`/api/tasks/${id}/firmware`, {
       method: "POST",
@@ -463,6 +473,11 @@ export const api = {
       path: string;
       scope_id: number;
       reused?: boolean;
+      vendor?: string;
+      version?: string;
+      meta_source?: string;
+      vendor_applied?: boolean;
+      version_applied?: boolean;
     }>;
   },
   workspaceUpload: async (dir: string, files: File[]) => {
@@ -608,6 +623,16 @@ export const api = {
     get<DecompileCode>(
       `/decompile/jobs/${encodeURIComponent(String(jobId))}/code/${encodeURIComponent(addr)}`,
     ),
+  // 人的操作：允许覆盖（同 sha 的所有固件行一起改）；任务还没固件时暂存。
+  setTaskFirmwareMeta: (id: string, body: { vendor?: string; version?: string }) =>
+    put<{
+      sha256: string;
+      vendor: string;
+      version: string;
+      meta_source?: string;
+      pending: boolean;
+      message?: string;
+    }>(`/tasks/${encodeURIComponent(id)}/firmware-meta`, body),
   decompileNames: (jobId: number | string) =>
     get<{ names: string[] }>(`/decompile/jobs/${encodeURIComponent(String(jobId))}/names`).then((r) => ({
       names: r?.names ?? [],

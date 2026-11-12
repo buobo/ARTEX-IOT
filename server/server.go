@@ -689,6 +689,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks", s.listTasks)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
 	mux.HandleFunc("POST /api/tasks/{id}/firmware", s.taskFirmwareUpload)
+	mux.HandleFunc("PUT /api/tasks/{id}/firmware-meta", s.putTaskFirmwareMeta)
 	mux.HandleFunc("GET /api/task-categories", s.pgListTaskCategories)
 	mux.HandleFunc("POST /api/task-categories", s.pgCreateTaskCategory)
 	mux.HandleFunc("PATCH /api/task-categories/{id}", s.pgRenameTaskCategory)
@@ -1472,6 +1473,10 @@ type createTaskReq struct {
 	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
 	SeedFirstIntent      *bool    `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
 	CoverageEnabled      *bool    `json:"coverage_enabled,omitempty"`  // 组件覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_components。company 关联不受影响。
+	// 固件厂商/版本（都可空）：此刻固件可能还没上传、还没有 sha，所以先暂存在任务上；
+	// 上传固件拿到 sha 后写入 task_scope 的固件行并清空暂存。人填的允许覆盖，agent 只能补空。
+	FirmwareVendor  string `json:"firmware_vendor,omitempty"`
+	FirmwareVersion string `json:"firmware_version,omitempty"`
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -1536,11 +1541,93 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// 固件厂商/版本：固件还没上传（没 sha），先落任务上暂存，上传时绑定。
+	if v := strings.TrimSpace(req.FirmwareVendor); v != "" || strings.TrimSpace(req.FirmwareVersion) != "" {
+		if cs := s.m.Components(); cs != nil {
+			taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+			if err := cs.SetTaskFirmwareStaging(taskID, req.FirmwareVendor, req.FirmwareVersion); err != nil {
+				log.Printf("[task] 暂存固件厂商/版本失败 task #%s: %v", t.ID, err)
+			}
+		}
+	}
 	log.Printf("[task] 新建任务 #%s «%s» 目标: %s", t.ID, req.Description, req.Goal)
 	// 共享的建后流程(seed + 种子意图 + 后台目标分解 + engine.Run),与 spawn_task 复用同一段。
 	// launchTask 内部异步,不阻塞 UI —— 目标分解在后台可见地进行。
 	s.launchTask(t, req.Description+" "+req.Goal, req.SeedFirstIntent != nil && *req.SeedFirstIntent)
 	writeJSON(w, 201, taskDTO(t, s.resolvedTaskStatus(t)))
+}
+
+// PUT /api/tasks/{id}/firmware-meta —— 人显式填写固件的厂商/版本。
+//
+// 语义（见 db.SetFirmwareMeta）：
+//
+//	· 人的操作允许覆盖，且覆盖会同步到该 sha 的所有固件行（跨任务），不留分叉；
+//	· 字段用指针区分"没传"(不动) 与 "传了值"(覆盖)；传非空即覆盖；
+//	· 任务还没有固件/没有 sha 时，值先暂存在任务上，等上传后绑定。
+func (s *Server) putTaskFirmwareMeta(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	cs := s.m.Components()
+	if cs == nil {
+		writeErr(w, 503, "component store 未启用")
+		return
+	}
+	var req struct {
+		Vendor  *string `json:"vendor"`
+		Version *string `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "bad json: "+err.Error())
+		return
+	}
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	meta, err := cs.FirmwareMetaByTask(taskID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	vendor := derefStr(req.Vendor)
+	version := derefStr(req.Version)
+	if meta.SHA == "" {
+		// 还没有固件：暂存在任务上（已有值取并集，空传不动）。
+		sv, sver := cs.TaskFirmwareStaging(taskID)
+		if strings.TrimSpace(vendor) != "" {
+			sv = vendor
+		}
+		if strings.TrimSpace(version) != "" {
+			sver = version
+		}
+		if err := cs.SetTaskFirmwareStaging(taskID, sv, sver); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{
+			"sha256": "", "vendor": sv, "version": sver, "pending": true,
+			"message": "任务还没有固件 sha，厂商/版本已暂存，上传固件后自动绑定",
+		})
+		return
+	}
+	v, ver, err := cs.SetFirmwareMeta(meta.SHA, vendor, version, true)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	final, _ := cs.FirmwareMetaBySha(meta.SHA)
+	writeJSON(w, 200, map[string]any{
+		"sha256": meta.SHA, "vendor": v, "version": ver,
+		"meta_source": final.Source, "pending": false,
+	})
+}
+
+// derefStr 解指针，nil/空白都当"没传"。
+func derefStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return strings.TrimSpace(*p)
 }
 
 func (s *Server) validateTaskProfileIDs(ids []int64) error {

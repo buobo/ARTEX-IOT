@@ -3110,6 +3110,10 @@ function CreateTaskSheet({
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 组件覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
+  // 固件厂商/版本（都可空）：填了就以此为准（人可覆盖）；留空则等 agent 从固件里识别。
+  // 与「组件自己的版本/厂商」是两回事，只作用于固件本身。
+  const [fwVendor, setFwVendor] = React.useState("");
+  const [fwVersion, setFwVersion] = React.useState("");
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
   const [uploading, setUploading] = React.useState(false);
   const [uploadCount, setUploadCount] = React.useState(0);
@@ -3189,13 +3193,18 @@ function CreateTaskSheet({
         seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
         coverageEnabled,
+        firmwareVendor: fwVendor.trim(),
+        firmwareVersion: fwVersion.trim(),
       });
       // 固件：任务已建好，再把独立选中的固件直接传到 tasks/<id>/firmware/（后端算 sha256 并登记范围）。
       // 上传失败必须【阻断】：任务已存在但 firmware/ 里没有文件，若静默继续，worker 会自己
       // 满盘搜宿主机找固件（真发生过）。这里停住，让用户在抽屉里重试或明确放弃。
       if (firmwareFile) {
         try {
-          await api.uploadFirmware(created.id, firmwareFile);
+          await api.uploadFirmware(created.id, firmwareFile, {
+            vendor: fwVendor.trim(),
+            version: fwVersion.trim(),
+          });
         } catch (e) {
           setPendingFirmware({ taskID: created.id, name: firmwareFile.name, error: (e as Error).message });
           return; // 不重置表单、不关抽屉：由用户决定重试还是放弃
@@ -3226,6 +3235,8 @@ function CreateTaskSheet({
     setHeartbeatMin("10");
     setSeedFirstIntent(false);
     setCoverageEnabled(true);
+    setFwVendor("");
+    setFwVersion("");
     setUploadCount(0);
     setFirmwareFile(null);
     setPendingFirmware(null);
@@ -3239,7 +3250,10 @@ function CreateTaskSheet({
     if (!pendingFirmware || !firmwareFile) return;
     setFirmwareBusy(true);
     try {
-      await api.uploadFirmware(pendingFirmware.taskID, firmwareFile);
+      await api.uploadFirmware(pendingFirmware.taskID, firmwareFile, {
+        vendor: fwVendor.trim(),
+        version: fwVersion.trim(),
+      });
       resetAndClose();
       toast.success("任务已创建，固件已上传");
     } catch (e) {
@@ -3309,6 +3323,32 @@ function CreateTaskSheet({
                 onChange={(e) => setName(e.target.value)}
               />
             </div>
+            {/* 固件厂商/版本：一个固件（sha256）只有一份值，人填了就以你为准、可再改；
+                Agent 只能补空、不能覆盖。留空则由 Agent 从固件里识别。 */}
+            <div className="grid gap-2 sm:grid-cols-2">
+              <div className="grid gap-2">
+                <Label htmlFor="fw-vendor">固件厂商（可选）</Label>
+                <Input
+                  id="fw-vendor"
+                  placeholder="如 Tenda / Xiaomi"
+                  value={fwVendor}
+                  onChange={(e) => setFwVendor(e.target.value)}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="fw-version">固件版本（可选）</Label>
+                <Input
+                  id="fw-version"
+                  placeholder="如 15.03.05.19"
+                  value={fwVersion}
+                  onChange={(e) => setFwVersion(e.target.value)}
+                />
+              </div>
+            </div>
+            <p className="text-muted-foreground -mt-2 text-xs">
+              这两项只描述固件本身（同一固件全局唯一）。填了就按你填的算，之后 Agent
+              不会再覆盖；留空则由 Agent 从固件里识别。组件自身的版本/厂商另算，不受影响。
+            </p>
             <Field>
               <FieldLabel htmlFor="task-category">任务分类</FieldLabel>
               <CategoryPicker

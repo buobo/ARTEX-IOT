@@ -21,6 +21,8 @@ import {
   XIcon,
 } from "lucide-react";
 
+import { toast } from "sonner";
+
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -194,6 +196,36 @@ export function OverviewTab({ taskId }: { taskId: string }) {
 
   // 固件行（来自 scope）+ 解包状态（看 tasks/<id>/ 里有没有解包产物目录）。
   const firmwareRow = scope.find((s) => s.kind === "firmware");
+  // 固件厂商/版本：人可覆盖（同 sha 全局一致），Agent 只能补空。
+  const [fwMetaEditing, setFwMetaEditing] = React.useState(false);
+  const [fwMetaBusy, setFwMetaBusy] = React.useState(false);
+  const [fwVendor, setFwVendor] = React.useState("");
+  const [fwVersion, setFwVersion] = React.useState("");
+  React.useEffect(() => {
+    setFwVendor(firmwareRow?.vendor ?? "");
+    setFwVersion(firmwareRow?.version ?? "");
+  }, [firmwareRow?.sha256, firmwareRow?.vendor, firmwareRow?.version]);
+
+  const saveFirmwareMeta = async () => {
+    if (!taskId) return;
+    setFwMetaBusy(true);
+    try {
+      const r = await api.setTaskFirmwareMeta(taskId, {
+        vendor: fwVendor.trim(),
+        version: fwVersion.trim(),
+      });
+      toast.success(
+        r.pending ? "已暂存，上传固件后自动绑定" : "已更新（同一固件的所有记录一起生效）",
+      );
+      setFwMetaEditing(false);
+      await loadScope();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setFwMetaBusy(false);
+    }
+  };
+
   React.useEffect(() => {
     if (!firmwareRow) {
       setFirmwareUnpacked(null);
@@ -514,6 +546,25 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                   <span className="text-xs text-muted-foreground">
                     {firmwareUnpacked === null ? "解包状态 —" : firmwareUnpacked ? "已解包" : "未解包"}
                   </span>
+                  <span className="flex items-center gap-1 text-xs">
+                    <span className="text-muted-foreground">厂商</span>
+                    <span className="font-mono">{firmwareRow.vendor || "—"}</span>
+                    <span className="text-muted-foreground">版本</span>
+                    <span className="font-mono">{firmwareRow.version || "—"}</span>
+                    {firmwareRow.meta_source && (
+                      <span className="text-muted-foreground">
+                        （{firmwareRow.meta_source === "manual" ? "人工" : "Agent"}）
+                      </span>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 px-1.5 text-xs"
+                      onClick={() => setFwMetaEditing((v) => !v)}
+                    >
+                      {fwMetaEditing ? "取消" : "修改"}
+                    </Button>
+                  </span>
                 </>
               ) : (
                 <span className="text-muted-foreground text-xs">
@@ -546,6 +597,28 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               </Button>
               {firmwareErr && <span className="text-xs text-red-500">{firmwareErr}</span>}
             </div>
+            {fwMetaEditing && (
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <Input
+                  className="h-7 w-40 text-xs"
+                  placeholder="固件厂商，如 Tenda"
+                  value={fwVendor}
+                  onChange={(e) => setFwVendor(e.target.value)}
+                />
+                <Input
+                  className="h-7 w-40 text-xs"
+                  placeholder="固件版本，如 15.03.05.19"
+                  value={fwVersion}
+                  onChange={(e) => setFwVersion(e.target.value)}
+                />
+                <Button size="sm" className="h-7 px-2 text-xs" disabled={fwMetaBusy} onClick={() => void saveFirmwareMeta()}>
+                  {fwMetaBusy ? "保存中…" : "保存"}
+                </Button>
+                <span className="text-muted-foreground text-xs">
+                  只改固件本身，同一固件（sha256）的所有记录一起生效；组件自己的版本/厂商不受影响
+                </span>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>

@@ -494,7 +494,6 @@ export default function SystemSettingsPage() {
                   id="decomp-ida-dir"
                   value={decompIdaDir}
                   onChange={(e) => setDecompIdaDir(e.target.value)}
-                  placeholder="/home/david/tools/ida（留空=用 ARTEX_IDA_DIR / PATH）"
                   className="font-mono text-xs"
                 />
               </div>

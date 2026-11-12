@@ -74,10 +74,17 @@ export default function ComponentsPage() {
   const [taskNames, setTaskNames] = React.useState<Record<string, string>>({});
   // 固件 sha256 → 固件文件名（值取自 task_scope.kind=firmware 的 value）
   const [firmwareName, setFirmwareName] = React.useState<Record<string, string>>({});
+  // 固件级厂商/版本（同 sha 全局一致，人可覆盖、agent 只补空）
+  const [firmwareMeta, setFirmwareMeta] = React.useState<
+    Record<string, { vendor: string; version: string; source: string }>
+  >({});
   const scopeDone = React.useRef(false);
   // 表格列宽：先用现有自适应宽度量一次，之后交给 colgroup + 拖拽
   const headRowRef = React.useRef<HTMLTableRowElement | null>(null);
-  const [colW, setColW] = React.useState<number[] | null>(null);
+  // 固定列宽（含复选框列）：表格永远 table-fixed，内容超出列宽一律省略号（truncate）。
+  // 默认值按当前观感给一组，用户可拖拽调整（不持久化）。
+  const DEFAULT_COLW = [40, 140, 72, 168, 92, 120, 200, 92, 110, 88];
+  const [colW, setColW] = React.useState<number[]>(DEFAULT_COLW);
   const dragCol = React.useRef<{ idx: number; startX: number; startW: number } | null>(null);
   const [addOpen, setAddOpen] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
@@ -130,6 +137,7 @@ export default function ComponentsPage() {
         const { tasks } = await api.tasks();
         const names: Record<string, string> = {};
         const fw: Record<string, string> = {};
+        const meta: Record<string, { vendor: string; version: string; source: string }> = {};
         for (const t of tasks) names[String(t.id)] = (t.name || "").trim() || `#${t.id}`;
         setTaskNames(names);
         await Promise.all(
@@ -137,7 +145,15 @@ export default function ComponentsPage() {
             try {
               const { scope } = await api.taskScope(String(t.id));
               for (const r of scope) {
-                if (r.kind === "firmware" && r.sha256 && r.value) fw[r.sha256] = r.value;
+                if (r.kind !== "firmware" || !r.sha256) continue;
+                if (r.value) fw[r.sha256] = r.value;
+                if (r.vendor || r.version) {
+                  meta[r.sha256] = {
+                    vendor: r.vendor ?? "",
+                    version: r.version ?? "",
+                    source: r.meta_source ?? "",
+                  };
+                }
               }
             } catch {
               /* 单个任务取不到不影响其他 */
@@ -145,6 +161,7 @@ export default function ComponentsPage() {
           }),
         );
         setFirmwareName(fw);
+        setFirmwareMeta(meta);
       } catch {
         /* 拉不到就退回只显示 sha 前缀 */
       }
@@ -161,18 +178,6 @@ export default function ComponentsPage() {
       .then((c) => setFirmwareCounts(c ?? {}))
       .catch(() => setFirmwareCounts({}));
   }, []);
-
-  // 首次渲染后量一次各列实际宽度（保持现在的观感），再切到固定列宽模式
-  React.useLayoutEffect(() => {
-    if (colW || rows.length === 0) return;
-    const tr = headRowRef.current;
-    if (!tr) return;
-    const cells = Array.from(tr.querySelectorAll("th")) as HTMLElement[];
-    if (cells.length !== 9) return;
-    const widths = cells.map((c) => Math.round(c.getBoundingClientRect().width));
-    if (widths.some((w) => w <= 0)) return;
-    setColW(widths);
-  });
 
   const startColDrag = (idx: number) => (e: React.MouseEvent) => {
     e.preventDefault();
@@ -464,14 +469,12 @@ export default function ComponentsPage() {
       </Card>
 
       <Card className="overflow-hidden p-0">
-        <Table className={colW ? "table-fixed" : undefined}>
-          {colW && (
-            <colgroup>
-              {colW.map((w, i) => (
-                <col key={i} style={{ width: w }} />
-              ))}
-            </colgroup>
-          )}
+        <Table className="table-fixed">
+          <colgroup>
+            {colW.map((w, i) => (
+              <col key={i} style={{ width: w }} />
+            ))}
+          </colgroup>
           <TableHeader>
             <TableRow ref={headRowRef}>
               <TableHead className="relative w-8">
@@ -494,8 +497,8 @@ export default function ComponentsPage() {
                   className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
                 />
               </TableHead>
-              <TableHead className="relative w-20 text-left">
-                类型
+              <TableHead className="relative w-36 text-left">
+                <span className="block truncate">任务</span>
                 <div
                   role="separator"
                   aria-orientation="vertical"
@@ -504,10 +507,9 @@ export default function ComponentsPage() {
                   title="拖动调整列宽"
                   className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
                 />
-
               </TableHead>
-              <TableHead className="relative  text-left">
-                组件名
+              <TableHead className="relative w-20 text-left">
+                <span className="block truncate">类型</span>
                 <div
                   role="separator"
                   aria-orientation="vertical"
@@ -516,10 +518,9 @@ export default function ComponentsPage() {
                   title="拖动调整列宽"
                   className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
                 />
-
               </TableHead>
-              <TableHead className="relative w-36 text-left">
-                任务
+              <TableHead className="relative text-left">
+                <span className="block truncate">组件名</span>
                 <div
                   role="separator"
                   aria-orientation="vertical"
@@ -528,10 +529,9 @@ export default function ComponentsPage() {
                   title="拖动调整列宽"
                   className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
                 />
-
               </TableHead>
-              <TableHead className="relative w-56 text-left">
-                固件
+              <TableHead className="relative w-24 text-left">
+                <span className="block truncate">组件版本</span>
                 <div
                   role="separator"
                   aria-orientation="vertical"
@@ -540,10 +540,9 @@ export default function ComponentsPage() {
                   title="拖动调整列宽"
                   className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
                 />
-
               </TableHead>
               <TableHead className="relative w-32 text-left">
-                二进制
+                <span className="block truncate">二进制</span>
                 <div
                   role="separator"
                   aria-orientation="vertical"
@@ -552,10 +551,9 @@ export default function ComponentsPage() {
                   title="拖动调整列宽"
                   className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
                 />
-
               </TableHead>
-              <TableHead className="relative w-24 text-left">
-                版本
+              <TableHead className="relative w-56 text-left">
+                <span className="block truncate">固件</span>
                 <div
                   role="separator"
                   aria-orientation="vertical"
@@ -564,10 +562,9 @@ export default function ComponentsPage() {
                   title="拖动调整列宽"
                   className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
                 />
-
               </TableHead>
-              <TableHead className="relative w-32 text-left">
-                厂商
+              <TableHead className="relative w-24 text-left">
+                <span className="block truncate">固件版本</span>
                 <div
                   role="separator"
                   aria-orientation="vertical"
@@ -576,23 +573,37 @@ export default function ComponentsPage() {
                   title="拖动调整列宽"
                   className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
                 />
-
+              </TableHead>
+              <TableHead className="relative w-32 text-left">
+                <span className="block truncate">厂商</span>
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  onMouseDown={startColDrag(8)}
+                  onClick={(e) => e.stopPropagation()}
+                  title="拖动调整列宽"
+                  className="hover:bg-sky-500/60 absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize"
+                />
               </TableHead>
               <TableHead className="relative w-24 text-left">
-                状态
+                <span className="block truncate">状态</span>
+
               </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={9} className="text-muted-foreground py-10 text-center text-sm">
+                <TableCell colSpan={10} className="text-muted-foreground py-10 text-center text-sm">
                   {loading ? "加载中…" : "没有组件。上传固件并让 agent 解包登记后，组件会出现在这里。"}
                 </TableCell>
               </TableRow>
             )}
             {rows.map((c) => {
               const st = statusOf(c);
+              // 固件信息按 sha256 从 scope 映射里取（固件厂商/版本是固件级字段，不是组件自己的）
+              const fwName = c.firmware_sha256 ? firmwareName[c.firmware_sha256] : undefined;
+              const fwMeta = c.firmware_sha256 ? firmwareMeta[c.firmware_sha256] : undefined;
               return (
                 <TableRow key={c.id} className="cursor-pointer" onClick={() => setDetail(c)}>
                   <TableCell onClick={(e) => e.stopPropagation()}>
@@ -604,9 +615,7 @@ export default function ComponentsPage() {
                       className="size-4 cursor-pointer align-middle accent-sky-500"
                     />
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{c.type}</TableCell>
-                  <TableCell className="font-medium">{c.component_name || "—"}</TableCell>
-                  <TableCell className="max-w-[9rem] text-xs">
+                  <TableCell className="text-xs">
                     <span className="block truncate" title={`ID: ${(c.task_ids ?? []).join(", ")}`}>
                       {(c.task_ids ?? []).length === 0
                         ? "—"
@@ -615,25 +624,59 @@ export default function ComponentsPage() {
                             .join("、")}
                     </span>
                   </TableCell>
-                  <TableCell className="max-w-[14rem] font-mono text-xs">
-                    {(() => {
-                      const fw = c.firmware_sha256 ? firmwareName[c.firmware_sha256] : undefined;
-                      if (!c.firmware_sha256) return <span className="text-muted-foreground">—</span>;
-                      return (
-                        <span className="block truncate" title={`${fw ?? "固件"} sha256: ${c.firmware_sha256}`}>
-                          {fw ?? "固件"}
-                          <span className="text-muted-foreground"> · {c.firmware_sha256.slice(0, 12)}</span>
-                        </span>
-                      );
-                    })()}
+                  <TableCell className="font-mono text-xs">
+                    <span className="block truncate" title={c.type}>{c.type}</span>
                   </TableCell>
-                  <TableCell className="text-muted-foreground max-w-[8rem] truncate font-mono text-xs">
-                    {c.binary_path || "—"}
+                  <TableCell className="font-medium">
+                    <span className="block truncate" title={c.component_name || ""}>{c.component_name || "—"}</span>
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{c.version || "—"}</TableCell>
-                  <TableCell className="text-xs">{c.vendor || "—"}</TableCell>
-                  <TableCell>
-                    <span className={`rounded px-2 py-0.5 text-xs ${STATUS_STYLE[st]}`}>
+                  {/* 组件自己的版本（agent 登记时填的），与固件版本是两回事 */}
+                  <TableCell className="font-mono text-xs">
+                    <span className="block truncate" title={c.version || ""}>{c.version || "—"}</span>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground font-mono text-xs">
+                    <span className="block truncate" title={c.binary_path || ""}>{c.binary_path || "—"}</span>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {!c.firmware_sha256 ? (
+                      <span className="text-muted-foreground">—</span>
+                    ) : (
+                      <span
+                        className="block truncate"
+                        title={[
+                          `${fwName ?? "固件"}`,
+                          `sha256: ${c.firmware_sha256}`,
+                          `固件厂商: ${fwMeta?.vendor || "—"}`,
+                          `固件版本: ${fwMeta?.version || "—"}`,
+                        ].join("\n")}
+                      >
+                        {fwName ?? "固件"}
+                        <span className="text-muted-foreground"> · {c.firmware_sha256.slice(0, 12)}</span>
+                      </span>
+                    )}
+                  </TableCell>
+                  {/* 固件版本：来自任务范围内那条 firmware（同 sha 全局一致，人工可覆盖） */}
+                  <TableCell className="font-mono text-xs">
+                    <span
+                      className="block truncate"
+                      title={fwMeta?.version ? `${fwMeta.version}（${fwMeta.source === "manual" ? "人工填写" : "Agent 识别"}）` : ""}
+                    >
+                      {fwMeta?.version || "—"}
+                    </span>
+                  </TableCell>
+                  {/* 厂商列展示的是「固件厂商」（来自任务范围里的 firmware 行，同 sha 全局一致），
+                      不是组件自己的 vendor —— 组件的 vendor 是上游包/作者（BusyBox、nginx…），
+                      只在详情抽屉里展示。 */}
+                  <TableCell className="text-xs">
+                    <span
+                      className="block truncate"
+                      title={fwMeta?.vendor ? `${fwMeta.vendor}（${fwMeta.source === "manual" ? "人工填写" : "Agent 识别"}）` : ""}
+                    >
+                      {fwMeta?.vendor || "—"}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    <span className={`inline-block max-w-full truncate rounded px-2 py-0.5 align-middle ${STATUS_STYLE[st]}`}>
                       {STATUS_LABELS[st]}
                     </span>
                   </TableCell>
@@ -796,6 +839,22 @@ export default function ComponentsPage() {
                 <Field label="厂商" value={detail.vendor} />
                 <Field label="主端口" value={detail.port ? String(detail.port) : ""} mono />
                 <Field label="固件 sha256" value={detail.firmware_sha256} mono wrap />
+                <Field
+                  label="固件厂商"
+                  value={
+                    detail.firmware_sha256
+                      ? firmwareMeta[detail.firmware_sha256]?.vendor || "—（未填）"
+                      : ""
+                  }
+                />
+                <Field
+                  label="固件版本"
+                  value={
+                    detail.firmware_sha256
+                      ? firmwareMeta[detail.firmware_sha256]?.version || "—（未填）"
+                      : ""
+                  }
+                />
                 <Field label="依赖/特征" value={(detail.technologies ?? []).join(", ")} />
                 <Field label="关联任务" value={(detail.task_ids ?? []).join(", ")} mono />
                 <Field label="备注" value={detail.notes} wrap />
