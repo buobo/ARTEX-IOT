@@ -709,6 +709,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/coverage-graph", s.taskCoverageGraph)
 	mux.HandleFunc("GET /api/tasks/{id}/poc", s.taskPocFiles)
 	mux.HandleFunc("GET /api/tasks/{id}/poc/{name}", s.taskPocDownload)
+	mux.HandleFunc("GET /api/tasks/{id}/poc/{name}/content", s.taskPocContent)
 	mux.HandleFunc("GET /api/tasks/{id}/component-refs", s.taskComponentRefs)
 	mux.HandleFunc("POST /api/tasks/{id}/components", s.attachTaskComponents)
 	mux.HandleFunc("DELETE /api/tasks/{id}/components/{componentID}", s.detachTaskComponent)
@@ -751,6 +752,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/components/counts", s.componentCounts)
 	mux.HandleFunc("POST /api/components", s.insertComponents)
 	mux.HandleFunc("POST /api/components/{id}/status", s.setComponentStatus)
+	mux.HandleFunc("POST /api/components/status", s.batchComponentStatus)
 	mux.HandleFunc("DELETE /api/components", s.deleteComponents)
 
 	// company system

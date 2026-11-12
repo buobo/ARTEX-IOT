@@ -71,6 +71,8 @@ export default function ComponentsPage() {
   const [firmwareCounts, setFirmwareCounts] = React.useState<Record<string, number>>({});
   const [addOpen, setAddOpen] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
+  const [batchStatus, setBatchStatus] = React.useState<ComponentStatus | "">("");
+  const [bulkSaving, setBulkSaving] = React.useState(false);
   const [form, setForm] = React.useState({
     type: "web",
     component_name: "",
@@ -116,11 +118,36 @@ export default function ComponentsPage() {
   }, []);
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const allChecked = rows.length > 0 && selected.length === rows.length;
+  const pageIDs = React.useMemo(() => rows.map((r) => r.id), [rows]);
+  const selectedOnPage = selected.filter((id) => pageIDs.includes(id)).length;
+  const allChecked = pageIDs.length > 0 && selectedOnPage === pageIDs.length;
+  const someChecked = selectedOnPage > 0 && !allChecked;
 
-  const toggleAll = () => setSelected(allChecked ? [] : rows.map((r) => r.id));
+  const toggleAll = () => setSelected(allChecked ? [] : pageIDs);
   const toggleOne = (id: number) =>
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const applyBatchStatus = async () => {
+    if (!batchStatus || selected.length === 0) return;
+    setBulkSaving(true);
+    try {
+      const res = await api.setComponentsStatus(selected, batchStatus);
+      const label = STATUS_LABELS[batchStatus];
+      toast.success(
+        res.changed === res.requested
+          ? `已把 ${res.changed} 个组件标为「${label}」`
+          : `已把 ${res.changed} 个组件标为「${label}」，${res.requested - res.changed} 个未变`,
+      );
+      setSelected([]);
+      setBatchStatus("");
+      await load();
+      void api.componentCounts().then((c) => setCounts(c ?? {}));
+    } catch (err) {
+      toast.error(`批量改状态失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBulkSaving(false);
+    }
+  };
 
   const removeSelected = async () => {
     try {
@@ -201,16 +228,49 @@ export default function ComponentsPage() {
           <Button variant="outline" size="sm" onClick={() => setAddOpen(true)}>
             <PlusIcon className="size-4" /> 新增组件
           </Button>
-          <Button
-            variant="destructive"
-            size="sm"
-            disabled={selected.length === 0}
-            onClick={() => setConfirmDelete(true)}
-          >
-            <Trash2Icon className="size-4" /> 删除选中（{selected.length}）
-          </Button>
         </div>
       </div>
+
+      {selected.length > 0 && (
+        <div className="bg-muted/40 flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 shadow-sm">
+          <span className="text-sm">
+            已选 <b className="tabular-nums">{selected.length}</b> 项
+          </span>
+          <Button variant="ghost" size="sm" onClick={toggleAll}>
+            {allChecked ? "取消本页全选" : "全选本页"}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => setSelected([])}>
+            清空
+          </Button>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <Select
+              value={batchStatus}
+              onValueChange={(v) => setBatchStatus(v as ComponentStatus)}
+            >
+              <SelectTrigger className="h-8 w-32">
+                <SelectValue placeholder="改状态为…" />
+              </SelectTrigger>
+              <SelectContent>
+                {COMPONENT_STATUSES.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {STATUS_LABELS[s]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button size="sm" disabled={!batchStatus || bulkSaving} onClick={() => void applyBatchStatus()}>
+              {bulkSaving ? <RefreshCwIcon className="size-4 animate-spin" /> : null} 应用
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setConfirmDelete(true)}
+            >
+              <Trash2Icon className="size-4" /> 删除选中（{selected.length}）
+            </Button>
+          </div>
+        </div>
+      )}
 
       {typeSummary.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
@@ -309,11 +369,14 @@ export default function ComponentsPage() {
             <TableRow>
               <TableHead className="w-8">
                 <input
+                  ref={(el) => {
+                    if (el) el.indeterminate = someChecked;
+                  }}
                   type="checkbox"
-                  aria-label="全选"
+                  aria-label="全选本页"
                   checked={allChecked}
                   onChange={toggleAll}
-                  className="size-4 align-middle"
+                  className="size-4 cursor-pointer align-middle accent-sky-500"
                 />
               </TableHead>
               <TableHead className="w-20">类型</TableHead>
@@ -343,7 +406,7 @@ export default function ComponentsPage() {
                       aria-label={`选择 ${c.component_name}`}
                       checked={selected.includes(c.id)}
                       onChange={() => toggleOne(c.id)}
-                      className="size-4 align-middle"
+                      className="size-4 cursor-pointer align-middle accent-sky-500"
                     />
                   </TableCell>
                   <TableCell className="font-mono text-xs">{c.type}</TableCell>

@@ -1356,6 +1356,16 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   // ── 覆盖度 / 覆盖图 / 组件关联（任务维度）──
   if (seg[0] === "tasks" && seg[2] === "coverage" && seg.length === 3) return D.coverage;
   if (seg[0] === "tasks" && seg[2] === "coverage-graph") return D.coverageGraph;
+  // PoC 文本内容（弹框渲染）
+  if (seg[0] === "tasks" && seg[2] === "poc" && seg[4] === "content" && m === "GET") {
+    return {
+      name: seg[3],
+      size: 96,
+      binary: false,
+      truncated: false,
+      content: "import requests\n\n# demo PoC\nr = requests.get('http://192.168.1.1/cgi-bin/x', timeout=5)\nprint(r.status_code)\n",
+    };
+  }
   // 任务 PoC 目录（真后端读磁盘；mock 给一份示例，保证 demo 模式不报错）
   if (seg[0] === "tasks" && seg[2] === "poc" && seg.length === 3 && m === "GET") {
     return {
@@ -1511,6 +1521,17 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       .slice(offset, offset + limit)
       .map((component) => (taskID ? mockComponentForTask(taskID, component) : component));
     return { count: page.length, total: list.length, components: page };
+  }
+  if (seg.length === 2 && seg[0] === "components" && seg[1] === "status" && m === "POST") {
+    const ids = new Set(Array.isArray(b.ids) ? b.ids.map(Number) : []);
+    const status = String(b.status ?? "");
+    let changed = 0;
+    for (const item of mockComponents) {
+      if (!ids.has(item.id)) continue;
+      item.status = status as Component["status"];
+      changed++;
+    }
+    return { ok: true, status, changed, requested: ids.size };
   }
   if (seg[0] === "components" && seg[2] === "status" && m === "POST") {
     const component = mockComponents.find((item) => item.id === Number(seg[1]));

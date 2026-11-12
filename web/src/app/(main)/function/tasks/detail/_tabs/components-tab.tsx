@@ -9,6 +9,13 @@ import { ComponentDslSearch } from "@/components/component-dsl-search";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
 import {
@@ -37,6 +44,9 @@ export function ComponentsTab({ taskId }: { taskId: string }) {
   const [dsl, setDsl] = React.useState("");
   const [status, setStatus] = React.useState<"" | ComponentStatus>("");
   const [loading, setLoading] = React.useState(false);
+  const [selected, setSelected] = React.useState<number[]>([]);
+  const [batchStatus, setBatchStatus] = React.useState<"" | ComponentStatus>("");
+  const [bulkSaving, setBulkSaving] = React.useState(false);
   // 状态计数走独立接口（不分页），避免只统计当前页。
   const [counts, setCounts] = React.useState<Record<ComponentStatus, number>>({
     pending: 0,
@@ -68,6 +78,7 @@ export function ComponentsTab({ taskId }: { taskId: string }) {
         ? await api.searchTaskComponents(taskId, dsl.trim(), "", status, "", PAGE_SIZE, 0)
         : await api.taskComponents(taskId, "", status, "", PAGE_SIZE, 0);
       setRows(res.components);
+      setSelected([]);
     } catch (err) {
       toast.error(`加载任务组件失败：${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -99,6 +110,65 @@ export function ComponentsTab({ taskId }: { taskId: string }) {
     } catch (err) {
       toast.error(`移除失败：${err instanceof Error ? err.message : String(err)}`);
     }
+  };
+
+  // ---- 批量：勾选后统一改状态 / 移除挂载 ----
+  // 改状态复用组件库那条接口（POST /api/components/status），带 task_id 走任务守卫；
+  // 移除挂载复用已有的单条 DELETE，不新增接口。
+  const pageIDs = React.useMemo(() => rows.map((r) => r.id), [rows]);
+  const selectedOnPage = selected.filter((id) => pageIDs.includes(id)).length;
+  const allChecked = pageIDs.length > 0 && selectedOnPage === pageIDs.length;
+  const someChecked = selectedOnPage > 0 && !allChecked;
+
+  const toggleAll = () => setSelected(allChecked ? [] : pageIDs);
+  const toggleOne = (id: number) =>
+    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const applyBatchStatus = async () => {
+    if (!batchStatus || selected.length === 0) return;
+    setBulkSaving(true);
+    try {
+      const res = await api.setComponentsStatus(selected, batchStatus, taskId);
+      const label = COMPONENT_STATUS_LABELS[batchStatus];
+      toast.success(
+        res.changed === res.requested
+          ? `已把 ${res.changed} 个组件标为「${label}」`
+          : `已把 ${res.changed} 个组件标为「${label}」，${res.requested - res.changed} 个未变`,
+      );
+      setBatchStatus("");
+      setSelected([]);
+      await load();
+      void loadCounts();
+    } catch (err) {
+      toast.error(`批量改状态失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBulkSaving(false);
+    }
+  };
+
+  const detachSelected = async () => {
+    if (selected.length === 0) return;
+    setBulkSaving(true);
+    let ok = 0;
+    const failed: string[] = [];
+    for (const id of selected) {
+      const row = rows.find((r) => r.id === id);
+      try {
+        await api.detachTaskComponent(taskId, id);
+        ok++;
+      } catch {
+        failed.push(row?.component_name || String(id));
+      }
+    }
+    setBulkSaving(false);
+    if (failed.length === 0) {
+      toast.success(`已从本任务移除 ${ok} 个组件`);
+    } else {
+      toast.error(`移除 ${ok} 个，失败 ${failed.length} 个：${failed.join("、")}`);
+    }
+    setSelected([]);
+    await load();
+    void loadCounts();
   };
 
   return (
@@ -144,10 +214,61 @@ export function ComponentsTab({ taskId }: { taskId: string }) {
           </div>
         </div>
 
+        {selected.length > 0 && (
+          <div className="bg-muted/40 flex flex-wrap items-center gap-2 rounded-md border px-3 py-2">
+            <span className="text-sm">
+              已选 <b className="tabular-nums">{selected.length}</b> 项
+            </span>
+            <Button variant="ghost" size="sm" onClick={toggleAll}>
+              {allChecked ? "取消本页全选" : "全选本页"}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setSelected([])}>
+              清空
+            </Button>
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              <Select value={batchStatus} onValueChange={(v) => setBatchStatus(v as ComponentStatus)}>
+                <SelectTrigger className="h-8 w-32">
+                  <SelectValue placeholder="改状态为…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {COMPONENT_STATUSES.map((s) => (
+                    <SelectItem key={s} value={s}>
+                      {COMPONENT_STATUS_LABELS[s]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button size="sm" disabled={!batchStatus || bulkSaving} onClick={() => void applyBatchStatus()}>
+                应用
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={bulkSaving}
+                onClick={() => void detachSelected()}
+              >
+                <UnlinkIcon className="size-4" /> 移除选中（{selected.length}）
+              </Button>
+            </div>
+          </div>
+        )}
+
         <div className="overflow-hidden rounded-md border">
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead className="w-8">
+                  <input
+                    ref={(el) => {
+                      if (el) el.indeterminate = someChecked;
+                    }}
+                    type="checkbox"
+                    aria-label="全选本页"
+                    checked={allChecked}
+                    onChange={toggleAll}
+                    className="size-4 cursor-pointer align-middle accent-sky-500"
+                  />
+                </TableHead>
                 <TableHead className="w-20">类型</TableHead>
                 <TableHead>组件名</TableHead>
                 <TableHead className="w-24">版本</TableHead>
@@ -159,7 +280,7 @@ export function ComponentsTab({ taskId }: { taskId: string }) {
             <TableBody>
               {rows.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-muted-foreground py-8 text-center text-sm">
+                  <TableCell colSpan={7} className="text-muted-foreground py-8 text-center text-sm">
                     {loading ? "加载中…" : "本任务还没有登记组件。"}
                   </TableCell>
                 </TableRow>
@@ -168,6 +289,15 @@ export function ComponentsTab({ taskId }: { taskId: string }) {
                 const st = (c.status || "pending") as ComponentStatus;
                 return (
                   <TableRow key={c.id}>
+                    <TableCell>
+                      <input
+                        type="checkbox"
+                        aria-label={`选择 ${c.component_name}`}
+                        checked={selected.includes(c.id)}
+                        onChange={() => toggleOne(c.id)}
+                        className="size-4 cursor-pointer align-middle accent-sky-500"
+                      />
+                    </TableCell>
                     <TableCell>
                       <Badge variant="secondary" className="text-[11px]">
                         {componentTypeLabel(c.type)}

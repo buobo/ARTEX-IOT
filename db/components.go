@@ -614,3 +614,30 @@ WHERE id=$1 AND $3 = ANY(task_ids)`, id, st, taskID)
 	}
 	return nil
 }
+
+// SetComponentsStatus 批量改状态，一次 UPDATE 走完。
+// taskID>0 时按任务守卫（只改该任务范围内的组件），taskID<=0 是组件库全局视角。
+func (s *ComponentStore) SetComponentsStatus(taskID int64, ids []int64, status string) (int64, error) {
+	st, ok := normalizeComponentStatus(status)
+	if !ok {
+		return 0, fmt.Errorf("%w: status=%q 不在 %v 内", ErrComponentInvalid, status, ComponentStatuses)
+	}
+	if len(ids) == 0 {
+		return 0, fmt.Errorf("%w: ids 为空", ErrComponentInvalid)
+	}
+	var (
+		res sql.Result
+		err error
+	)
+	if taskID > 0 {
+		res, err = s.q().Exec(`UPDATE components SET status=$2, updated_at=now()
+WHERE id = ANY($1::bigint[]) AND $3 = ANY(task_ids)`, ids, st, taskID)
+	} else {
+		res, err = s.q().Exec(`UPDATE components SET status=$2, updated_at=now()
+WHERE id = ANY($1::bigint[])`, ids, st)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}

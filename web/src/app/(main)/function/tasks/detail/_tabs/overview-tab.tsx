@@ -758,13 +758,14 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           <CardContent className="flex flex-col gap-3">
             <div className="flex items-baseline gap-3">
               <span className="text-2xl font-semibold tabular-nums">
-                {coverage.pct != null ? Math.round(coverage.pct * 100) + "%" : "—"}
+                {coverage.pct != null ? Math.round(coverage.pct) + "%" : "—"}
               </span>
               <span className="text-muted-foreground text-sm">
                 已测 {coverage.tested} / 组件共 {coverage.denominator}
+                <span className="ml-1.5 opacity-70">（不挖组件不计入总数）</span>
               </span>
             </div>
-            {coverage.pct != null && <Progress value={Math.round(coverage.pct * 100)} />}
+            {coverage.pct != null && <Progress value={Math.round(coverage.pct)} />}
             {coverage.by_type.length > 0 && (
               <div className="flex flex-wrap gap-1.5 text-xs">
                 {coverage.by_type.map((b) => (

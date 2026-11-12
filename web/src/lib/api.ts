@@ -102,6 +102,7 @@ import type {
   WorkspaceFile,
   WorkspaceListing,
   PocFileEntry,
+  PocFileContent,
 } from "@/lib/types";
 
 function getToken(): string | null {
@@ -534,7 +535,19 @@ export const api = {
         }),
       ),
     ),
+  // 批量改状态：一次请求、一条 UPDATE
+  setComponentsStatus: (ids: number[], status: ComponentStatus, taskId = "") =>
+    post<{ ok: boolean; status: ComponentStatus; changed: number; requested: number }>("/components/status", {
+      ids,
+      status,
+      ...(taskId ? { task_id: Number(taskId) } : {}),
+    }),
   // 任务视角：同一接口带 task_id
+  // PoC 文本内容（弹框渲染用）
+  taskPocContent: (taskId: string, name: string) =>
+    get<PocFileContent>(
+      `/tasks/${encodeURIComponent(taskId)}/poc/${encodeURIComponent(name)}/content`,
+    ),
   // 单个 PoC 文件的取回地址（inline=1 走浏览器内文本预览，否则下载）
   taskPocFileUrl: (taskId: string, name: string, inline = false) =>
     `/api/tasks/${encodeURIComponent(taskId)}/poc/${encodeURIComponent(name)}${inline ? "?inline=1" : ""}`,

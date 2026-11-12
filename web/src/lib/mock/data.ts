@@ -3586,7 +3586,7 @@ export const coverage = (() => {
     enabled: true,
     denominator: total.length,
     tested: tested.length,
-    pct: total.length ? tested.length / total.length : null,
+    pct: total.length ? (tested.length / total.length) * 100 : null,
     by_type: Array.from(byType, ([type, row]) => ({ type, ...row })),
   };
 })();

@@ -1516,5 +1516,15 @@ export interface PocFileEntry {
   name: string;
   size: number;
   modified_at: string;
-  referenced_by: { id: number; name?: string }[];
+  referenced_by: { id: number; name?: string; severity?: string; status?: string }[];
+}
+
+// GET /api/tasks/{id}/poc/{name}/content —— web 层渲染用（不下发原始文件）
+export interface PocFileContent {
+  name: string;
+  size: number;
+  binary: boolean;
+  truncated?: boolean;
+  content: string;
+  note?: string;
 }

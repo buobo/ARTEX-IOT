@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -124,7 +126,7 @@ func (s *Server) taskPocFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, f := range fs {
 			for _, name := range f.PocFiles {
-				refs[name] = append(refs[name], map[string]any{"id": f.ID, "name": f.Name})
+				refs[name] = append(refs[name], map[string]any{"id": f.ID, "name": f.Name, "severity": f.Severity, "status": f.Status})
 			}
 		}
 		if len(fs) == 0 || page*200 >= total {
@@ -150,9 +152,10 @@ func (s *Server) taskPocFiles(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
+		// 只列出已挂到漏洞上的 PoC：没被任何漏洞引用的文件不展示（文件仍在磁盘上）。
 		used := refs[e.Name()]
-		if used == nil {
-			used = []map[string]any{}
+		if len(used) == 0 {
+			continue
 		}
 		out = append(out, map[string]any{
 			"name":          e.Name(),
@@ -199,4 +202,53 @@ func (s *Server) taskPocDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename=%q", disp, name))
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	http.ServeContent(w, r, name, st.ModTime(), f)
+}
+
+// taskPocContent 返回单个 PoC 的文本内容，供前端弹框渲染（不走原始文件直链）。
+// 二进制或超长内容会明确说明，避免把整个大文件塞给浏览器。
+func (s *Server) taskPocContent(w http.ResponseWriter, r *http.Request) {
+	const maxRender = 512 << 10 // 512KB 以内直接渲染
+	id := strings.TrimSpace(r.PathValue("id"))
+	if _, ok := s.m.Task(id); !ok {
+		writeErr(w, http.StatusNotFound, "task not found")
+		return
+	}
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" || name != filepath.Base(name) || strings.Contains(name, "..") || strings.HasPrefix(name, ".") {
+		writeErr(w, http.StatusBadRequest, "文件名非法")
+		return
+	}
+	path := filepath.Join(s.m.dir, "tasks", id, "poc", name)
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeErr(w, http.StatusNotFound, "PoC 文件不存在")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	buf := make([]byte, maxRender)
+	n, _ := io.ReadFull(f, buf)
+	buf = buf[:n]
+	if bytes.IndexByte(buf, 0) >= 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"name": name, "size": st.Size(), "binary": true, "content": "",
+			"note": "看起来是二进制文件，请在「下载」里取回",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":      name,
+		"size":      st.Size(),
+		"binary":    false,
+		"truncated": st.Size() > int64(len(buf)),
+		"content":   string(buf),
+	})
 }

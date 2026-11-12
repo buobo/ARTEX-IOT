@@ -559,3 +559,35 @@ func (s *Server) setComponentStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "status": req.Status})
 }
+
+// POST /api/components/status —— 批量改状态（组件库多选后用）。
+func (s *Server) batchComponentStatus(w http.ResponseWriter, r *http.Request) {
+	as := s.componentStore()
+	if as == nil {
+		writeErr(w, 503, "database unavailable")
+		return
+	}
+	var req struct {
+		IDs    []int64 `json:"ids"`
+		Status string  `json:"status"`
+		TaskID int64   `json:"task_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
+	if len(req.IDs) == 0 {
+		writeErr(w, 400, "ids required")
+		return
+	}
+	if len(req.IDs) > 2000 {
+		writeErr(w, 400, "一次最多改 2000 个")
+		return
+	}
+	changed, err := as.SetComponentsStatus(req.TaskID, req.IDs, req.Status)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "status": req.Status, "changed": changed, "requested": len(req.IDs)})
+}

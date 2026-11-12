@@ -356,37 +356,6 @@ func TestRetestValidationSeedingAndScope(t *testing.T) {
 	}
 }
 
-func TestSlicePaneExtractsCommandOutput(t *testing.T) {
-	pane := strings.Join([]string{
-		"david@host:~$ bash .cmd-7.sh; printf '\\n__ARTEX_END_7_%d__\\n' $?",
-		"line1",
-		"colored: \x1b[32mGREEN\x1b[0m",
-		"",
-		"__ARTEX_END_7_3__",
-		"david@host:~$ ",
-	}, "\n")
-	out, code, ok := slicePane(pane, 7)
-	if !ok {
-		t.Fatal("sentinel not detected")
-	}
-	if code != 3 {
-		t.Fatalf("exit code = %d, want 3", code)
-	}
-	if !strings.Contains(out, "line1") || strings.Contains(out, "\x1b[") {
-		t.Fatalf("unexpected output: %q", out)
-	}
-	if strings.Contains(out, "__ARTEX_END_") || strings.Contains(out, "printf") {
-		t.Fatalf("echoed command or sentinel leaked into output: %q", out)
-	}
-}
-
-func TestSlicePaneIgnoresOtherSeq(t *testing.T) {
-	pane := "bash .cmd-2.sh; ...\nold\n__ARTEX_END_2_0__\n"
-	if _, _, ok := slicePane(pane, 3); ok {
-		t.Fatal("matched a sentinel from another sequence")
-	}
-}
-
 // TestRetestRecorderEndToEnd 真起 Xvfb+tmux+xterm+ffmpeg，验证命令执行结果、
 // 退出码、mp4 落盘、画面非黑、进程清理。缺任一依赖则跳过（CI 通常没有 xterm）。
 func TestRetestRecorderEndToEnd(t *testing.T) {

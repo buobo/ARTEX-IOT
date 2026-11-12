@@ -42,10 +42,10 @@ func builtinToolsByAgent() map[string][]actool.CoreTool {
 		"goals": {ts.setGoals(), ts.setConstraints()},
 		// auto 默认绑漏洞上报 + 组件登记工具，其他域工具可在 UI 按需勾选。
 		// 新库由此 seed 写入；老库由 seedAutoDefaultBindings 迁移。
-		"auto": {ts.addFinding(), ts.insertComponents(), ts.setComponentStatus(), ts.addCompanyScope(), ts.listComponents(), ts.listCompanies()},
+		"auto": {ts.addFinding(), ts.insertComponents(), ts.addCompanyScope(), ts.listComponents(), ts.listCompanies()},
 		// pentest（独立渗透 agent）默认绑：查组件 / 插组件 / 报漏洞 / 查漏洞 / 查企业。
 		// 新库由此 seed 写入；老库由 seedPentestDefaultBindings 迁移。
-		"pentest": {ts.listComponents(), ts.insertComponents(), ts.setComponentStatus(), ts.addFinding(), ts.listFindings(), ts.listCompanies()},
+		"pentest": {ts.listComponents(), ts.insertComponents(), ts.addFinding(), ts.listFindings(), ts.listCompanies()},
 	}
 }
 

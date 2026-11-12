@@ -2042,7 +2042,5 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.addTaskScope(),
 		// list_untested_components：按需查本任务范围内未测组件(类型+分页)，自行决定补测。
 		t.listUntestedComponents(),
-		// set_component_status：把挖完/不值得挖的组件状态置 completed/ignored，覆盖度才准。
-		t.setComponentStatus(),
 	}
 }

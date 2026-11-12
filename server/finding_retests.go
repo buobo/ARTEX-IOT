@@ -620,9 +620,67 @@ grep() { command grep --color=auto "$@"; }
 
 var (
 	recANSI = regexp.MustCompile("\x1b\\[[0-9;?]*[a-zA-Z]")
-	recEnd  = regexp.MustCompile(`__ARTEX_END_(\d+)_(\d+)__`)
 	recGeom = regexp.MustCompile(`(\d+)x(\d+)\+`)
+	recPrompt = regexp.MustCompile(`^[\w.-]+@[\w.-]+:[^$#]*[$#]\s*$`)
 )
+
+var (
+	pocPathRe = regexp.MustCompile(`(?:^|[\s"'=:])poc/([A-Za-z0-9][A-Za-z0-9._-]*)`)
+	cmdSkipWord = map[string]bool{
+		"cd": true, "export": true, "echo": true, "printf": true,
+		"set": true, "local": true, "true": true, "sleep": true,
+	}
+)
+
+// cmdScriptName 给每条命令的临时脚本起名：.cmd-<seq>-<提示>.sh。
+// 提示优先取命令里 poc/<文件名> 的主名（好让录屏对得上跑的是哪个 PoC），
+// 否则取命令首词；都取不到就退回 .cmd-<seq>.sh。
+func cmdScriptName(seq int64, command string) string {
+	if hint := cmdNameHint(command); hint != "" {
+		return fmt.Sprintf(".cmd-%d-%s.sh", seq, hint)
+	}
+	return fmt.Sprintf(".cmd-%d.sh", seq)
+}
+
+func cmdNameHint(command string) string {
+	if m := pocPathRe.FindStringSubmatch(command); len(m) == 2 {
+		name := m[1]
+		if i := strings.LastIndex(name, "."); i > 0 {
+			name = name[:i]
+		}
+		return cmdSlug(name)
+	}
+	for _, seg := range strings.FieldsFunc(command, func(r rune) bool {
+		return r == '&' || r == ';' || r == '\n' || r == '|'
+	}) {
+		for _, f := range strings.Fields(seg) {
+			if cmdSkipWord[f] || strings.HasPrefix(f, "-") || strings.Contains(f, "=") {
+				continue
+			}
+			if s := cmdSlug(f); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func cmdSlug(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := strings.Trim(b.String(), "._-")
+	if len(out) > 40 {
+		out = out[:40]
+	}
+	return out
+}
 
 // retestRecorder 是一次录制的运行时句柄；与 DB 行 1:1。
 type retestRecorder struct {
@@ -1101,8 +1159,14 @@ func (r *retestRecorder) run(ctx context.Context, command, cwd string, timeout t
 	seq := r.seq
 	r.mu.Unlock()
 
-	script := filepath.Join(r.dir, fmt.Sprintf(".cmd-%d.sh", seq))
+	base := cmdScriptName(seq, command)
+	script := filepath.Join(r.dir, base)
+	rcPath := filepath.Join(r.dir, fmt.Sprintf(".cmd-%d.rc", seq))
+	_ = os.Remove(rcPath)
+	// 退出码走 EXIT trap 落到文件：命令里自带 exit / set -e 也能拿到，
+	// 终端上不再多打那行哨兵。
 	body := "#!/bin/bash\n" + runHeader
+	body += "trap 'printf \"%d\" $? > " + shellQuote(rcPath) + "' EXIT\n"
 	if cwd = strings.TrimSpace(cwd); cwd != "" {
 		body += "cd -- " + shellQuote(cwd) + " || exit 125\n"
 	}
@@ -1111,8 +1175,9 @@ func (r *retestRecorder) run(ctx context.Context, command, cwd string, timeout t
 		return "", 0, false, err
 	}
 	defer os.Remove(script)
+	defer os.Remove(rcPath)
 
-	typed := fmt.Sprintf("bash .cmd-%d.sh; printf '\\n__ARTEX_END_%d_%%d__\\n' $?", seq, seq)
+	typed := "bash " + base
 	if out, err := exec.Command("tmux", "send-keys", "-t", r.session, typed, "Enter").CombinedOutput(); err != nil {
 		return "", 0, false, fmt.Errorf("发送命令失败: %s", strings.TrimSpace(string(out)))
 	}
@@ -1122,15 +1187,20 @@ func (r *retestRecorder) run(ctx context.Context, command, cwd string, timeout t
 	for {
 		if p, err := r.snapshotPane(2000); err == nil {
 			pane = p
-			if body, code, ok := slicePane(pane, seq); ok {
-				if len(body) > recMaxOutput {
-					body = body[:recMaxOutput] + "\n…(输出已截断)"
-				}
-				if incExecCountHook != nil {
-					_ = incExecCountHook(r)
-				}
-				return body, code, false, nil
+		}
+		if b, err := os.ReadFile(rcPath); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+			code, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+			if p, err := r.snapshotPane(2000); err == nil {
+				pane = p
 			}
+			out, _ := slicePaneOpen(pane, seq)
+			if len(out) > recMaxOutput {
+				out = out[:recMaxOutput] + "\n…(输出已截断)"
+			}
+			if incExecCountHook != nil {
+				_ = incExecCountHook(r)
+			}
+			return out, code, false, nil
 		}
 		if time.Now().After(deadline) {
 			tail, _ := slicePaneOpen(pane, seq)
@@ -1170,25 +1240,6 @@ func (r *retestRecorder) snapshotPane(lines int) (string, error) {
 	return string(out), nil
 }
 
-// slicePane 从回显行之后截到哨兵行之前；返回 (输出, 退出码, 是否出现哨兵)。
-func slicePane(pane string, seq int64) (string, int, bool) {
-	lines := strings.Split(pane, "\n")
-	endIdx, code := -1, 0
-	for i := len(lines) - 1; i >= 0; i-- {
-		m := recEnd.FindStringSubmatch(lines[i])
-		if m == nil || m[1] != strconv.FormatInt(seq, 10) {
-			continue
-		}
-		endIdx = i
-		code, _ = strconv.Atoi(m[2])
-		break
-	}
-	if endIdx < 0 {
-		return "", 0, false
-	}
-	return joinPaneLines(lines, seq, endIdx), code, true
-}
-
 // slicePaneOpen 用于超时：从回显行之后截到当前最后一行。
 func slicePaneOpen(pane string, seq int64) (string, error) {
 	if pane == "" {
@@ -1198,10 +1249,15 @@ func slicePaneOpen(pane string, seq int64) (string, error) {
 }
 
 func joinPaneLines(lines []string, seq int64, endIdx int) string {
-	marker := fmt.Sprintf(".cmd-%d.sh", seq)
+	prefix := fmt.Sprintf(".cmd-%d", seq)
 	startIdx := -1
 	for i := endIdx - 1; i >= 0; i-- {
-		if strings.Contains(lines[i], marker) {
+		idx := strings.Index(lines[i], prefix)
+		if idx < 0 {
+			continue
+		}
+		// 名字带提示时是 .cmd-7-poc.sh；不带时是 .cmd-7.sh。别把 .cmd-70 认成 .cmd-7。
+		if rest := lines[i][idx+len(prefix):]; rest == "" || rest[0] == '.' || rest[0] == '-' {
 			startIdx = i
 			break
 		}
@@ -1213,8 +1269,18 @@ func joinPaneLines(lines []string, seq int64, endIdx int) string {
 		endIdx = len(lines)
 	}
 	body := lines[startIdx+1 : endIdx]
-	for len(body) > 0 && strings.TrimSpace(body[len(body)-1]) == "" {
-		body = body[:len(body)-1]
+	for len(body) > 0 {
+		last := strings.TrimRight(body[len(body)-1], " \t")
+		if strings.TrimSpace(last) == "" {
+			body = body[:len(body)-1]
+			continue
+		}
+		// 末尾这行是 shell 打完命令后重新画出来的提示符（user@host:path$ ），不是输出。
+		if recPrompt.MatchString(strings.TrimSpace(recANSI.ReplaceAllString(last, ""))) {
+			body = body[:len(body)-1]
+			continue
+		}
+		break
 	}
 	out := recANSI.ReplaceAllString(strings.Join(body, "\n"), "")
 	return strings.TrimRight(out, " 	\n")
