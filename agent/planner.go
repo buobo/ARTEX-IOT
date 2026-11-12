@@ -229,6 +229,23 @@ func factIDsYielded(ts *db.ExplorationStore, id int64) string {
 	return strings.Join(parts, "、")
 }
 
+// hasAnyIntent reports whether this exploration has EVER had an intent node, in any
+// state (open/running/done/blocked/exhausted). Used to gate the first-round prompt:
+// the engine's first-loop tag is in-memory and resets on restart, but a task with
+// exploration history must never be treated as a first round again. Errors are
+// treated as "has history" (fail closed) so a DB hiccup never unleashes the
+// first-round wording on an advanced task.
+func hasAnyIntent(ts *db.ExplorationStore) bool {
+	if ts == nil {
+		return true
+	}
+	nodes, err := ts.ListByKind(db.KindIntent, 1)
+	if err != nil {
+		return true
+	}
+	return len(nodes) > 0
+}
+
 // intentSummary reads an intent node's one-line summary (best-effort, "?" on miss).
 func intentSummary(ts *db.ExplorationStore, id int64) string {
 	n, err := ts.GetNode(id)
@@ -357,12 +374,18 @@ func plannerSystem(goal, dataDir, workDir, compSummary string) string {
 // and/or finding(s) reported (may be several — the engine debounces a burst; empty
 // for time/heartbeat wakes). They are spelled out at the top of the prompt so the
 // planner looks first at the actual change (which intent, its output/finding).
-func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.ComponentStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
+// firstPlan marks the task's first planning wake-up (engine's in-memory tag); it is
+// ANDed with "the graph has no intent yet" so a process restart (which resets the
+// tag) can't make an already-explored task look like a first round.
+func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.ComponentStore, ts *db.ExplorationStore, goal string, firstPlan bool, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
 	// cold-digest §2.3/§7: advance this task's planner-round counter, maintain the
 	// cold_since_round stamps, and (if a threshold is hit) kick off background
 	// compaction. Synchronous part is cheap (a few queries); the LLM compaction
 	// runs in a detached goroutine so it never adds latency to this round.
 	p.compactor.OnPlannerRound(ctx, ts)
+	// 首轮判定：调用方传的 tag（本任务第一次规划唤醒）再叠加"图上还没有任何意图"。
+	// 后者是为了进程重启把 tag 重置回 true 时，已有探索历史的任务不会被重新当成首轮。
+	firstPlan = firstPlan && !hasAnyIntent(ts)
 	tsx := NewToolSet(ts, "planner")
 	tsx.SetFindingRecorder(p.findingRecorder)
 	if as != nil {
@@ -455,8 +478,17 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.ComponentStore,
 	// 指令 + 跨唤醒待办（todo 是模型自己的规划便签，可再生，放 user 即可）。
 	// 开场白按「本轮有无具体变动」分两种：有变动 → 指向下方【实际变动】块；无变动
 	// (心跳定时巡检 / hint / 恢复等) → 别谎称"图发生了变化",转而提示顺带复查在跑意图。
+	// 首轮优先：调用方传进来的 firstPlan（本任务第一次规划唤醒）再叠加"图里还没有任何意图"，
+	// 这样进程重启把 tag 重置回 true 时，已有探索历史的任务不会被重新当成首轮。
 	lead := "刚有具体变动（见下面的【本次触发本轮的实际变动】），据此规划下一步："
-	if len(triggers) == 0 {
+	switch {
+	case firstPlan:
+		lead = "这是本任务的**第一次规划轮**（图里只有任务起点，还没有任何意图）。\n" +
+			"本轮请产出**恰好 1 条**意图：这条意图一定不是具体的挖洞要求，而是对整个固件进行全方位的探测，" +
+			"包括但不限于：历史漏洞查询，固件解包，组件扫描，版本号提取，系统架构分析，模拟方式等等，" +
+			"这一轮的意图产生的产物一定是基础性的，在后续的不同环节都可以用到，不需要重复工作的行动。\n" +
+			"其余想到的方向先记进 TodoWrite 待办，后续轮次再派。"
+	case len(triggers) == 0:
 		lead = "本轮是**定时巡检（心跳到点）/无具体变动信号**的唤醒——图不一定有新变动。顺带复查在跑意图：长时间无进展或跑偏的用 steer_work 纠偏、方向整个错的用 kill_work 止损；再判定目标、决定是否补方向："
 		// 心跳/无变动唤醒时,若全图已无任何 open 或 running 意图 → 探索已停摆(没 worker 在跑、
 		// 也没排队方向)。明确告知 planner 并强制其本轮补出新方向,别只复查在跑意图后空转一轮。

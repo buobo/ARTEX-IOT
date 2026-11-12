@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/norma/llm"
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -23,6 +24,12 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 		var p map[string]any
 		_ = json.Unmarshal(n.Payload, &p)
 		m := map[string]any{"id": n.ID, "summary": p["summary"], "state": n.State}
+		// blocked_reason：planner 需要它来区分"真的没跑成"（llm_quota_exhausted / 普通
+		// blocked）。done 行上的备注（experience_missing）刻意不给 planner 看——那是审计
+		// 痕迹，不是要它派的活。只对非 done 输出，也避免给每条意图多塞一个空字段。
+		if n.BlockedReason != "" && n.State != "done" {
+			m["blocked_reason"] = n.BlockedReason
+		}
 		if n.Inherited {
 			m["source_task_id"] = n.SourceTaskID
 			m["inherited"] = true
@@ -71,6 +78,14 @@ type ToolSet struct {
 	GoalMet   bool
 	Reason    string
 	writes    WriteCounts
+	// prov is the task's LLM provider, injected so read_experience can distill the
+	// task's stored experience. It must be the llmrec-wrapped provider the worker
+	// itself runs on: that is what meters the call into llm_usage and shares the
+	// task's profile failover. nil = the tool reports unavailable.
+	prov llm.Provider
+	// expReads counts read_experience calls in this run — a per-run budget, because
+	// each call is a real (billed) model call and a worker can otherwise loop on it.
+	expReads int
 	// killWork, if set, terminates a running work by intent id (engine callback,
 	// wired by the planner). nil = the kill_work tool reports unavailable.
 	killWork func(intentID int64) error
@@ -124,6 +139,12 @@ func (t *ToolSet) SetResumeTask(fn func()) { t.resumeTask = fn }
 // that hold the task handle (main-agent chat, cross-task orchestration).
 func (t *ToolSet) SetNotify(fn func()) { t.notify = fn }
 
+// SetProvider wires the LLM provider used by read_experience. Pass the task's own
+// provider (the llmrec-wrapped one the worker runs on): that way the retrieval call
+// is metered into llm_usage, lands in the task's transcript, and inherits profile
+// failover instead of duplicating any of that here.
+func (t *ToolSet) SetProvider(p llm.Provider) { t.prov = p }
+
 // SetNotifyFinding wires the finding-wake callback (see ToolSet.notifyFinding).
 func (t *ToolSet) SetNotifyFinding(fn func(int64, string)) { t.notifyFinding = fn }
 
@@ -135,6 +156,11 @@ type WriteCounts struct {
 	Facts      int
 	Components int
 	Findings   int
+	// Experience counts write_experience calls this run. It is deliberately NOT part
+	// of Total(): Total answers "did this run persist exploration output at all", and
+	// an experience note is bookkeeping, not a finding. Whether the note actually
+	// landed is always read back from intent.experience, never from this counter.
+	Experience int
 }
 
 // Total is every node persisted this run, regardless of kind — the
@@ -143,7 +169,7 @@ func (w WriteCounts) Total() int { return w.Facts + w.Components + w.Findings }
 
 // String renders the per-kind breakdown for logs, e.g. "事实1 组件25 漏洞0".
 func (w WriteCounts) String() string {
-	return fmt.Sprintf("事实%d 组件%d 漏洞%d", w.Facts, w.Components, w.Findings)
+	return fmt.Sprintf("事实%d 组件%d 漏洞%d 经验%d", w.Facts, w.Components, w.Findings, w.Experience)
 }
 
 // Writes reports what this run wrote back, split by node kind (so the engine can
@@ -2029,6 +2055,12 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.expandDigest(),
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),
 		t.killWorkTool(), t.steerWorkTool(),
+		// set_component_status：规划者回填组件挖掘进度（pending/running/completed/ignored）。
+		// 必须由【本任务的 ToolSet】发出——它的 handler 用 t.taskID 做任务守卫
+		// (db/components.go SetTaskComponentStatus: taskID<=0 走无守卫的全局 UPDATE)。
+		// 过去它不在本列表里，DB 绑定又给了 planner，于是 ToolResolve 从 server 级
+		// domainReg 注入了 taskID=0 的实例 → planner 能改任何任务的组件状态。
+		t.setComponentStatus(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。
 		t.addFinding(),
 		// list_companies：查看企业列表 + scope + 组件数（拿 company_id / 理解归属范围）。

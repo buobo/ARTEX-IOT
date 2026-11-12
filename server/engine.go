@@ -539,6 +539,12 @@ type steerHooks struct {
 	limit int
 	// label 形如 "worker-1 · #42"，只用于日志。
 	label string
+	// expWrote 读库判断本意图的经验是否已写入（nil = 不做经验校验）。读不到时返回
+	// true（fail-open）：数据库抖动不该把一条正常结束的意图打成未完成。
+	expWrote func() bool
+	// expNudges 是「经验未写」提醒的已注入次数，上限 expLimit；同样是共享指针。
+	expNudges *atomic.Int64
+	expLimit  int
 }
 
 // 空转回合(只有思考、既无正文也无工具调用)续跑次数的默认值，与 SDK 空响应重试的
@@ -550,6 +556,11 @@ type steerHooks struct {
 // 收场;只有真正发生过一次工具回合，配额才刷新(norma/harness/query.go:534)。所以这个
 // 闸挡的是「工具 → 空转 → 推 → 工具 → 空转」这种病态循环，别让它把意图预算耗光。
 const defaultEmptyTurnNudges = 2
+
+// experienceNudgesLimit 是「经验未写」提醒在一条意图内的注入上限（C2）。harness 的
+// stopHookActive 保证推一次之后必须隔一个工具回合才会再推，所以这里只是总配额：
+// 推完两次还不写，就放行收场，交给落终态时的 C4 校验判 blocked。
+const experienceNudgesLimit = 2
 
 // emptyTurnNudge 是空转回合注入的续跑指令。
 //
@@ -606,8 +617,23 @@ func (h steerHooks) Stop(ctx context.Context, messages []llm.Message) (bool, []s
 		prevent, blocking, msg = h.inner.Stop(ctx, messages)
 	}
 	// inner 已经决定硬停、或已经要注入自己的续跑消息 → 尊重它，不再叠加。
+	if prevent || len(blocking) > 0 {
+		return prevent, blocking, msg
+	}
+	// 经验校验（C2）：模型要收场了，但【本轮】还没写经验 → 叫回来写。
+	// 顺序上让"空转续跑"先来（见下）：只思考没产出时催它写经验，只会让它给没做完的活
+	// 写个占位经验，反而把意图判成完成。所以这里只在"这一轮确实有正文产出"时才拦。
+	if !isThinkingOnlyTurn(messages) && h.expWrote != nil && h.expNudges != nil && h.expLimit > 0 && !h.expWrote() {
+		n := h.expNudges.Add(1)
+		if n <= int64(h.expLimit) {
+			log.Printf("[work %s] 本轮未写经验，注入提醒 (%d/%d)", h.label, n, h.expLimit)
+			return false, []string{agent.ExperienceReminder}, ""
+		}
+		log.Printf("[work %s] 经验提醒已达上限 %d，放行收场", h.label, h.expLimit)
+		return prevent, blocking, msg
+	}
 	// limit<=0 = 用户把「空响应重试次数」配成了 -1，即显式关掉这层。
-	if prevent || len(blocking) > 0 || h.nudges == nil || h.limit <= 0 || !isThinkingOnlyTurn(messages) {
+	if h.nudges == nil || h.limit <= 0 || !isThinkingOnlyTurn(messages) {
 		return prevent, blocking, msg
 	}
 	n := h.nudges.Add(1)
@@ -805,6 +831,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 	heartbeat := time.NewTimer(interval)
 	defer heartbeat.Stop()
 
+	// firstLoop flags the task's first planning wake-up (in-memory, resets on process
+	// restart). Plan() ANDs it with "the graph has no intent yet", so a restart can't
+	// re-treat an already-explored task as a first round.
+	firstLoop := true
+
 	// runRound 跑一轮规划(含 debounce 合并 + 各 guard)。src 仅用于日志区分触发来源。
 	runRound := func(src string) {
 		// debounce: coalesce a burst of changes into one planning round
@@ -877,7 +908,10 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		triggers := t.drainTriggers()
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
 		e.BeginLLMCall(t.ID)
-		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.components, t.Store, t.Goal, triggers, emit)
+		// 消费首轮名额：先取值再置 false，保证只有这一次唤醒能走首轮文案。
+		firstPlan := firstLoop
+		firstLoop = false
+		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.components, t.Store, t.Goal, firstPlan, triggers, emit)
 		e.EndLLMCall(t.ID)
 		switch {
 		case err != nil && ectx.Err() == nil:
@@ -1004,6 +1038,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	}
 	label := fmt.Sprintf("%s · #%d", name, iid)
 	workCtx = intercept.WithTaskContext(workCtx, t.ID, label, taskEmit)
+	// 本轮开始的时刻：经验校验按「本轮有没有写」(experience_at >= runStart) 判定。
+	// 必须在 worker.Execute 之前取，且只属于这一次 run——重跑要重新写经验。
+	runStart := time.Now()
 	// nudges 有意建在 model_error 重跑循环之外:空转续跑的上限是「这条意图」的总量，
 	// 重跑一轮不该把额度清零重来。
 	hooks := steerHooks{
@@ -1012,6 +1049,19 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		nudges: &atomic.Int64{},
 		limit:  e.emptyTurnNudgeLimit(),
 		label:  label,
+		// C2 经验校验：模型要收场但【本轮】还没写经验 → 注入提醒把它叫回来写。
+		// 判据是 experience_at >= runStart，不是"列里非空"——上一轮留下的旧经验不算数。
+		// 读库失败按「已写」处理（fail-open）：一次 DB 抖动不该把正常收尾打成未完成；
+		// 真正的兜底在后面落终态时的 C4 校验。
+		expWrote: func() bool {
+			ok, err := t.Store.IntentExperienceWrittenSince(iid, runStart)
+			if err != nil {
+				return true
+			}
+			return ok
+		},
+		expNudges: &atomic.Int64{},
+		expLimit:  experienceNudgesLimit,
 	}
 	wTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	e.BeginLLMCall(t.ID)
@@ -1143,11 +1193,25 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		state = "exhausted"
 		log.Printf("[worker %s] intent %d 运行超时(exhausted)，收尾后写回 %s", name, intent.ID, wrote)
 	}
+	// C4 经验留痕：正常收尾但【本轮】没写经验 → 仍然判 done。成果（事实/漏洞）已经写回
+	// 图里了，判成 blocked 只会让 planner 以为这条方向没做完、重复派活；C2/C3 也已经在
+	// 同一会话里追问过两次。这里只在意图上留一条备注 blocked_reason=experience_missing，
+	// 供审计/统计看，planner 侧刻意看不到它（compactIntents 只给非 done 输出该字段）。
+	expMissing := false
+	if state == "done" {
+		if fresh, freshErr := t.Store.IntentExperienceWrittenSince(intent.ID, runStart); freshErr == nil && !fresh {
+			expMissing = true
+			log.Printf("[worker %s] task %s 意图 #%d 收尾但未写经验，只做留痕(done+experience_missing)，写回 %s", name, t.ID, intent.ID, wrote)
+		}
+	}
 	if state == "blocked" && isTaskLLMChainExhausted(err) {
 		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedLLMQuota)
 	} else {
 		if stateErr := transitionIntentState(t.Store, intent.ID, "running", state); stateErr != nil {
 			log.Printf("[worker %s] task %s 意图 #%d 终态 %s 落库失败: %v", name, t.ID, intent.ID, state, stateErr)
+		}
+		if expMissing {
+			_ = t.Store.MarkIntentNote(intent.ID, db.IntentNoteExperienceMissing)
 		}
 	}
 	log.Printf("[worker %s] task %s 意图 #%d 结束: %s (写回 %s)", name, t.ID, intent.ID, state, wrote)

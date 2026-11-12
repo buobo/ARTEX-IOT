@@ -10,6 +10,15 @@ import (
 
 const IntentBlockedLLMQuota = "llm_quota_exhausted"
 
+// IntentNoteExperienceMissing is a *note*, not a failure reason: that round's
+// exploration finished and its results were written back, only the experience was
+// never distilled. So it hangs off a state='done' row and deliberately does NOT
+// block the intent — blocking would make the planner think the direction was
+// unfinished and dispatch it again. The planner cannot see it either
+// (compactIntents only reports blocked_reason for non-done states).
+// See 意图经验沉淀与检索-设计方案.md.
+const IntentNoteExperienceMissing = "experience_missing"
+
 // TaskLLMProfile is one ordered entry in a task's explicit failover chain.
 type TaskLLMProfile struct {
 	ProfileID   int64      `json:"profile_id"`
@@ -563,6 +572,16 @@ func (s *ExplorationStore) SetIntentBlockedReason(id int64, reason string) error
 	_, err := s.db.Exec(`UPDATE exploration_nodes
 SET state='blocked', blocked_reason=NULLIF($1,''), completed_at=now()
 WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, reason, id, s.expID)
+	return err
+}
+
+// MarkIntentNote 只在意图上留一条备注（写进 blocked_reason 列），不改 state、
+// 不动 completed_at。给"正常收尾、只是没留经验记录"这类"要留痕、不算失败"的情况用：
+// 判成 blocked 会让 planner 以为这条方向没做完而重复派活，而成果早就写回图里了。
+func (s *ExplorationStore) MarkIntentNote(id int64, note string) error {
+	_, err := s.db.Exec(`UPDATE exploration_nodes
+SET blocked_reason=NULLIF($1,'')
+WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, note, id, s.expID)
 	return err
 }
 

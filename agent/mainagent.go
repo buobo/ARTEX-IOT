@@ -123,6 +123,9 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	tsx.SetNotifyGoal(notifyGoal) // set_goals 新增目标 → 给 planner 记一条「人新增了目标：…」触发
 	tsx.SetNotifyHint(notifyHint) // add_hint 新增提示 → 给 planner 记一条「人新增了 N 条战略提示：…」触发
 	tsx.steerWork = m.steerWork   // enable steer_work tool (nil = unavailable)
+	// read_experience 内部要调一次模型做筛选/压缩；复用 mainagent 这条已计量的
+	// provider，用量自动落 llm_usage（worker='experience'），无需另配。
+	tsx.SetProvider(m.prov)
 	// 领域工具 + 基础默认工具集（Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash）
 	// 覆盖度功能关闭时剔除 add_task_scope/list_untested_components（不入 prompt）。
 	base := append(tsx.DropCoverageTools(tsx.MainAgentTools()), actool.DefaultTools()...)

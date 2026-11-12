@@ -2,16 +2,26 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
+	"unicode"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/llmrec"
+	"github.com/Autumn-27/norma/llm"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/Autumn-27/norma/transcript"
 )
 
 // =====================================================================
@@ -466,12 +476,18 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		// component management (handlers guard nil store internally)。
 		// add_company_scope 不给 worker：定义企业范围属规划/主控/Auto 的职责，worker 只执行探索。
 		t.insertComponents(), t.listComponents(), t.savePoc(),
+		// register_extract：解包完成后登记根目录，后续意图复用（不再重复解包）。
+		// 只给 worker —— planner/main 不负责解包，也就不登记。
+		t.registerExtract(),
 		// 跨 work 回看：worker 也可复用其他 work 的观察，避免重复劳动。
 		// search_all_worker_traces：不必先知道 intent_id，按关键字全局捞命中步骤；
 		// get_worker_trace：锁定某条 work 后列步骤/就地搜/取完整内容。
 		t.searchAllWorkerTraces(), t.getWorkerTrace(),
 		// node_detail：worker 拿到 intent_id/节点 id 后可查该节点完整详情（配合上面的回看）。
 		t.nodeDetail(),
+		// 经验沉淀：write_experience 收尾必写（写在本意图节点上），read_experience 按
+		// 自然语言检索本任务历史经验（工具内部调一次模型做筛选+压缩，用量走 llmrec）。
+		t.writeExperience(), t.readExperience(),
 		// 以下工具仍【不给】worker，只留给 planner/main（读上下文、跨 work 复盘是规划职责，
 		// worker 只做单条意图的执行与写回）：list_facts / list_companies / list_worker_traces。
 	}
@@ -496,6 +512,10 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		t.addTaskScope(),
 		// list_untested_components：按需查本任务范围内未测组件(类型+分页)，自行决定补测。
 		t.listUntestedComponents(),
+		// read_experience：人可检索"本任务历史意图沉淀下来的经验"（只读）。
+		// 刻意不给 write_experience——经验只能由执行该意图的 worker 自己写，
+		// 人在旁边补写会把"这条意图到底做了什么"搅浑。
+		t.readExperience(),
 	}
 }
 
@@ -565,6 +585,210 @@ func (t *ToolSet) setComponentStatus() actool.CoreTool {
 // =====================================================================
 // save_poc：PoC 落盘 + INDEX.md 索引
 // =====================================================================
+
+// =====================================================================
+// register_extract：解包产物登记（task_scope.extract_path）
+// =====================================================================
+
+// registerExtract 让真正解包的那个 worker 把根目录登记到本任务的 firmware 行上。
+// 上传时不写这一列，第一次解包后才回填；之后所有意图复用同一路径，不再重复解包。
+func (t *ToolSet) registerExtract() actool.CoreTool {
+	return writeTool(
+		"register_extract",
+		"解包完成后调用：把解包得到的根目录登记到本任务（task_scope 的 firmware 行 extract_path），"+
+			"之后其它意图复用这个路径，不用再解一遍。\n"+
+			"path：解包得到的根目录，可以就在 firmware/ 下（例如 firmware/rootfs）；只接受本任务目录内的路径。\n"+
+			"firmware：可选，固件文件名或 64 位 sha256；任务里有多份固件时必须指定。\n"+
+			"note：可选，解包器与主命令（例如 sasquatch -d rootfs R6220.bin），便于复现。\n"+
+			"返回：{extract_path(相对), abs_path, firmware:{value,sha256}, scope_row_id, entries, already, previous}",
+		obj(map[string]any{
+			"path":     str("解包得到的根目录（相对任务目录或绝对路径，必须落在本任务目录内）"),
+			"firmware": str("可选：固件文件名或 64 位 sha256；多份固件时必填"),
+			"note":     str("可选：解包器与主命令，便于复现"),
+		}, "path"),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				Path     string `json:"path"`
+				Firmware string `json:"firmware"`
+				Note     string `json:"note"`
+			}
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if t.as == nil {
+				return actool.Errorf("register_extract 未启用: ComponentStore 未初始化"), nil
+			}
+			if t.taskID <= 0 || t.dataDir == "" {
+				return actool.Errorf("register_extract 需要任务上下文与数据目录"), nil
+			}
+			taskDir := filepath.Join(t.dataDir, "tasks", strconv.FormatInt(t.taskID, 10))
+			raw := strings.TrimSpace(a.Path)
+			if raw == "" {
+				return actool.Errorf("path 不能为空：填解包得到的根目录"), nil
+			}
+			abs := raw
+			if !filepath.IsAbs(abs) {
+				abs = filepath.Join(taskDir, raw)
+			}
+			// 软链逃逸防护：两侧都取真实路径后再比前缀。
+			real, err := filepath.EvalSymlinks(filepath.Clean(abs))
+			if err != nil {
+				return actool.Errorf(fmt.Sprintf("路径不存在或无法解析: %v", err)), nil
+			}
+			base := taskDir
+			if b, err := filepath.EvalSymlinks(taskDir); err == nil {
+				base = b
+			}
+			rel, err := filepath.Rel(base, real)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return actool.Errorf("path 必须在本任务目录内（" + base + "）"), nil
+			}
+			st, err := os.Stat(real)
+			if err != nil || !st.IsDir() {
+				return actool.Errorf("path 不是已存在的目录"), nil
+			}
+			entries, err := os.ReadDir(real)
+			if err != nil {
+				return actool.Errorf("读取目录失败: " + err.Error()), nil
+			}
+			if len(entries) < 20 {
+				return actool.Errorf(fmt.Sprintf("目录里只有 %d 个条目，看起来是半成品；确认解包完整后再登记", len(entries))), nil
+			}
+
+			fwName, fwSha, err := t.locateFirmwareFile(filepath.Join(taskDir, "firmware"), a.Firmware, real)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			reason := "解包登记"
+			if note := strings.TrimSpace(a.Note); note != "" {
+				reason = "解包登记: " + note
+			}
+			ts, prev, err := t.as.SetFirmwareExtract(t.taskID, fwSha, fwName, filepath.ToSlash(rel), reason)
+			if err != nil {
+				return actool.Errorf("登记失败: " + err.Error()), nil
+			}
+			return jsonResult(map[string]any{
+				"ok":           true,
+				"extract_path": ts.ExtractPath,
+				"abs_path":     real,
+				"firmware":     map[string]any{"value": ts.Value, "sha256": ts.Sha256},
+				"scope_row_id": ts.ID,
+				"entries":      len(entries),
+				"already":      prev == ts.ExtractPath,
+				"previous":     prev,
+			})
+		})
+}
+
+// locateFirmwareFile 找到本次解包对应的固件文件，返回 (文件名, sha256)。
+// skip 是刚登记的解包目录本身——它可能就在 firmware/ 下，枚举时必须排除。
+func (t *ToolSet) locateFirmwareFile(fwDir, spec, skip string) (string, string, error) {
+	spec = strings.TrimSpace(spec)
+	// 显式文件名：直接取，不猜。
+	if spec != "" && !looksLikeSha256(spec) {
+		if strings.ContainsAny(spec, `/\`) {
+			return "", "", fmt.Errorf("firmware 只接受文件名或 sha256，不要带路径")
+		}
+		p := filepath.Join(fwDir, spec)
+		if st, err := os.Stat(p); err != nil || !st.Mode().IsRegular() {
+			return "", "", fmt.Errorf("firmware/ 下找不到固件文件 %s", spec)
+		}
+		sum, err := sha256File(p)
+		if err != nil {
+			return "", "", fmt.Errorf("计算固件摘要失败: %v", err)
+		}
+		return spec, sum, nil
+	}
+	// 其余情况：只看 firmware/ 下的常规文件（跳过目录，解包产物可能就在里面）。
+	ents, err := os.ReadDir(fwDir)
+	if err != nil {
+		return "", "", fmt.Errorf("读不到固件目录 firmware/：%v", err)
+	}
+	type cand struct{ name, path string }
+	var cands []cand
+	for _, e := range ents {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		p := filepath.Join(fwDir, e.Name())
+		if skip != "" && p == skip {
+			continue
+		}
+		if st, err := e.Info(); err != nil || !st.Mode().IsRegular() {
+			continue
+		}
+		cands = append(cands, cand{e.Name(), p})
+	}
+	if len(cands) == 0 {
+		return "", "", fmt.Errorf("firmware/ 下没有固件文件，无法登记解包产物")
+	}
+	// 指定了 sha：逐一比对。
+	if spec != "" {
+		for _, c := range cands {
+			if sum, err := sha256File(c.path); err == nil && strings.EqualFold(sum, spec) {
+				return c.name, sum, nil
+			}
+		}
+		return "", "", fmt.Errorf("firmware/ 下没有摘要为 %s 的固件", spec)
+	}
+	// 没指定：恰好一份就直接用；多份则用任务范围里已登记的文件名收敛。
+	if len(cands) > 1 {
+		known := map[string]bool{}
+		if rows, err := t.as.ListTaskScope(t.taskID); err == nil {
+			for _, r := range rows {
+				if r.Kind == "firmware" && r.Value != "" {
+					known[r.Value] = true
+				}
+			}
+		}
+		var only []cand
+		for _, c := range cands {
+			if known[c.name] {
+				only = append(only, c)
+			}
+		}
+		if len(only) != 1 {
+			names := make([]string, 0, len(cands))
+			for _, c := range cands {
+				names = append(names, c.name)
+			}
+			return "", "", fmt.Errorf("firmware/ 下有多份固件，请用 firmware 参数指定：%s", strings.Join(names, ", "))
+		}
+		cands = only
+	}
+	sum, err := sha256File(cands[0].path)
+	if err != nil {
+		return "", "", fmt.Errorf("计算固件摘要失败: %v", err)
+	}
+	return cands[0].name, sum, nil
+}
+
+// looksLikeSha256 判断是否 64 位十六进制摘要。
+func looksLikeSha256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range strings.ToLower(s) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// sha256File 流式计算文件摘要（跳过目录/非普通文件）。
+func sha256File(p string) (string, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
 
 // pocDir 返回本任务的 PoC 目录 <dataDir>/tasks/<taskID>/poc。
 // 拿不到任务上下文时返回错误——路径只能由代码决定，不让模型自己拼。
@@ -783,4 +1007,380 @@ func (t *ToolSet) savePoc() actool.CoreTool {
 			}
 			return jsonResult(out)
 		})
+}
+
+// =====================================================================
+// 经验沉淀与检索：write_experience / read_experience
+// =====================================================================
+//
+// 每条意图结束时把这一轮的"经验"写在自己的节点上（exploration_nodes.experience），
+// read_experience 再按自然语言 query 从本任务的这些经验里检索、压缩后返回。
+// 设计见 意图经验沉淀与检索-设计方案.md。
+
+const (
+	// maxExperienceRunes caps one note. Every later retrieval reads these in bulk, so
+	// an unbounded blob would poison the whole experience pool; 8KB is far above a
+	// useful note (four sections, a few commands) and still bounded.
+	maxExperienceRunes = 8192
+	// read_experience is a real model call: bound it per run, bound the candidate
+	// window handed to the model, and bound what comes back to the worker.
+	experienceReadsPerRun   = 3
+	experienceCandidatesMax = 200
+	experienceCandidates    = 30
+	experienceCandidateChar = 800
+	experienceDigestLimit   = 5
+	experienceDigestRunes   = 6000
+	experienceReadTimeout   = 45 * time.Second
+	experienceCacheTTL      = 10 * time.Minute
+	// experienceWorkerLane labels these calls in llm_usage so the config page can
+	// report the retrieval spend apart from the worker's own tokens.
+	experienceWorkerLane = "experience"
+)
+
+// writeExperience stores the note distilled at the end of the current intent.
+// It is a write tool on the intent node the worker claimed (ownerNode).
+func (t *ToolSet) writeExperience() actool.CoreTool {
+	return t.writeExpTool(
+		"write_experience",
+		"把本轮执行沉淀成经验，写在你当前这条意图上（**收尾前必须写，没写经验的本轮不算完成**）。\n"+
+			"重跑会覆盖旧经验，不必担心重复。按四段写：\n"+
+			"① 表面：打了哪个组件 / 入口 / 文件（原始路径、URL、端口）\n"+
+			"② 结论：成还是没成，原因是什么（失败经验同样有价值，写清卡在哪）\n"+
+			"③ 可复用手法：具体命令、路径、参数、判据（原样照抄，别概括）\n"+
+			"④ 坑：浪费时间的弯路、看错的信号\n"+
+			"返回 {ok, intent, chars, replaced, prev_chars}",
+		obj(map[string]any{
+			"experience": str("本轮经验正文，按四段模板写；命令/路径/参数保持原文"),
+		}, "experience"),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				Experience string `json:"experience"`
+			}
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			text := strings.TrimSpace(a.Experience)
+			if text == "" {
+				return actool.Errorf("experience 不能为空：把这一轮的结论、可复用手法、踩过的坑写下来"), nil
+			}
+			if n := len([]rune(text)); n > maxExperienceRunes {
+				return actool.Errorf(fmt.Sprintf("experience 过长(%d 字)，上限 %d 字：只留可复用的结论与命令", n, maxExperienceRunes)), nil
+			}
+			if t.ownerNode <= 0 {
+				return actool.Errorf("write_experience 需要意图上下文（当前没有绑定意图）"), nil
+			}
+			if t.ts == nil {
+				return actool.Errorf("write_experience 需要探索库（当前没有任务上下文）"), nil
+			}
+			prev, err := t.ts.SetIntentExperience(t.ownerNode, text)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			t.writes.Experience++
+			return jsonResult(map[string]any{
+				"ok":         true,
+				"intent":     t.ownerNode,
+				"chars":      len([]rune(text)),
+				"replaced":   prev > 0,
+				"prev_chars": prev,
+			})
+		},
+	)
+}
+
+// readExperience searches this task's stored experience. The query is natural
+// language; the tool picks candidates locally (no tokens), then makes ONE model
+// call to select + compress them, then returns the digest.
+func (t *ToolSet) readExperience() actool.CoreTool {
+	return t.readExpTool(
+		"read_experience",
+		"检索本任务历史意图沉淀下来的经验。query 用自然语言说明你想找哪方面的经验"+
+			"（例如「mini_httpd 认证绕过相关的经验」「有没有人试过固件升级入口」）。\n"+
+			"内部会读取本任务全部经验，用模型筛出相关的并梳理压缩后返回；命令、路径、参数保留原文。\n"+
+			"返回 {experiences:[{intent_id, summary, digest}], note}；没有相关经验时 experiences 为空，"+
+			"note 会说明原因（含检索不可用时）。本工具只读本任务，不跨任务。",
+		obj(map[string]any{
+			"query": str("想找哪方面的经验，一句话自然语言即可"),
+		}, "query"),
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				Query string `json:"query"`
+			}
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			query := strings.TrimSpace(a.Query)
+			if query == "" {
+				return actool.Errorf("query 不能为空：用一句话说你想要哪方面的经验"), nil
+			}
+			if t.ts == nil {
+				return jsonResult(map[string]any{"experiences": []any{}, "note": "经验检索不可用（当前没有任务上下文）"})
+			}
+			if t.prov == nil {
+				return jsonResult(map[string]any{"experiences": []any{}, "note": "经验检索不可用（未配置模型）"})
+			}
+			if t.expReads >= experienceReadsPerRun {
+				return jsonResult(map[string]any{
+					"experiences": []any{},
+					"note":        fmt.Sprintf("本轮已达经验检索上限（%d 次），请按已获得的信息继续", experienceReadsPerRun),
+				})
+			}
+			rows, err := t.ts.IntentExperiences(experienceCandidatesMax)
+			if err != nil {
+				log.Printf("[experience] 读取经验失败 exp=%d: %v", t.ts.ID(), err)
+				return jsonResult(map[string]any{"experiences": []any{}, "note": "读取经验失败，请按当前上下文继续"})
+			}
+			if len(rows) == 0 {
+				return jsonResult(map[string]any{"experiences": []any{}, "note": "本任务暂无经验（还没有意图写过经验）"})
+			}
+			key := experienceCacheKey(t.ts.ID(), query)
+			if cached, ok := experienceCacheGet(key); ok {
+				return actool.Text(cached), nil
+			}
+			cands := preselectExperience(rows, query, experienceCandidates)
+			t.expReads++
+			req := llm.CompletionRequest{
+				System:    []string{experienceReadSystemPrompt},
+				Messages:  []llm.Message{llm.UserText(buildExperienceReadInput(query, cands))},
+				MaxTokens: 1500,
+				Thinking:  "disabled", // retrieval is a lookup, not a reasoning step
+			}
+			rctx, cancel := context.WithTimeout(ctx, experienceReadTimeout)
+			defer cancel()
+			// Session id + lane: the provider is the llmrec-wrapped one, so this call
+			// is metered into llm_usage and written to the task transcript on its own
+			// lane instead of being mixed into the worker's own turns.
+			rctx = transcript.WithSessionID(rctx, fmt.Sprintf("exp%d-experience-read", t.ts.ID()))
+			if t.taskID > 0 {
+				rctx = llmrec.WithTaskID(rctx, strconv.FormatInt(t.taskID, 10))
+			}
+			rctx = llmrec.WithWorker(rctx, experienceWorkerLane)
+			msg, _, _, callErr := t.prov.Complete(rctx, req)
+			if callErr != nil {
+				log.Printf("[experience] 经验检索失败 exp=%d: %v", t.ts.ID(), callErr)
+				return jsonResult(map[string]any{"experiences": []any{}, "note": "经验检索不可用，请按当前上下文继续"})
+			}
+			payload := buildExperienceDigest(msg.Text(), cands)
+			body, mErr := json.Marshal(payload)
+			if mErr != nil {
+				return jsonResult(map[string]any{"experiences": []any{}, "note": "经验检索结果解析失败，请按当前上下文继续"})
+			}
+			experienceCachePut(key, string(body))
+			return actool.Text(string(body)), nil
+		},
+	)
+}
+
+// experienceCache memoizes retrieval results per (task, normalized query). Two
+// workers asking the same thing in the same task should not pay twice; the entries
+// are tiny and expire, so this stays a bounded map with no eviction LRU.
+type experienceCacheEntry struct {
+	body   string
+	expire time.Time
+}
+
+var experienceCache = struct {
+	mu sync.Mutex
+	m  map[string]experienceCacheEntry
+}{m: map[string]experienceCacheEntry{}}
+
+func experienceCacheKey(expID int64, query string) string {
+	return strconv.FormatInt(expID, 10) + "|" + strings.ToLower(strings.Join(strings.Fields(query), " "))
+}
+
+func experienceCacheGet(key string) (string, bool) {
+	experienceCache.mu.Lock()
+	defer experienceCache.mu.Unlock()
+	e, ok := experienceCache.m[key]
+	if !ok || time.Now().After(e.expire) {
+		if ok {
+			delete(experienceCache.m, key)
+		}
+		return "", false
+	}
+	return e.body, true
+}
+
+func experienceCachePut(key, body string) {
+	experienceCache.mu.Lock()
+	defer experienceCache.mu.Unlock()
+	if len(experienceCache.m) > 512 { // crude cap: retrieval results are disposable
+		for k := range experienceCache.m {
+			delete(experienceCache.m, k)
+			break
+		}
+	}
+	experienceCache.m[key] = experienceCacheEntry{body: body, expire: time.Now().Add(experienceCacheTTL)}
+}
+
+// experienceShingles turns text into检索用的 shingles: ASCII words (>=2 chars) and
+// CJK bigrams. Chinese notes have no spaces, so word splitting alone would score
+// every Chinese query as zero-overlap and always fall back to "newest N".
+func experienceShingles(s string) map[string]struct{} {
+	out := make(map[string]struct{})
+	var word []rune
+	var prevHan rune
+	flush := func() {
+		if len(word) >= 2 {
+			out[string(word)] = struct{}{}
+		}
+		word = word[:0]
+	}
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case unicode.Is(unicode.Han, r):
+			flush()
+			if prevHan != 0 {
+				out[string([]rune{prevHan, r})] = struct{}{}
+			}
+			prevHan = r
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			prevHan = 0
+			word = append(word, r)
+		default:
+			prevHan = 0
+			flush()
+		}
+	}
+	flush()
+	return out
+}
+
+// preselectExperience ranks this task's notes against the query by shingle overlap
+// and returns at most limit of them (newest first on ties / no signal at all).
+// Pure local computation — it exists so the model never sees 200 notes at once.
+func preselectExperience(rows []db.ExperienceRow, query string, limit int) []db.ExperienceRow {
+	if limit <= 0 || limit > len(rows) {
+		limit = len(rows)
+	}
+	q := experienceShingles(query)
+	type scored struct {
+		row   db.ExperienceRow
+		score float64
+	}
+	out := make([]scored, 0, len(rows))
+	for _, r := range rows {
+		doc := experienceShingles(r.Summary + "\n" + r.Experience)
+		hit := 0
+		for t := range q {
+			if _, ok := doc[t]; ok {
+				hit++
+			}
+		}
+		score := 0.0
+		if len(q) > 0 {
+			score = float64(hit) / float64(len(q))
+		}
+		out = append(out, scored{row: r, score: score})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].score > out[j].score })
+	picked := make([]db.ExperienceRow, 0, limit)
+	for _, s := range out[:limit] {
+		picked = append(picked, s.row)
+	}
+	return picked
+}
+
+// buildExperienceReadInput renders the retrieval prompt: the query plus the
+// preselected candidates, each truncated so 30 notes still fit a modest budget.
+func buildExperienceReadInput(query string, cands []db.ExperienceRow) string {
+	var b strings.Builder
+	b.WriteString("【想找的经验】\n")
+	b.WriteString(query)
+	fmt.Fprintf(&b, "\n\n【本任务已沉淀的经验（候选 %d 条，按相关度排序）】\n", len(cands))
+	for _, c := range cands {
+		fmt.Fprintf(&b, "\n### intent #%d · %s\n", c.IntentID, strings.TrimSpace(c.Summary))
+		b.WriteString(truncateRunes(c.Experience, experienceCandidateChar))
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// buildExperienceDigest turns the model's JSON answer into the tool result, and is
+// where the hard caps live: unknown intent ids are dropped (the model may invent
+// one), at most experienceDigestLimit entries survive, and the total body is capped.
+// summaries come from the DB row, never from the model, so a hallucinated summary
+// cannot masquerade as a real past intent.
+func buildExperienceDigest(raw string, cands []db.ExperienceRow) map[string]any {
+	byID := make(map[int64]db.ExperienceRow, len(cands))
+	for _, c := range cands {
+		byID[c.IntentID] = c
+	}
+	var parsed struct {
+		Experiences []struct {
+			IntentID int64  `json:"intent_id"`
+			Digest   string `json:"digest"`
+		} `json:"experiences"`
+		Note string `json:"note"`
+	}
+	if err := json.Unmarshal([]byte(jsonPayload(raw)), &parsed); err != nil {
+		return map[string]any{
+			"experiences": []any{},
+			"note":        "经验检索结果无法解析，请按当前上下文继续",
+		}
+	}
+	out := make([]map[string]any, 0, experienceDigestLimit)
+	total := 0
+	for _, e := range parsed.Experiences {
+		row, ok := byID[e.IntentID]
+		if !ok {
+			continue // hallucinated / out-of-window id: drop it
+		}
+		digest := strings.TrimSpace(e.Digest)
+		if digest == "" {
+			continue
+		}
+		// 预算按 rune 计：truncateRunes 也按 rune 截，单位必须一致，否则中文会超预算
+		// 最多 3 倍（1 rune = 3 bytes）。
+		if len(out) >= experienceDigestLimit || total >= experienceDigestRunes {
+			break
+		}
+		digest = truncateRunes(digest, experienceDigestRunes-total)
+		if strings.TrimSpace(digest) == "" { // 预算刚好耗尽：不塞空条目
+			break
+		}
+		total += len([]rune(digest))
+		out = append(out, map[string]any{
+			"intent_id": row.IntentID,
+			"node_id":   row.IntentID, // same node: worker can node_detail() for the raw note
+			"summary":   strings.TrimSpace(row.Summary),
+			"digest":    digest,
+		})
+	}
+	note := strings.TrimSpace(parsed.Note)
+	if len(out) == 0 {
+		if note == "" {
+			note = "无相关经验"
+		}
+		return map[string]any{"experiences": []any{}, "note": note, "candidates": len(cands)}
+	}
+	if len(parsed.Experiences) > len(out) {
+		note = strings.TrimSpace(note + fmt.Sprintf("（还有 %d 条命中未返回，需要时缩小 query）", len(parsed.Experiences)-len(out)))
+	}
+	return map[string]any{"experiences": out, "note": note, "candidates": len(cands)}
+}
+
+// jsonPayload extracts the outermost JSON object from a model answer, tolerating
+// code fences and leading prose ("```json {…} ```" is common even when asked not to).
+func jsonPayload(raw string) string {
+	s := strings.TrimSpace(raw)
+	if i := strings.Index(s, "{"); i > 0 {
+		s = s[i:]
+	}
+	if j := strings.LastIndex(s, "}"); j >= 0 && j+1 <= len(s) {
+		s = s[:j+1]
+	}
+	return s
+}
+
+// truncateRunes cuts s to at most n runes without splitting a multi-byte character.
+func truncateRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }

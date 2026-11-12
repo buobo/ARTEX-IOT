@@ -285,6 +285,12 @@ ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS delete_reason TEXT;
 -- a node most recently went from "has a live downstream branch" to none (NULL = hot).
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS content_version  INT    NOT NULL DEFAULT 0;
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS cold_since_round BIGINT;
+-- 意图经验(experience):一条意图结束后沉淀的经验正文,供 read_experience 检索。
+-- 刻意不进 nodeCols(db/exploration.go):列表/态势查询绝不能把经验全文拖进上下文。
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS experience TEXT NOT NULL DEFAULT '';
+-- experience_at:经验最后一次写入时间。经验校验按"本轮有没有写"(experience_at >= 本轮开始)
+-- 判定,而不是"列里有没有旧内容"——重跑必须刷新经验,上一轮留下的旧经验不算数。
+ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS experience_at TIMESTAMPTZ;
 -- ck_node_kind: existing installs predate the 'digest' kind — recreate to allow it.
 DO $$
 BEGIN
@@ -877,6 +883,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_task_scope_v5 ON task_scope(
 CREATE INDEX IF NOT EXISTS idx_ts_domain  ON task_scope(domain) WHERE kind IN ('root_domain','subdomain');
 CREATE INDEX IF NOT EXISTS idx_ts_net     ON task_scope USING GIST(net inet_ops) WHERE kind IN ('ip','cidr');
 CREATE INDEX IF NOT EXISTS idx_ts_company ON task_scope(company_id) WHERE kind = 'company';
+-- extract_path: kind='firmware' 行的解包产物目录（相对任务目录，如 firmware/rootfs）。
+-- NULL = 这份固件还没解包；由 worker 的 register_extract 在首次解包后回填（上传时不写）。
+ALTER TABLE task_scope ADD COLUMN IF NOT EXISTS extract_path TEXT;
+CREATE INDEX IF NOT EXISTS idx_ts_extract ON task_scope(task_id, sha256) WHERE kind = 'firmware';
 
 -- =====================================================================
 -- E. Agents / 提示词模板 / 变量目录

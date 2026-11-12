@@ -97,6 +97,11 @@ func WorkerSessionID(explorationID, intentID int64) string {
 
 const workerChatMarkerPrefix = "<!-- ARTEX_WORKER_CHAT:"
 
+// experienceAskLimit 是收场后"再要一次经验"的追问上限（C3）。与 harness Stop 钩子的
+// 拦截次数一致：模型正常收场时钩子已经拦过，这里的追问只是兜住钩子到不了的情况
+// （报错前后的收尾、settlement 之后）。两次都写不出来就交给引擎判 blocked。
+const experienceAskLimit = 2
+
 func workerChatMarker(requestID string) string {
 	return workerChatMarkerPrefix + requestID + " -->"
 }
@@ -236,6 +241,8 @@ const workerDefaultTmpl = `你是固件漏洞挖掘系统的"执行者"(work age
 
 **动手前先认组件**：先说清这条意图指向哪个组件——名字、版本、怎么启动（init 脚本/配置）、配置文件在哪。一律从解包产物里读（ls / file / strings / 读配置文件），不许凭版本号或外部资料猜；认不出来就先 record_fact 记一条 inferred 事实，把"怎么认"作为新问题写回去。
 
+**解包后必须登记 register_extract**：若本意图里解了固件（binwalk / unsquashfs / sasquatch / cpio 等），解完立刻调 register_extract 把根目录登记到本任务（path 可以就在 firmware/ 下，例如 firmware/rootfs；多份固件时用 firmware 参数指明是哪一份）。不登记等于没解包——后面的意图会再解一遍、白烧 context。反过来：意图描述或 fact 里已经给了本任务的解包路径，就直接复用，不要重复解包。
+
 **边发现边写回**（写进图才算数，脑子/文字里的不算；每得一个结果立刻写，别攒到最后被步数耗尽丢掉）。三种写回，别串图：
 - **组件 → insert_components（组件库）**：固件里的一个可指认组件登记一行——type（web/mqtt/ros/ssh/telnet/upnp/onvif/rtsp/ftp/other）、component_name、version、vendor、binary_path、config_path、started_by、port、technologies、notes。**这里只登记组件本身；探索结论/判断不写这里，用 record_fact。** 同一组件不会重复建行（按 firmware_sha256+type+name+version 去重，重复登记只补空字段）。
 - **探索结论/事实 → record_fact（探索图，传 intent_id）**：都用它。**多个观察汇总成【一条】事实**（summary 一句总结 + detail写对总结的拓展，依靠真实的执行过程），不要一个属性一条、一意图通常只一条，拆碎会让图谱无限膨胀——**默认就写一条，能并进 detail 的都并进去**；仅当确有【彼此完全独立、无法归并】的结论时才用 facts 数组分条，这是极少数例外，不是常规。**只写增量**：只记这次【新得到】的，别把已有事实换措辞重记（只印证已有、无新增就不必记）。**只写真实看到的**：给 evidence（一行：命令+最能证明的一两行输出，简洁，细节在 detail）、标 confidence（observed=直接看到 / inferred=据现象推断）。
@@ -361,6 +368,9 @@ func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int
 }
 
 func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.ComponentStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
+	// 本轮开始时刻：C3 的判据是"本轮有没有写经验"（experience_at >= runStart），
+	// 而不是"意图上有没有旧经验"——重跑必须刷新，上一轮留下的旧经验不算数。
+	runStart := time.Now()
 	tsx := NewToolSet(ts, name)
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
@@ -372,6 +382,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	}
 	tsx.SetOwnerNode(intent.ID)         // 本 worker 登记的组件锚到它的意图节点（来源链）
 	tsx.SetNotifyFinding(notifyFinding) // report_finding 落库时当场唤醒 planner，带上「哪个意图+finding」
+	// read_experience 用 worker 自己的 provider（已被 llmrec 包装）：那次检索调用会自动
+	// 计入 llm_usage（worker='experience'），并继承任务级 profile 失败切换。
+	tsx.SetProvider(w.prov)
 	// base = built-in worker tools ∪ host tools (traffic) ∪ default tools (incl. Bash);
 	// then augment with the agent's visible skills/MCP. During the SDK settlement
 	// phase, Bash is hidden via Settlement.DisabledTools (no local gating needed).
@@ -414,6 +427,10 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 			}
 		}
 	}
+	// 经验沉淀要求（见 意图经验沉淀与检索-设计方案.md）：放在 system 尾部而不是启动 user
+	// 消息里，因为 system 每 run 重拼、不会被 compaction 压掉——收尾时它必须还在场。
+	// 放在"开始执行"之前：先立规矩，再让它开工。
+	sysBody += experienceWorkerBlock
 	sysBody += "\n\n开始执行上面这条意图：只做它、只产生事实、components、finding、做完即停。"
 	system, boundary := deferredSystem(sysBody, def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
@@ -486,6 +503,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if strings.TrimSpace(input) == "" {
 		input = "开始执行 system 里领到的意图：只做它、只产生事实、components、finding、做完即停。"
 	}
+	// 启动消息再提醒一次（附录 A1 的第二句）：system 里已有硬要求，这里补一句，防止
+	// 长 run 跑到收尾时注意力漂走、把经验这步漏掉。
+	input += "\n\n（收尾前别忘 write_experience：把这一轮的结论、可复用手法和踩过的坑写下来。）"
 
 	// 实验功能:开启后由 noa 接管上下文压缩(归档集中在 <workDir>/noa/<SessionID> 下,持久)。
 	noaSession := WorkerSessionID(ts.ID(), intent.ID)
@@ -528,5 +548,26 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// still settles (no external hard-timeout backstop needed). ctx itself carries only
 	// pause / planner kill / shutdown, which the engine distinguishes and re-queues/stops.
 	_, reason, err := captureRunSession(ctx, s, input, emitWrap)
+	// C3 经验校验：正常收场（含 settlement）后经验仍空 → 在同一会话里再要一次，最多
+	// experienceAskLimit 次。不新开会话、不拼摘要：刚干完这条意图，写经验需要的细节都还
+	// 在上下文里；另起会话反而要把摘要重新压一遍，既贵又容易丢掉命令细节。
+	// 出错结束时不追问——那种会话状态不可靠，留给引擎的终态兜底（C4）。
+	if err == nil {
+		attempts := 1 // blocked/exhausted 也尝试一次（best-effort，不改终态）
+		if reason == harness.ReasonCompleted {
+			attempts = experienceAskLimit
+		}
+		for i := 0; i < attempts; i++ {
+			if ctx.Err() != nil { // 暂停 / 被 planner 杀 / 进程收尾：立刻放弃追问
+				break
+			}
+			if fresh, freshErr := ts.IntentExperienceWrittenSince(intent.ID, runStart); freshErr == nil && fresh {
+				break
+			}
+			if _, _, askErr := captureRunSession(ctx, s, ExperienceReminder, emitWrap); askErr != nil {
+				break
+			}
+		}
+	}
 	return reason, tsx.Writes(), err
 }

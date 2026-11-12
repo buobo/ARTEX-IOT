@@ -1182,6 +1182,90 @@ WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exist
 	return exists, err
 }
 
+// ExperienceRow is one intent's distilled experience as read by read_experience.
+type ExperienceRow struct {
+	IntentID   int64
+	Summary    string
+	Experience string
+	UpdatedAt  time.Time
+}
+
+// SetIntentExperience stores the experience distilled at the end of one intent.
+// Only a running intent of this exploration may be written. Re-runs overwrite the
+// previous note (appending would pollute retrieval); prevChars reports how much was
+// replaced so the caller can tell the model it replaced an earlier note.
+func (s *ExplorationStore) SetIntentExperience(intentID int64, text string) (prevChars int, err error) {
+	var state string
+	err = s.db.QueryRow(`SELECT state, COALESCE(length(experience),0) FROM exploration_nodes
+WHERE id=$1 AND exploration_id=$2 AND kind='intent'`, intentID, s.expID).Scan(&state, &prevChars)
+	if err == sql.ErrNoRows {
+		return 0, fmt.Errorf("意图 %d 不存在于本任务", intentID)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if state != "running" {
+		return 0, fmt.Errorf("意图 %d 当前状态为 %s，只有运行中的意图能写经验", intentID, state)
+	}
+	if _, err = s.db.Exec(`UPDATE exploration_nodes SET experience=$1, experience_at=now(), updated_at=now()
+WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, text, intentID, s.expID); err != nil {
+		return 0, err
+	}
+	return prevChars, nil
+}
+
+// IntentExperienceWrittenSince reports whether this intent's experience was written
+// at or after since — i.e. by the run that started at since. This is the check the
+// experience gate uses: "did THIS run write one", not "does a note exist at all"
+// (a rerun must refresh the note; last run's note does not count).
+func (s *ExplorationStore) IntentExperienceWrittenSince(intentID int64, since time.Time) (bool, error) {
+	var ok bool
+	err := s.db.QueryRow(`SELECT COALESCE(experience,'') <> '' AND experience_at IS NOT NULL AND experience_at >= $3
+FROM exploration_nodes WHERE id=$1 AND exploration_id=$2 AND kind='intent'`, intentID, s.expID, since).Scan(&ok)
+	if err == sql.ErrNoRows {
+		return false, fmt.Errorf("意图 %d 不存在于本任务", intentID)
+	}
+	return ok, err
+}
+
+// IntentExperience returns one intent's experience. An empty string means the
+// intent finished without distilling anything ("" is the column default).
+func (s *ExplorationStore) IntentExperience(intentID int64) (string, error) {
+	var exp string
+	err := s.db.QueryRow(`SELECT COALESCE(experience,'') FROM exploration_nodes
+WHERE id=$1 AND exploration_id=$2 AND kind='intent'`, intentID, s.expID).Scan(&exp)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("意图 %d 不存在于本任务", intentID)
+	}
+	return exp, err
+}
+
+// IntentExperiences returns this task's non-empty experiences, newest first — the
+// candidate pool for read_experience. Deliberately scoped to one exploration: the
+// notes carry target hosts and firmware internals, so they must not leak across tasks.
+func (s *ExplorationStore) IntentExperiences(limit int) ([]ExperienceRow, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.db.Query(`SELECT id, COALESCE(payload->>'summary',''), experience, updated_at
+FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='intent' AND experience <> ''
+ORDER BY id DESC LIMIT $2`, s.expID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ExperienceRow
+	for rows.Next() {
+		var r ExperienceRow
+		if err := rows.Scan(&r.IntentID, &r.Summary, &r.Experience, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // ClaimIntent atomically moves an open intent to running. Returns true if claimed.
 func (s *ExplorationStore) ClaimIntent(id int64, owner string) (bool, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='running', owner=$1
