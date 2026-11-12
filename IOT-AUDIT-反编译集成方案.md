@@ -52,14 +52,21 @@ data/tasks/<task_id>/decompile/
 ### binary_path 解析
 
 `components.binary_path` 是**容器内路径**（`/usr/sbin/jhttpd`），不是宿主机路径：
+解析依据 = `task_scope` 里 `kind='firmware'` 且 `extract_path` 非空的解包根
+（worker 解包完成后用 `register_extract` 登记，落在固件范围的那一列上）。
 
 ```
-for inst in data/tasks/<task_id>/i*/rootfs:
-    candidate = inst + binary_path
+roots = select extract_path from task_scope where task_id=<id> and kind='firmware' and extract_path<>''
+for root in roots:
+    candidate = data/tasks/<task_id>/<root> + binary_path
     存在 → 计算 sha256 → 命中
-多个实例命中、sha 相同  → 用第一个（复用同一导出）
-多个实例命中、sha 不同  → 每个实例一个 job（罕见，但要处理）
+一个 root 都没登记        → 400：先完成解包并 register_extract
+多个 root 命中、sha 相同  → 用第一个（复用同一导出）
+多个 root 命中、sha 不同  → 报错让人选（不猜用哪一份）
 ```
+
+不再遍历 `i*/rootfs` 猜实例：解包目录由 worker 登记、平台可查，猜出来的路径
+既可能指错实例，也无法解释"为什么是这个目录"。
 
 ---
 
@@ -99,7 +106,7 @@ CREATE UNIQUE INDEX uq_decompile_jobs_v1 ON decompile_jobs (task_id, binary_sha2
 | `component_id` | 触发这次导出的组件 `components.id`。**可为空**：走「按路径直导」入口时没有组件，或组件事后被删。本表不对 `components` 建外键——删组件不该连带删掉已经导出的产物。只用于展示与回跳组件行，**不参与任何路径计算** | 建 job 时，从勾选的组件带过来 |
 | `binary_path` | **容器内**路径（`/usr/sbin/jhttpd`），人认的那份标识。不能直接拿去 `open`——它是解析 `abs_path` 的输入之一 | 建 job 时，取 `components.binary_path` 或手填 |
 | `binary_sha256` | 真实分析样本的内容哈希。唯一键的一半：同任务内同内容二进制（`smbd`/`nmbd`、多实例指向同一文件）只导一次；也是判断「组件升级后要不要重导」的唯一依据（sha 变了就是新 job） | 解析阶段算一次，之后只读 |
-| `abs_path` | 解析出来的**宿主机真实文件**（`data/tasks/<id>/i*/rootfs` + `binary_path`）。执行时先 `cp` 到 `export_dir/binary` 再交给 idat；留库是为了事后能看出当时分析的到底是哪个实例的哪份文件 | 解析阶段 |
+| `abs_path` | 解析出来的**宿主机真实文件**（`data/tasks/<id>/<extract_path>` + `binary_path`）。执行时先 `cp` 到 `export_dir/binary` 再交给 idat；留库是为了事后能看出当时分析的到底是哪个实例的哪份文件 | 解析阶段 |
 | `export_dir` | 产物目录（相对 data 根），`data/tasks/<id>/decompile/<sha8>`。DELETE job 时删它，P2 任务删除时也按它清 | 建 job 时按 sha 前 8 位生成 |
 | `status` | 状态机：`pending` → `running` → `completed` / `failed` / `canceled`。启动兜底把「`running` 但进程已不存在」置 `failed`；重试把 `failed` 改回 `pending`；取消置 `canceled`（产物保留） | 队列状态机，唯一权威 |
 | `func_total` | 该二进制应导出的函数总数。完成时 = 磁盘上 `.c` 的个数；运行中先读 `out/.export_progress` 补齐，读不到先填 0（前端进度条退化为不确定态，不至于显示 100%） | 运行中随进度更新，收尾时校正 |
@@ -154,12 +161,14 @@ GET    /api/tasks/{id}/decompile/jobs           → 任务内 job 列表（含�
 GET    /api/decompile/jobs?task_id=&status=     → 全局列表（反编译页左树用）
 GET    /api/decompile/jobs/{jobID}              → 单 job 详情 + 进度
 POST   /api/decompile/jobs/{jobID}/cancel
+POST   /api/decompile/jobs/{jobID}/retry       → failed/canceled 重新排队（已导出的 .c 会跳过，续跑）
 DELETE /api/decompile/jobs/{jobID}              → 删记录 + 删 export_dir（二次确认）
 
 GET    /api/decompile/jobs/{jobID}/functions?q=&page=&limit=
                                                 → {total, items:[{addr,name,size,callers,callees}]}
 GET    /api/decompile/jobs/{jobID}/code/{addr}  → {addr,name,code,callers,callees,truncated}
 GET    /api/decompile/jobs/{jobID}/search?q=    → [{addr,name,line,text}]（上限 200 条）
+GET    /api/decompile/jobs/{jobID}/log          → {status, log}（idat.log 尾部 32KB，未完成时看进度用）
 ```
 
 约束：
@@ -228,12 +237,12 @@ GET    /api/decompile/jobs/{jobID}/search?q=    → [{addr,name,line,text}]（�
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `ida_install_dir` | 无默认值 | P0 实现为 `ARTEX_IDA_DIR` 环境变量，未设时在 `PATH` 里找 `idat`（不写死安装路径）；找到后要求同目录有 `plugins/INP.py`。接进设置页留 P2，找不到时建 job 直接报错（503） |
+| `ida_install_dir` | 无默认值 | 读取顺序：`decompile_ida_install_dir` 设置 → `ARTEX_IDA_DIR` 环境变量 → `PATH` 里的 `idat`（不写死安装路径）；找到后要求同目录有 `plugins/INP.py`。找不到时建 job 直接报错（503，文案说明这三种办法）。设置页已铺这组键，并回显 `decompile_status`（idat 是否真的可用） |
 | `idat_plugin_path` | `<ida>/plugins/INP.py` | 插件缺失则拒绝导出 |
-| `concurrency` | `1` | 先写死，保留键位 |
+| `concurrency` | `1` | 写死 1，键位保留：设成 >1 只打日志警告、不生效（IDA 许可） |
 | `timeout_seconds` | `1800` | 单 job 上限 |
 | `max_components` | `8` | 单次勾选上限 |
-| `task_quota_mb` | `2048` | 超配额拒绝新建 job |
+| `task_quota_mb` | `2048` | `data/tasks/<id>/decompile` 已占 ≥ 配额时拒绝新建 job（429） |
 
 ---
 
@@ -244,6 +253,9 @@ P0 能导出   表 + 队列 + 3 个 job 接口 + 测试组件页两个入口（�
 P1 能看     反编译页三栏 + C 高亮 + 函数搜索 + callers/callees 跳转
 P2 好维护   取消/删除/配额/重启兜底/失败重试/任务删除联动清产物
 ```
+
+P0–P2 已全部落地。额外补的两处：队列空转时 10s 兜底重扫（进程外插入的 pending
+不会因为没人 kick 而饿死）；进程退出时杀掉在跑的 idat 进程组（否则孤儿进程占着许可）。
 
 ctree 不导出（已定，见第 5 章 env）；P0 不做全局搜索、不做跨任务视图。
 
@@ -283,5 +295,5 @@ ctree 不导出（已定，见第 5 章 env）；P0 不做全局搜索、不做�
 4. 落盘：ls data/tasks/<task_id>/decompile/<sha8>/out/decompile | wc -l  == func_total
 5. 反编译页打开 → 函数列表可搜 → 点开代码有高亮 → callers/callees 能跳
 6. 取消链路：新 job 点取消 → 进程消失（ps 无 idat）→ status=canceled
-7. 越界防护：POST binary_path=/etc/passwd → 400
+7. 越界防护：`binary_path` 带 `..` 或不是绝对路径 → 400；`/etc/passwd` 只解析到**固件 rootfs 内**的同名文件（不碰宿主机），IDA 分析它会失败并给明确原因
 ```

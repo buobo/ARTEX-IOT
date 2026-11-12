@@ -55,10 +55,10 @@ type Task struct {
 // TaskDeleteResult reports optional related-data cleanup performed in the same
 // transaction as the task/exploration delete.
 type TaskDeleteResult struct {
-	ComponentsDeleted     int64
-	ComponentsDetached    int64
-	FindingsDeleted   int64
-	LLMRecordsDeleted int64
+	ComponentsDeleted  int64
+	ComponentsDetached int64
+	FindingsDeleted    int64
+	LLMRecordsDeleted  int64
 }
 
 // TaskDeletePreparation is produced inside the PostgreSQL deletion transaction
@@ -95,12 +95,9 @@ const MaxTaskCompanyCount = 32
 
 const taskCompanyComponentSource = "company"
 
-
-
 var (
 	ErrTaskCompanyIDsInvalid = errors.New("invalid task company ids")
 	ErrTaskCompanyNotFound   = errors.New("task company not found")
-
 )
 
 // NormalizeTaskCompanyIDs validates IDs and removes duplicates while retaining
@@ -615,6 +612,11 @@ DELETE FROM components a USING deletable d WHERE a.id=d.id`, id, expID)
 			return result, err
 		}
 		result.LLMRecordsDeleted, _ = res.RowsAffected()
+	}
+	// 反编译产物跟着任务走：产物文件在 stageTaskFiles 里随 tasks/<id>/ 一起删，
+	// 这里只收尸 job 行（否则删任务后留一堆指向空目录的记录）。
+	if _, err := tx.Exec(`DELETE FROM decompile_jobs WHERE task_id=$1`, id); err != nil {
+		return result, err
 	}
 	// llm_usage (the token metering ledger) is intentionally NOT deleted with the
 	// task — it is kept as historical accounting even after the task is gone.

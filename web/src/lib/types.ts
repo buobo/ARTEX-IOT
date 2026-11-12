@@ -889,6 +889,23 @@ export interface Settings {
   // 操作约束注入范围(默认都开):把任务的 allow/deny 约束拼进对应 agent 的系统提示。
   constraints_inject_planner?: boolean;
   constraints_inject_worker?: boolean;
+  // 反编译（IDA 无头导出）。路径空=未配置，后端依次回退 ARTEX_IDA_DIR → PATH 里的 idat。
+  decompile_ida_install_dir?: string;
+  decompile_idat_plugin_path?: string;
+  decompile_timeout_seconds?: number;
+  decompile_max_components?: number;
+  decompile_task_quota_mb?: number;
+  // 只读回显：idat / INP.py 是否真的可用，设置页据此提示，不用建 job 才发现。
+  decompile_status?: {
+    ok: boolean;
+    ida_dir?: string;
+    idat?: string;
+    plugin?: string;
+    error?: string;
+    timeout_seconds?: number;
+    max_components?: number;
+    quota_mb?: number;
+  };
   // 实验功能:noa 模型驱动上下文压缩(默认关)。开启后平台接入的四类 agent(planner/
   // worker/主 agent/对话)由 noa 接管上下文压缩,取代内置 compaction;每 run 读一次,对
   // 之后启动的 run 生效。
@@ -1527,4 +1544,57 @@ export interface PocFileContent {
   truncated?: boolean;
   content: string;
   note?: string;
+}
+
+// ---- 反编译（IDA 无头导出） ----
+export type DecompileStatus = "pending" | "running" | "completed" | "failed" | "canceled";
+
+export interface DecompileJob {
+  id: number;
+  task_id: number;
+  // 列表接口回填的任务名（表里没有这一列）；重名时界面再补编号。
+  task_name?: string;
+  component_id?: number | null;
+  binary_path: string;
+  binary_sha256: string;
+  abs_path?: string;
+  export_dir: string;
+  status: DecompileStatus;
+  func_total: number;
+  func_done: number;
+  error?: string;
+  created_by?: string;
+  created_at?: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface DecompileJobDetail extends DecompileJob {
+  artifact_bytes?: number;
+}
+
+export interface DecompileFunc {
+  addr: string;
+  name: string;
+  size: number;
+  callers?: string[];
+  callees?: string[];
+  file: string;
+}
+
+export interface DecompileCode {
+  addr: string;
+  name: string;
+  code: string;
+  truncated?: boolean;
+  size: number;
+  callers?: string[];
+  callees?: string[];
+}
+
+export interface DecompileSearchHit {
+  addr: string;
+  name?: string;
+  line: number;
+  text: string;
 }

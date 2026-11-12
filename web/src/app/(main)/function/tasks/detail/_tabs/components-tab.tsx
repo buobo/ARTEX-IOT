@@ -2,7 +2,8 @@
 
 import * as React from "react";
 
-import { PackageIcon, RefreshCwIcon, UnlinkIcon } from "lucide-react";
+import { BinaryIcon, Loader2Icon, PackageIcon, RefreshCwIcon, RotateCcwIcon, UnlinkIcon } from "lucide-react";
+import Link from "next/link";
 import { toast } from "sonner";
 
 import { ComponentDslSearch } from "@/components/component-dsl-search";
@@ -24,7 +25,7 @@ import {
   componentSourceLabel,
   componentTypeLabel,
 } from "@/lib/task-components";
-import type { Component, ComponentStatus } from "@/lib/types";
+import type { Component, ComponentStatus, DecompileJob } from "@/lib/types";
 
 const PAGE_SIZE = 50;
 
@@ -56,6 +57,113 @@ export function ComponentsTab({ taskId }: { taskId: string }) {
   });
 
   const totalAll = Object.values(counts).reduce((a, b) => a + b, 0);
+
+  // 反编译导出状态：componentId → 最新 job。行内按钮据此显示进度/复用/重试。
+  const [decompJobs, setDecompJobs] = React.useState<Record<number, DecompileJob>>({});
+  const [decompBusy, setDecompBusy] = React.useState(false);
+
+  const loadDecompJobs = React.useCallback(async () => {
+    try {
+      const { jobs } = await api.decompileTaskJobs(taskId);
+      const map: Record<number, DecompileJob> = {};
+      for (const j of jobs) if (j.component_id) map[j.component_id] = j;
+      setDecompJobs(map);
+    } catch {
+      /* 导出状态只是辅助信息，失败不影响组件列表 */
+    }
+  }, [taskId]);
+
+  React.useEffect(() => {
+    void loadDecompJobs();
+  }, [loadDecompJobs]);
+
+  // 有排队/运行中的导出才轮询，避免空转。
+  const decompActive = Object.values(decompJobs).some(
+    (j) => j.status === "running" || j.status === "pending",
+  );
+  React.useEffect(() => {
+    if (!decompActive) return;
+    const timer = setInterval(() => void loadDecompJobs(), 2500);
+    return () => clearInterval(timer);
+  }, [decompActive, loadDecompJobs]);
+
+  const exportDecompile = async (ids: number[]) => {
+    if (ids.length === 0) return;
+    setDecompBusy(true);
+    try {
+      const res = await api.decompileCreate(taskId, { component_ids: ids });
+      const reused = res.jobs.filter((j) => j.reused).length;
+      const fresh = res.jobs.length - reused;
+      const skipped = res.skipped ?? [];
+      if (fresh === 0 && skipped.length === 0) toast.success(`已导出过，直接复用 ${reused} 个结果`);
+      else
+        toast.success(
+          `已建 ${fresh} 个导出任务${reused ? `，复用 ${reused} 个` : ""}，完成后点图标查看`,
+        );
+      if (skipped.length > 0) toast.warning(`${skipped.length} 个组件没有二进制路径，已跳过：${skipped.join("、")}`);
+      await loadDecompJobs();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "导出失败");
+    } finally {
+      setDecompBusy(false);
+    }
+  };
+
+  // 行内一格：没导出过 = 图标按钮；导出中/已完成 = 点进浏览页；失败/取消 = 重试按钮。
+  const decompCell = (c: Component) => {
+    const job = decompJobs[c.id];
+    if (!job) {
+      return (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="text-muted-foreground size-7"
+          title={c.binary_path ? "导出反编译（IDA 无头）" : "该组件未登记二进制路径，无法导出"}
+          disabled={!c.binary_path || decompBusy}
+          onClick={() => void exportDecompile([c.id])}
+        >
+          <BinaryIcon className="size-3.5" />
+        </Button>
+      );
+    }
+    const href = `/function/decompile?job=${job.id}`;
+    if (job.status === "completed") {
+      return (
+        <Link
+          href={href}
+          title={`已导出 ${job.func_done} 个函数 · ${job.binary_path}`}
+          className="inline-flex items-center gap-0.5 text-[11px] text-emerald-300 hover:underline"
+        >
+          <BinaryIcon className="size-3.5" />
+          {job.func_done}
+        </Link>
+      );
+    }
+    if (job.status === "running" || job.status === "pending") {
+      return (
+        <Link
+          href={href}
+          title={`${job.status === "pending" ? "排队中" : "导出中"}：已导出 ${job.func_done} 个函数`}
+          className="inline-flex items-center gap-0.5 text-[11px] text-blue-300"
+        >
+          <Loader2Icon className="size-3.5 animate-spin" />
+          {job.func_done || "…"}
+        </Link>
+      );
+    }
+    return (
+      <Button
+        variant="ghost"
+        size="icon"
+        className="size-7 text-red-400"
+        title={`${job.status === "failed" ? "导出失败" : "已取消"}：${job.error || ""}（点击重试）`}
+        disabled={decompBusy}
+        onClick={() => void exportDecompile([c.id])}
+      >
+        <RotateCcwIcon className="size-3.5" />
+      </Button>
+    );
+  };
 
   const loadCounts = React.useCallback(async () => {
     try {
@@ -244,6 +352,15 @@ export function ComponentsTab({ taskId }: { taskId: string }) {
               <Button
                 variant="outline"
                 size="sm"
+                disabled={decompBusy}
+                onClick={() => void exportDecompile(selected)}
+                title="对选中组件逐个导出反编译（IDA 无头，串行执行）"
+              >
+                <BinaryIcon className="size-4" /> 导出反编译（{selected.length}）
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
                 disabled={bulkSaving}
                 onClick={() => void detachSelected()}
               >
@@ -274,7 +391,7 @@ export function ComponentsTab({ taskId }: { taskId: string }) {
                 <TableHead className="w-24">版本</TableHead>
                 <TableHead>二进制</TableHead>
                 <TableHead className="w-28">状态</TableHead>
-                <TableHead className="w-10" />
+                <TableHead className="w-16" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -331,15 +448,18 @@ export function ComponentsTab({ taskId }: { taskId: string }) {
                       </select>
                     </TableCell>
                     <TableCell>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="text-muted-foreground size-7"
-                        title="从本任务移除（不删组件本身）"
-                        onClick={() => void detach(c)}
-                      >
-                        <UnlinkIcon className="size-3.5" />
-                      </Button>
+                      <div className="flex items-center justify-end gap-0.5">
+                        {decompCell(c)}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-muted-foreground size-7"
+                          title="从本任务移除（不删组件本身）"
+                          onClick={() => void detach(c)}
+                        >
+                          <UnlinkIcon className="size-3.5" />
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 );

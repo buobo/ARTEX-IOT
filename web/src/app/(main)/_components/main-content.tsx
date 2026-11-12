@@ -2,6 +2,8 @@
 
 import { type ReactNode, useEffect, useState } from "react";
 
+import { BinaryIcon } from "lucide-react";
+import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { Separator } from "@/components/ui/separator";
@@ -68,6 +70,14 @@ export function MainContent({ children }: { children: ReactNode }) {
             {version && (
               <span className="font-medium text-muted-foreground text-xs tabular-nums">版本 · {version}</span>
             )}
+            <Link
+              href="/function/decompile"
+              prefetch={false}
+              className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs transition-colors"
+              title="反编译浏览（IDA 导出产物）"
+            >
+              <BinaryIcon className="size-3.5" /> 反编译
+            </Link>
             <UpdateBadge />
             <LayoutControls />
             <ThemeSwitcher />

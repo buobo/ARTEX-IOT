@@ -138,6 +138,8 @@ func run() int {
 	}
 
 	log.Println("shutting down...")
+	// 反编译的 idat 子进程要一起收掉，否则孤儿进程会占着 IDA 许可。
+	srv.StopDecompile()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)

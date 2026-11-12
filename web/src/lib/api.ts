@@ -28,6 +28,12 @@ import type {
   CoverageComponentRefs,
   CoverageGraphData,
   DailyTokenBucket,
+  DecompileCode,
+  DecompileFunc,
+  DecompileJob,
+  DecompileJobDetail,
+  DecompileSearchHit,
+  DecompileStatus,
   DeleteTaskOptions,
   DeleteTaskResult,
   Edge,
@@ -569,6 +575,49 @@ export const api = {
       component_ids: componentIds,
       source_summary: sourceSummary,
     }),
+  // 反编译（IDA 无头 + INP）：任务内按组件批量导出 / 单文件导出，产物落任务目录。
+  decompileCreate: (taskId: string, body: { component_ids?: number[]; binary_path?: string }) =>
+    post<{
+      jobs: { id: number; component_id?: number | null; status: DecompileStatus; reused: boolean }[];
+      skipped?: string[];
+    }>(
+      `/tasks/${encodeURIComponent(taskId)}/decompile`,
+      body,
+    ),
+  decompileTaskJobs: (taskId: string) =>
+    get<{ jobs: DecompileJob[] }>(`/tasks/${encodeURIComponent(taskId)}/decompile/jobs`).then((r) => ({
+      jobs: r?.jobs ?? [],
+    })),
+  decompileJobs: (taskId?: string, status = "") =>
+    get<{ jobs: DecompileJob[] }>(
+      `/decompile/jobs?${taskId ? `task_id=${encodeURIComponent(taskId)}&` : ""}${status ? `status=${encodeURIComponent(status)}` : ""}`,
+    ).then((r) => ({ jobs: r?.jobs ?? [] })),
+  decompileJob: (jobId: number | string) =>
+    get<DecompileJobDetail>(`/decompile/jobs/${encodeURIComponent(String(jobId))}`),
+  decompileCancel: (jobId: number | string) =>
+    post<{ ok: boolean; status: DecompileStatus }>(`/decompile/jobs/${encodeURIComponent(String(jobId))}/cancel`),
+  decompileRetry: (jobId: number | string) =>
+    post<DecompileJob>(`/decompile/jobs/${encodeURIComponent(String(jobId))}/retry`),
+  decompileDelete: (jobId: number | string) =>
+    del<{ ok: boolean }>(`/decompile/jobs/${encodeURIComponent(String(jobId))}`),
+  decompileFunctions: (jobId: number | string, q = "", page = 1, limit = 200) =>
+    get<{ total: number; page: number; limit: number; items: DecompileFunc[] }>(
+      `/decompile/jobs/${encodeURIComponent(String(jobId))}/functions?q=${encodeURIComponent(q)}&page=${page}&limit=${limit}`,
+    ).then((r) => ({ total: r?.total ?? 0, page: r?.page ?? 1, limit: r?.limit ?? limit, items: r?.items ?? [] })),
+  decompileCode: (jobId: number | string, addr: string) =>
+    get<DecompileCode>(
+      `/decompile/jobs/${encodeURIComponent(String(jobId))}/code/${encodeURIComponent(addr)}`,
+    ),
+  decompileNames: (jobId: number | string) =>
+    get<{ names: string[] }>(`/decompile/jobs/${encodeURIComponent(String(jobId))}/names`).then((r) => ({
+      names: r?.names ?? [],
+    })),
+  decompileLog: (jobId: number | string) =>
+    get<{ status: DecompileStatus; log: string }>(`/decompile/jobs/${encodeURIComponent(String(jobId))}/log`),
+  decompileSearch: (jobId: number | string, q: string) =>
+    get<{ items: DecompileSearchHit[] }>(
+      `/decompile/jobs/${encodeURIComponent(String(jobId))}/search?q=${encodeURIComponent(q)}`,
+    ).then((r) => ({ items: r?.items ?? [] })),
   detachTaskComponent: (taskId: string, componentId: number) =>
     del<{ detached: number }>(`/tasks/${taskId}/components/${componentId}`),
   taskIntentComponents: (taskId: string) =>

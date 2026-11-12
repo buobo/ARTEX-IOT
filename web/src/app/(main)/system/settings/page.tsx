@@ -2,7 +2,15 @@
 
 import * as React from "react";
 
-import { CpuIcon, FlaskConicalIcon, KeyboardIcon, RadioTowerIcon, SearchIcon, ShieldAlertIcon } from "lucide-react";
+import {
+  BinaryIcon,
+  CpuIcon,
+  FlaskConicalIcon,
+  KeyboardIcon,
+  RadioTowerIcon,
+  SearchIcon,
+  ShieldAlertIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -43,6 +51,14 @@ export default function SystemSettingsPage() {
   const [injectWorker, setInjectWorker] = React.useState(true);
   // 实验功能:noa 上下文压缩(默认关)。
   const [noaCompaction, setNoaCompaction] = React.useState(false);
+  // 反编译（IDA 无头导出）配置
+  const [decompIdaDir, setDecompIdaDir] = React.useState("");
+  const [decompPlugin, setDecompPlugin] = React.useState("");
+  const [decompTimeout, setDecompTimeout] = React.useState("1800");
+  const [decompMaxComps, setDecompMaxComps] = React.useState("8");
+  const [decompQuota, setDecompQuota] = React.useState("2048");
+  const [decompStatus, setDecompStatus] = React.useState<Settings["decompile_status"]>(undefined);
+  const [savingDecompile, setSavingDecompile] = React.useState(false);
   // 纯前端偏好：不走 /api/settings，直接读写 localStorage。
   const sendMode = useChatSendMode();
 
@@ -60,6 +76,12 @@ export default function SystemSettingsPage() {
     setInjectPlanner(s.constraints_inject_planner !== false);
     setInjectWorker(s.constraints_inject_worker !== false);
     setNoaCompaction(!!s.noa_compaction);
+    setDecompIdaDir(s.decompile_ida_install_dir ?? "");
+    setDecompPlugin(s.decompile_idat_plugin_path ?? "");
+    setDecompTimeout(String(s.decompile_timeout_seconds ?? 1800));
+    setDecompMaxComps(String(s.decompile_max_components ?? 8));
+    setDecompQuota(String(s.decompile_task_quota_mb ?? 2048));
+    setDecompStatus(s.decompile_status);
   }, []);
 
   const saveWorkers = () => {
@@ -90,6 +112,39 @@ export default function SystemSettingsPage() {
       .catch((e) => toast.error("保存失败：" + (e as Error).message))
       .finally(() => setSaving(false));
   };
+  const saveDecompile = () => {
+    const timeout = Number(decompTimeout);
+    const maxComps = Number(decompMaxComps);
+    const quota = Number(decompQuota);
+    if (!Number.isInteger(timeout) || timeout < 60 || timeout > 86400) {
+      toast.error("超时必须是 60–86400 之间的整数（秒）");
+      return;
+    }
+    if (!Number.isInteger(maxComps) || maxComps < 1 || maxComps > 32) {
+      toast.error("单次勾选上限必须是 1–32 之间的整数");
+      return;
+    }
+    if (!Number.isInteger(quota) || quota < 1 || quota > 102400) {
+      toast.error("产物配额必须是 1–102400 之间的整数（MB）");
+      return;
+    }
+    setSavingDecompile(true);
+    api
+      .setSettings({
+        decompile_ida_install_dir: decompIdaDir.trim(),
+        decompile_idat_plugin_path: decompPlugin.trim(),
+        decompile_timeout_seconds: timeout,
+        decompile_max_components: maxComps,
+        decompile_task_quota_mb: quota,
+      })
+      .then((s2) => {
+        apply(s2);
+        toast.success("已保存反编译配置");
+      })
+      .catch((e) => toast.error("保存失败：" + (e as Error).message))
+      .finally(() => setSavingDecompile(false));
+  };
+
   const detectPython = () => {
     setSaving(true);
     api
@@ -400,6 +455,107 @@ export default function SystemSettingsPage() {
                 disabled={!loaded}
                 onCheckedChange={toggleInjectWorker}
               />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <BinaryIcon className="size-4" />
+              反编译（IDA 无头导出）
+            </CardTitle>
+            <CardDescription>
+              在任务详情的<b>组件</b>页勾选组件即可导出每个函数的伪 C 代码，产物落在
+              <code className="mx-1">data/tasks/&lt;id&gt;/decompile/&lt;sha8&gt;/</code>
+              下，只供人工查阅（不进 Agent 工具集）。这里配置 idat 的位置与限额：
+              安装目录留空时依次回退到环境变量 <code>ARTEX_IDA_DIR</code> 和 <code>PATH</code> 里的
+              <code className="mx-1">idat</code>。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <div className="text-xs">
+              {decompStatus?.ok ? (
+                <span className="text-emerald-400">
+                  已检测到：<code>{decompStatus.idat}</code> · 插件 <code>{decompStatus.plugin}</code>
+                </span>
+              ) : (
+                <span className="text-red-400">
+                  不可用：{decompStatus?.error || "尚未检测"}（建导出任务会直接报错）
+                </span>
+              )}
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="decomp-ida-dir" className="text-muted-foreground text-sm font-normal">
+                  IDA 安装目录
+                </Label>
+                <Input
+                  id="decomp-ida-dir"
+                  value={decompIdaDir}
+                  onChange={(e) => setDecompIdaDir(e.target.value)}
+                  placeholder="/home/david/tools/ida（留空=用 ARTEX_IDA_DIR / PATH）"
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="decomp-plugin" className="text-muted-foreground text-sm font-normal">
+                  INP.py 路径
+                </Label>
+                <Input
+                  id="decomp-plugin"
+                  value={decompPlugin}
+                  onChange={(e) => setDecompPlugin(e.target.value)}
+                  placeholder="留空 = <IDA>/plugins/INP.py"
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="decomp-timeout" className="text-muted-foreground text-sm font-normal">
+                  单 job 超时（秒）
+                </Label>
+                <Input
+                  id="decomp-timeout"
+                  value={decompTimeout}
+                  onChange={(e) => setDecompTimeout(e.target.value)}
+                  inputMode="numeric"
+                  placeholder="1800"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="decomp-max" className="text-muted-foreground text-sm font-normal">
+                  单次最多勾选组件
+                </Label>
+                <Input
+                  id="decomp-max"
+                  value={decompMaxComps}
+                  onChange={(e) => setDecompMaxComps(e.target.value)}
+                  inputMode="numeric"
+                  placeholder="8"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="decomp-quota" className="text-muted-foreground text-sm font-normal">
+                  单任务产物配额（MB）
+                </Label>
+                <Input
+                  id="decomp-quota"
+                  value={decompQuota}
+                  onChange={(e) => setDecompQuota(e.target.value)}
+                  inputMode="numeric"
+                  placeholder="2048"
+                />
+              </div>
+              <div className="flex items-end">
+                <span className="text-muted-foreground text-xs">
+                  并发固定 1（IDA 许可），不可调
+                </span>
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <Button size="sm" disabled={!loaded || savingDecompile} onClick={saveDecompile}>
+                保存反编译配置
+              </Button>
             </div>
           </CardContent>
         </Card>

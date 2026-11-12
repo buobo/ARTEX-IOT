@@ -59,3 +59,32 @@ func (d *DB) SetBool(key string, val bool) error {
 	}
 	return d.SetSetting(key, "false")
 }
+
+// SettingsByPrefix returns every setting whose key starts with prefix, e.g.
+// "decompile_" → {"decompile_timeout_seconds": "1800", ...}. Missing keys are
+// simply absent; callers apply their own defaults.
+func (d *DB) SettingsByPrefix(prefix string) (map[string]string, error) {
+	rows, err := d.Query(`SELECT key, value FROM settings WHERE key LIKE $1`, prefix+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}
+
+// GetString returns the stored value or def when the key is unset/unreadable.
+func (d *DB) GetString(key, def string) string {
+	v, ok, err := d.GetSetting(key)
+	if err != nil || !ok {
+		return def
+	}
+	return v
+}

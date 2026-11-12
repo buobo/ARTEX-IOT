@@ -127,7 +127,16 @@ const LANG_LABEL: Record<Lang, string> = {
   text: "Text",
 };
 
-function HighlightedCode({ code, name }: { code: string; name: string }) {
+export function HighlightedCode({
+  code,
+  name,
+  tokenHint,
+}: {
+  code: string;
+  name: string;
+  /** 可选：给命中的标识符追加样式（反编译页用它把可跳转函数打成手型光标）。 */
+  tokenHint?: (text: string) => string | undefined;
+}) {
   const lang = langOf(name);
   const lines = React.useMemo(() => tokenize(code, lang), [code, lang]);
   return (
@@ -151,7 +160,10 @@ function HighlightedCode({ code, name }: { code: string; name: string }) {
                   {toks.length === 0
                     ? " "
                     : toks.map((t, j) => (
-                        <span key={j} className={TOK_CLASS[t.cls]}>
+                        <span
+                          key={j}
+                          className={`${TOK_CLASS[t.cls]} ${tokenHint?.(t.text) ?? ""}`}
+                        >
                           {t.text}
                         </span>
                       ))}

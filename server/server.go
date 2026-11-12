@@ -52,6 +52,8 @@ type Server struct {
 
 	cfgMu     sync.Mutex
 	chatAgent *agent.ChatAgent // conversational runner for the chat page; nil w/o LLM
+	// decomp 是反编译导出的进程内队列（并发 1，idat 子进程）。
+	decomp *decompiler
 	// llmProv is the fully-decorated global provider (recorder + failover chain)
 	// installed by applyLLM. Task routers use it after an explicit chain is cleared.
 	llmProv   llm.Provider
@@ -156,6 +158,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
+	// 反编译队列：启动时把上次中断的 running 置 failed，然后起循环等活。
+	s.decomp = newDecompiler(dataDir, m.pg)
+	s.decomp.start()
 	// 录屏执行计数走回调，避免 recorder 持有 DB 句柄。
 	incExecCountHook = func(rec *retestRecorder) error {
 		return m.pg.IncRetestRecordingExec(context.Background(), rec.recID)
@@ -708,6 +713,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/coverage", s.taskCoverage)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage-graph", s.taskCoverageGraph)
 	mux.HandleFunc("GET /api/tasks/{id}/poc", s.taskPocFiles)
+	// 反编译（IDA 无头导出）：任务内建 job / 查 job / 浏览函数，见 IOT-AUDIT-反编译集成方案.md。
+	mux.HandleFunc("POST /api/tasks/{id}/decompile", s.decompileCreate)
+	mux.HandleFunc("GET /api/tasks/{id}/decompile/jobs", s.decompileTaskJobs)
+	mux.HandleFunc("GET /api/decompile/jobs", s.decompileList)
+	mux.HandleFunc("GET /api/decompile/jobs/{jobID}", s.decompileGet)
+	mux.HandleFunc("POST /api/decompile/jobs/{jobID}/cancel", s.decompileCancel)
+	mux.HandleFunc("POST /api/decompile/jobs/{jobID}/retry", s.decompileRetry)
+	mux.HandleFunc("DELETE /api/decompile/jobs/{jobID}", s.decompileDelete)
+	mux.HandleFunc("GET /api/decompile/jobs/{jobID}/functions", s.decompileFunctions)
+	mux.HandleFunc("GET /api/decompile/jobs/{jobID}/code/{addr}", s.decompileCode)
+	mux.HandleFunc("GET /api/decompile/jobs/{jobID}/search", s.decompileSearch)
+	mux.HandleFunc("GET /api/decompile/jobs/{jobID}/log", s.decompileLog)
+	mux.HandleFunc("GET /api/decompile/jobs/{jobID}/names", s.decompileNames)
 	mux.HandleFunc("GET /api/tasks/{id}/poc/{name}", s.taskPocDownload)
 	mux.HandleFunc("GET /api/tasks/{id}/poc/{name}/content", s.taskPocContent)
 	mux.HandleFunc("GET /api/tasks/{id}/component-refs", s.taskComponentRefs)
@@ -3262,6 +3280,54 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.settingsPayload())
 }
 
+// 反编译（IDA 无头导出）的配置键，见 IOT-AUDIT-反编译集成方案.md §8。
+const (
+	settingDecompileIDA      = "decompile_ida_install_dir"
+	settingDecompilePlugin   = "decompile_idat_plugin_path"
+	settingDecompileTimeout  = "decompile_timeout_seconds"
+	settingDecompileMaxComps = "decompile_max_components"
+	settingDecompileQuotaMB  = "decompile_task_quota_mb"
+	defaultDecompileTimeout  = 1800
+	defaultDecompileMaxComps = 8
+	defaultDecompileQuotaMB  = 2048
+)
+
+// decompileIntSetting 读整数设置，未配置或非法时回落到默认值（UI 显示当前生效值）。
+func decompileIntSetting(pg *db.DB, key string, def int) int {
+	v, ok, _ := pg.GetSetting(key)
+	if !ok {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
+// decompileStatus 回显 idat 是否可用，设置页据此提示「找不到 IDA」而不是让人建 job 才失败。
+func (s *Server) decompileStatus() map[string]any {
+	if s.decomp == nil {
+		return map[string]any{"ok": false, "error": "反编译能力未启用"}
+	}
+	cfg := s.decomp.config()
+	idat, plugin, err := s.decomp.locateIDA(cfg)
+	out := map[string]any{
+		"ok":              err == nil,
+		"ida_dir":         cfg.idaDir,
+		"timeout_seconds": int(cfg.timeout.Seconds()),
+		"max_components":  cfg.maxComps,
+		"quota_mb":        cfg.quotaBytes >> 20,
+	}
+	if err != nil {
+		out["error"] = err.Error()
+		return out
+	}
+	out["idat"] = idat
+	out["plugin"] = filepath.Join(plugin, "INP.py")
+	return out
+}
+
 func (s *Server) settingsPayload() map[string]any {
 	on, backend, braveKey, tavilyKey, proxy := s.m.WebSearch()
 	pyStored, _, _ := s.m.pg.GetSetting(settingPythonInterp)
@@ -3298,6 +3364,13 @@ func (s *Server) settingsPayload() map[string]any {
 		"notify_enabled":             s.m.pg.GetBool(settingNotifyEnabled, true),
 		"notify_public_base_url":     notifyPublicBaseURL(s.m.pg),
 		"notify_digest_interval_min": notifyDigestIntervalMin(s.m.pg),
+		// 反编译（IDA 无头导出）。空字符串=未配置，后端会依次回退到 ARTEX_IDA_DIR / PATH。
+		"decompile_ida_install_dir":  strings.TrimSpace(s.m.pg.GetString(settingDecompileIDA, "")),
+		"decompile_idat_plugin_path": strings.TrimSpace(s.m.pg.GetString(settingDecompilePlugin, "")),
+		"decompile_timeout_seconds":  decompileIntSetting(s.m.pg, settingDecompileTimeout, defaultDecompileTimeout),
+		"decompile_max_components":   decompileIntSetting(s.m.pg, settingDecompileMaxComps, defaultDecompileMaxComps),
+		"decompile_task_quota_mb":    decompileIntSetting(s.m.pg, settingDecompileQuotaMB, defaultDecompileQuotaMB),
+		"decompile_status":           s.decompileStatus(),
 	}
 }
 
@@ -3370,6 +3443,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		NotifyEnabled    *bool   `json:"notify_enabled"`
 		NotifyBaseURL    *string `json:"notify_public_base_url"`
 		NotifyDigestMins *int    `json:"notify_digest_interval_min"`
+		// 反编译（IDA 无头导出）配置。路径传空字符串=清空（依次回退 ARTEX_IDA_DIR → PATH）。
+		DecompileIDADir   *string `json:"decompile_ida_install_dir"`
+		DecompilePlugin   *string `json:"decompile_idat_plugin_path"`
+		DecompileTimeout  *int    `json:"decompile_timeout_seconds"`
+		DecompileMaxComps *int    `json:"decompile_max_components"`
+		DecompileQuotaMB  *int    `json:"decompile_task_quota_mb"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -3453,6 +3532,49 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.PythonInterp != nil {
 		if err := s.m.pg.SetSetting(settingPythonInterp, strings.TrimSpace(*req.PythonInterp)); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	// 反编译设置：路径即时生效（locateIDA 以「目录+插件」为缓存键），限额下次建 job 生效。
+	if req.DecompileIDADir != nil {
+		if err := s.m.pg.SetSetting(settingDecompileIDA, strings.TrimSpace(*req.DecompileIDADir)); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.DecompilePlugin != nil {
+		if err := s.m.pg.SetSetting(settingDecompilePlugin, strings.TrimSpace(*req.DecompilePlugin)); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.DecompileTimeout != nil {
+		if *req.DecompileTimeout < 60 || *req.DecompileTimeout > 86400 {
+			writeErr(w, 400, "单 job 超时必须在 60–86400 秒之间")
+			return
+		}
+		if err := s.m.pg.SetSetting(settingDecompileTimeout, strconv.Itoa(*req.DecompileTimeout)); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.DecompileMaxComps != nil {
+		if *req.DecompileMaxComps < 1 || *req.DecompileMaxComps > 32 {
+			writeErr(w, 400, "单次勾选上限必须在 1–32 之间")
+			return
+		}
+		if err := s.m.pg.SetSetting(settingDecompileMaxComps, strconv.Itoa(*req.DecompileMaxComps)); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.DecompileQuotaMB != nil {
+		if *req.DecompileQuotaMB < 1 || *req.DecompileQuotaMB > 102400 {
+			writeErr(w, 400, "任务产物配额必须在 1–102400 MB 之间")
+			return
+		}
+		if err := s.m.pg.SetSetting(settingDecompileQuotaMB, strconv.Itoa(*req.DecompileQuotaMB)); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}

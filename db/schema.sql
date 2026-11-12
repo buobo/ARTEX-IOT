@@ -1508,3 +1508,30 @@ CREATE INDEX IF NOT EXISTS idx_notification_deliveries_batch
     ON notification_deliveries(batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_channel
     ON notification_deliveries(channel_id, id DESC);
+
+-- 反编译导出任务（IDA 无头 + INP 导出每函数 .c），见 IOT-AUDIT-反编译集成方案.md §4。
+-- 每个二进制一个 job；唯一键 (task_id, binary_sha256) 保证重复点击不产生第二个 job，
+-- 内容变了（sha 不同）才是新 job。产物在 data/tasks/<task_id>/decompile/<sha8>/。
+CREATE TABLE IF NOT EXISTS decompile_jobs (
+    id            BIGSERIAL PRIMARY KEY,
+    task_id       BIGINT NOT NULL,
+    -- 触发它的组件，可为空（按路径直导 / 组件事后被删）。刻意不建外键：
+    -- 删组件不该连带删掉已经导出的产物。只用于展示与回跳，不参与路径计算。
+    component_id  BIGINT,
+    binary_path   TEXT NOT NULL,              -- 容器内路径，如 /usr/sbin/jhttpd
+    binary_sha256 TEXT NOT NULL,              -- 真实分析样本的内容哈希
+    abs_path      TEXT NOT NULL,              -- 解析出的宿主机真实文件
+    export_dir    TEXT NOT NULL,              -- 相对 data 根：tasks/<id>/decompile/<sha8>
+    status        TEXT NOT NULL DEFAULT 'pending',  -- pending/running/completed/failed/canceled
+    func_total    INTEGER NOT NULL DEFAULT 0,
+    func_done     INTEGER NOT NULL DEFAULT 0,
+    error         TEXT NOT NULL DEFAULT '',   -- 失败原因摘要一行，全文在 export_dir/idat.log
+    created_by    TEXT NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at    TIMESTAMPTZ,
+    finished_at   TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_decompile_jobs_v1 ON decompile_jobs (task_id, binary_sha256);
+CREATE INDEX IF NOT EXISTS idx_decompile_jobs_task ON decompile_jobs (task_id, id DESC);
+-- 队列只捞 pending，跑一个换一个（并发固定 1，IDA 许可与内存都不允许多实例叠加）。
+CREATE INDEX IF NOT EXISTS idx_decompile_jobs_pending ON decompile_jobs (id) WHERE status = 'pending';

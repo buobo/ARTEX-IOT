@@ -1,6 +1,7 @@
 import {
   Activity,
   BellRing,
+  Binary,
   Bot,
   Brain,
   Bug,
@@ -72,6 +73,7 @@ export const sidebarItems: NavGroup[] = [
       { id: "commands", title: "工具执行", url: "/function/commands", icon: Terminal },
       { id: "llm-records", title: "LLM 录制", url: "/function/llm-records", icon: Radio },
       { id: "components", title: "组件", url: "/function/components", icon: Package },
+      { id: "decompile", title: "反编译", url: "/function/decompile", icon: Binary },
       { id: "workspace", title: "工作空间", url: "/function/workspace", icon: FolderOpen },
     ],
   },
