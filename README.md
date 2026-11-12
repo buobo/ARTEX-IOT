@@ -3,7 +3,7 @@
 
 # ARTEX-IOT
 
-本项目基于 [ARTEX-God](https://github.com/Xiao1an/ARTEX-God) 二开，感谢原作者的开源。
+本项目基于 [ARTEX-God](https://github.com/Xiao1an/ARTEX-God) 二开，感谢原作者的开源；本分支为 **ARTEX-IOT**，仓库在 [buobo/ARTEX-IOT](https://github.com/buobo/ARTEX-IOT)。
 
 重心放在 **IoT 固件审计**：移除了面向公网资产的探测与扫描渗透，把“资产”换成“组件”——围绕固件里一个个可指认的组件（httpd、busybox、upnpd、MQTT 服务……）去做解包、逆向、漏洞验证与复现。
 
@@ -70,8 +70,7 @@
 ### 方式一：一键安装脚本（推荐）
 
 ```bash
-# 本项目是 ARTEX-God 的 IoT 分支，克隆地址换成你自己的仓库
-git clone <本仓库地址> ARTEX-IOT
+git clone https://github.com/buobo/ARTEX-IOT.git
 cd ARTEX-IOT
 ./install.sh
 ```
@@ -87,7 +86,7 @@ cd ARTEX-IOT
 
 ### 方式二：下载预编译二进制（Releases）
 
-到 [Releases](https://github.com/Xiao1an/ARTEX-God/releases) 下载对应平台的 zip，解压后得到 `artex` + `start.sh`（Windows 为 `start.bat`）+ `skills/` + `config.example.json`：
+到 [Releases](https://github.com/buobo/ARTEX-IOT/releases) 下载对应平台的 zip，解压后得到 `artex` + `start.sh`（Windows 为 `start.bat`）+ `skills/` + `config.example.json`：
 
 ```bash
 cp config.example.json config.json   # 填好 database 连接
@@ -133,7 +132,9 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 
 ### 本仓库的私有 Release 更新源
 
-更新源目前在代码里写死为上游 [Xiao1an/ARTEX-God Releases](https://github.com/Xiao1an/ARTEX-God/releases)（`selfupdate/github.go` 的 `const Repo`），Go module 路径也沿用上游。本分支若发布自己的 Release，需要先改这一行（或后续加环境变量覆盖），否则「检查更新」会拿上游版本号与本项目比较。
+更新源固定为 [buobo/ARTEX-IOT Releases](https://github.com/buobo/ARTEX-IOT/releases)，写在 `selfupdate/github.go` 的 `const Repo`（Go module 路径仍沿用上游，不影响升级）。
+
+这里刻意不做成运行时可配项：更新源可配等于给任何能改配置的人一条替换二进制的通道，对一个安全平台来说这个口子不能开。当前版本号是 `dev` 时一键更新会被禁用；发布正式版本（`v*` tag）后，页面才会比对并下载本仓库 Release 里的 `artex-<版本>-<os>-<arch>.zip` 与 `SHA256SUMS`。
 
 若仓库为私有，请为运行 ARTEX 的后端进程设置 `ARTEX_UPDATE_GITHUB_TOKEN`，令牌只需本仓库的 **Contents: read** 权限。令牌由后端用于查询 Release 和下载附件，不发送给浏览器，也不要提交到 Git。公开仓库则无需令牌。
 
@@ -161,7 +162,7 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 ### 方式二：一键更新脚本
 
 ```bash
-cd ARTEX-God
+cd ARTEX-IOT
 ./update.sh
 ```
 
@@ -169,7 +170,7 @@ cd ARTEX-God
 
 ### 方式三：预编译二进制（Releases）
 
-到 [Releases](https://github.com/Xiao1an/ARTEX-God/releases) 下载新版本 zip，停掉旧进程后覆盖 `artex` 与 `skills/`（保留你的 `config.json` 与 `data/`），重启即可：
+到 [Releases](https://github.com/buobo/ARTEX-IOT/releases) 下载新版本 zip，停掉旧进程后覆盖 `artex` 与 `skills/`（保留你的 `config.json` 与 `data/`），重启即可：
 
 ```bash
 cp -r <解压目录>/skills ./ && cp <解压目录>/artex ./

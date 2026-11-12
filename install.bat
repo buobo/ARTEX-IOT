@@ -1,10 +1,10 @@
 @echo off
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
-title ARTEX-God Installer
+title ARTEX-IOT Installer
 
 echo ============================================================
-echo    ARTEX-God  -  Local install (build from source and run)
+echo    ARTEX-IOT  -  Local install (build from source and run)
 echo ============================================================
 echo.
 echo This will: check Go and Node, configure the PostgreSQL
@@ -175,7 +175,7 @@ echo.
 echo ============================================================
 echo   Build complete. Starting ARTEX...
 echo ============================================================
-start "ARTEX-God" cmd /c start.bat
+start "ARTEX-IOT" cmd /c start.bat
 echo [*] Waiting for http://localhost:8787 to come up...
 set /a tries=0
 :waitloop
@@ -195,13 +195,13 @@ goto done
 
 :timeout
 echo.
-echo [!] Timed out waiting for the server. Look at the "ARTEX-God" window
+echo [!] Timed out waiting for the server. Look at the "ARTEX-IOT" window
 echo     for errors (most often the PostgreSQL connection in config.json).
 echo     Once it prints "listening", open http://localhost:8787 manually.
 
 :done
 echo.
-echo   Stop ARTEX:   close the "ARTEX-God" window.
+echo   Stop ARTEX:   close the "ARTEX-IOT" window.
 echo   Start again:  double-click start.bat
 echo   Rebuild:      run install.bat again (choose to overwrite config if asked)
 echo.
