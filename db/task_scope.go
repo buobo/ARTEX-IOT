@@ -28,7 +28,12 @@ type TaskScope struct {
 	// image. value(filename) + sha256 are the firmware's identity, so two different
 	// images that share a filename stay distinct rows.
 	Sha256 string `json:"sha256,omitempty"`
-	Source string `json:"source"`
+	// ExtractPath is set only for kind=firmware: the firmware's unpacked root
+	// directory, RELATIVE to the task dir (e.g. "firmware/rootfs", "i50/extract/rootfs").
+	// Empty means "not unpacked yet" — upload never writes it; the first unpacking
+	// worker fills it in via the register_extract tool.
+	ExtractPath string `json:"extract_path,omitempty"`
+	Source      string `json:"source"`
 	Reason string `json:"reason,omitempty"`
 }
 
@@ -231,10 +236,10 @@ func (s *ComponentStore) AddFirmwareScope(taskID int64, filename, sha256, reason
 	// 同名固件只留一行：调用方没给 sha、或库里已有同名的无 sha 老行时，复用/升级那一行，
 	// 不再插新行（唯一键把 '' 和具体值当成两行，否则列表里会出现两条同名固件）。
 	var existingID int64
-	var existingSha string
-	qerr := s.q().QueryRow(`SELECT id, COALESCE(sha256,'') FROM task_scope
+	var existingSha, existingExtract string
+	qerr := s.q().QueryRow(`SELECT id, COALESCE(sha256,''), COALESCE(extract_path,'') FROM task_scope
  WHERE task_id=$1 AND kind='firmware' AND value=$2
- ORDER BY (COALESCE(sha256,'') <> '') DESC, id LIMIT 1`, taskID, filename).Scan(&existingID, &existingSha)
+ ORDER BY (COALESCE(sha256,'') <> '') DESC, id LIMIT 1`, taskID, filename).Scan(&existingID, &existingSha, &existingExtract)
 	switch {
 	case qerr == nil && existingSha == "" && sha != "":
 		if _, err := s.q().Exec(`UPDATE task_scope SET sha256=$2 WHERE id=$1`, existingID, sha); err != nil {
@@ -242,10 +247,12 @@ func (s *ComponentStore) AddFirmwareScope(taskID int64, filename, sha256, reason
 		}
 		ts.ID = existingID
 		ts.Sha256 = sha
+		ts.ExtractPath = existingExtract
 		return ts, nil
 	case qerr == nil:
 		ts.ID = existingID
 		ts.Sha256 = existingSha
+		ts.ExtractPath = existingExtract
 		return ts, nil
 	case !errors.Is(qerr, sql.ErrNoRows):
 		return ts, qerr
@@ -254,6 +261,90 @@ func (s *ComponentStore) AddFirmwareScope(taskID int64, filename, sha256, reason
 		return ts, err
 	}
 	return ts, nil
+}
+
+// SetFirmwareExtract records WHERE a firmware image was unpacked. Upload never sets
+// it — the first worker that actually unpacks fills it in via the register_extract
+// tool, so the column means "this image has been unpacked, here's the rootfs".
+//
+// Row resolution is sha256-FIRST on purpose: AddFirmwareScope above reuses a row by
+// filename alone (same name, different content → still the old row), so matching by
+// name here could write the path onto a different image. filename is only the
+// fallback; when nothing matches, a firmware row is created (source='agent').
+//
+// relPath is stored verbatim (relative to the task dir); callers validate it first.
+// Returns the updated row and the previous value ("" when it had none).
+func (s *ComponentStore) SetFirmwareExtract(taskID int64, sha256, filename, relPath, reason string) (TaskScope, string, error) {
+	ts := TaskScope{TaskID: taskID, Kind: "firmware", Source: "agent", Reason: reason}
+	if taskID <= 0 {
+		return ts, "", fmt.Errorf("需要 task_id")
+	}
+	relPath = strings.Trim(strings.TrimSpace(relPath), "/")
+	if relPath == "" {
+		return ts, "", fmt.Errorf("extract_path 不能为空")
+	}
+	sha := strings.ToLower(strings.TrimSpace(sha256))
+	if sha != "" && !isHex64(sha) {
+		return ts, "", fmt.Errorf("sha256 需要 64 位十六进制（小写），收到 %d 字符", len(sha))
+	}
+	filename = strings.TrimSpace(filename)
+
+	var (
+		id   int64
+		prev string
+	)
+	// 1) 摘要优先：固件的真正身份。
+	if sha != "" {
+		var rowValue string
+		err := s.q().QueryRow(`SELECT id, COALESCE(value,''), COALESCE(extract_path,'') FROM task_scope
+ WHERE task_id=$1 AND kind='firmware' AND sha256=$2 ORDER BY id LIMIT 1`, taskID, sha).
+			Scan(&id, &rowValue, &prev)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return ts, "", err
+		}
+		if id > 0 && filename == "" {
+			filename = rowValue
+		}
+	}
+	// 2) 文件名兜底（老行可能还没 sha，顺手补上）。
+	if id == 0 && filename != "" {
+		var rowSha string
+		err := s.q().QueryRow(`SELECT id, COALESCE(sha256,''), COALESCE(extract_path,'') FROM task_scope
+ WHERE task_id=$1 AND kind='firmware' AND value=$2
+ ORDER BY (COALESCE(sha256,'') <> '') DESC, id LIMIT 1`, taskID, filename).Scan(&id, &rowSha, &prev)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return ts, "", err
+		}
+		if id > 0 && rowSha == "" && sha != "" {
+			if _, err := s.q().Exec(`UPDATE task_scope SET sha256=$2 WHERE id=$1`, id, sha); err != nil {
+				return ts, "", err
+			}
+			rowSha = sha
+		}
+		sha = rowSha
+	}
+	// 3) 都没有：登记一份新的固件行。
+	if id == 0 {
+		if filename == "" {
+			return ts, "", fmt.Errorf("找不到对应固件行，也没给文件名，无法登记解包路径")
+		}
+		created, err := s.AddFirmwareScope(taskID, filename, sha, reason, "agent")
+		if err != nil {
+			return ts, "", err
+		}
+		id = created.ID
+		if created.Sha256 != "" {
+			sha = created.Sha256
+		}
+	}
+	if _, err := s.q().Exec(`UPDATE task_scope SET extract_path=$2 WHERE id=$1`, id, relPath); err != nil {
+		return ts, "", err
+	}
+	ts.ID = id
+	ts.Value = filename
+	ts.Sha256 = sha
+	ts.ExtractPath = relPath
+	return ts, prev, nil
 }
 
 // isHex64 reports whether s is exactly 64 lowercase hex chars (a sha256 digest).
@@ -296,7 +387,8 @@ func (s *ComponentStore) DeleteTaskScope(taskID, scopeID int64) (bool, error) {
 func (s *ComponentStore) ListTaskScope(taskID int64) ([]TaskScope, error) {
 	rows, err := s.db.Query(`
 SELECT ts.id, ts.kind, COALESCE(ts.company_id,0), COALESCE(c.name,''), COALESCE(ts.domain,''),
-       COALESCE(ts.net::text,''), COALESCE(ts.value,''), COALESCE(ts.sha256,''), ts.source, COALESCE(ts.reason,'')
+       COALESCE(ts.net::text,''), COALESCE(ts.value,''), COALESCE(ts.sha256,''), ts.source, COALESCE(ts.reason,''),
+       COALESCE(ts.extract_path,'')
 FROM task_scope ts
 LEFT JOIN companies c ON c.id=ts.company_id
 WHERE ts.task_id=$1 ORDER BY ts.id`, taskID)
@@ -308,7 +400,7 @@ WHERE ts.task_id=$1 ORDER BY ts.id`, taskID)
 	for rows.Next() {
 		var t TaskScope
 		var cid int64
-		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.CompanyName, &t.Domain, &t.Net, &t.Value, &t.Sha256, &t.Source, &t.Reason); err != nil {
+		if err := rows.Scan(&t.ID, &t.Kind, &cid, &t.CompanyName, &t.Domain, &t.Net, &t.Value, &t.Sha256, &t.Source, &t.Reason, &t.ExtractPath); err != nil {
 			return nil, err
 		}
 		t.TaskID = taskID

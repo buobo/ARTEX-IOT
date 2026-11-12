@@ -39,8 +39,8 @@ binwalk -E firmware.bin        # 熵分析（高熵=加密）
 
 ```bash
 unzip -l firmware.bin
-mkdir extracted
-unzip -o firmware.bin -d extracted
+# 解到哪个目录自己定（可以就在 firmware/ 下，如 firmware/rootfs）；解完必须把根目录登记给任务
+unzip -o firmware.bin -d <解包目录>
 ```
 
 分区文件若识别为 U-Boot legacy uImage，通常跳过 64 字节头即可检查内部格式：
@@ -58,9 +58,21 @@ file parts/*
 
 ```bash
 for p in parts/*squash.gz; do
-  unsquashfs -d rootfs/$(basename "$p" .gz) "$p"
+  unsquashfs -d <解包目录>/$(basename "$p" .gz) "$p"   # 目录自己定，解完登记给任务
 done
 ```
+
+## 交接：把解包产物登记给任务（必须做）
+
+解包完成后立刻调 `register_extract` 工具，把根目录登记到本任务（落在 `task_scope` 的 firmware 行 `extract_path` 上）：
+
+    register_extract(path="firmware/rootfs", firmware="R6220-V1.1.0.86.img", note="sasquatch -d rootfs R6220.bin")
+
+- `path` 必须在任务目录内，可以就在 `firmware/` 下；工具会按软链真实路径校验越界。
+- `firmware` 可选：任务里有多份固件时必须指定（文件名或 sha256）。
+- 同一个目录重复登记是幂等的（already=true）；登记新路径会覆盖并回报 previous。
+
+不登记 = 没解包：后面的意图看不到这个目录，会重新解一遍。反之，意图描述或 fact 里已经给出本任务的解包路径时，直接复用那个目录，不要重复解包。
 
 若 ZIP 提取返回非零退出码，要检查输出目录和每个文件的 `file` 结果；厂商头导致的 ZIP offset 警告不一定意味着所有分区不可用。
 
