@@ -10,12 +10,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/llmrec"
@@ -1024,13 +1022,22 @@ const (
 	maxExperienceRunes = 8192
 	// read_experience is a real model call: bound it per run, bound the candidate
 	// window handed to the model, and bound what comes back to the worker.
-	experienceReadsPerRun   = 3
-	experienceCandidatesMax = 200
-	experienceCandidates    = 30
-	experienceCandidateChar = 800
-	experienceDigestLimit   = 5
-	experienceDigestRunes   = 6000
-	experienceReadTimeout   = 45 * time.Second
+	experienceReadsPerRun = 3
+	// The model does the semantic filtering, so the window is just "the newest N
+	// notes": 10 by default (predictable cost, no local scoring), and the agent may
+	// ask for more in a single call when it knows the pool is bigger. The ceiling
+	// equals the SQL default so one query can never read unbounded rows, and every
+	// note goes in whole — the old 800-rune cut used to slice off "④ 坑".
+	experienceCandidatesDefault = 10
+	experienceCandidatesMax     = 200
+	experienceDigestLimit       = 5
+	experienceDigestRunes       = 6000
+	// 1500 used to be enough when each note was cut to 800 runes; with whole notes
+	// in the prompt the model writes longer digests and got truncated mid-JSON,
+	// which the digest parser could only report as "无法解析". 4000 covers 5 full
+	// four-section digests with room to spare.
+	experienceReadMaxTokens = 4000
+	experienceReadTimeout   = 60 * time.Second
 	experienceCacheTTL      = 10 * time.Minute
 	// experienceWorkerLane labels these calls in llm_usage so the config page can
 	// report the retrieval spend apart from the worker's own tokens.
@@ -1089,22 +1096,25 @@ func (t *ToolSet) writeExperience() actool.CoreTool {
 }
 
 // readExperience searches this task's stored experience. The query is natural
-// language; the tool picks candidates locally (no tokens), then makes ONE model
-// call to select + compress them, then returns the digest.
+// language; the tool takes the newest N notes as-is (no local scoring), makes ONE
+// model call to select + compress them, then returns the digest.
 func (t *ToolSet) readExperience() actool.CoreTool {
 	return t.readExpTool(
 		"read_experience",
 		"检索本任务历史意图沉淀下来的经验。query 用自然语言说明你想找哪方面的经验"+
 			"（例如「mini_httpd 认证绕过相关的经验」「有没有人试过固件升级入口」）。\n"+
-			"内部会读取本任务全部经验，用模型筛出相关的并梳理压缩后返回；命令、路径、参数保留原文。\n"+
-			"返回 {experiences:[{intent_id, summary, digest}], note}；没有相关经验时 experiences 为空，"+
+			"内部取本任务最近的经验（默认 10 条，可用 candidates 显式指定，上限 "+strconv.Itoa(experienceCandidatesMax)+" 条），"+
+			"用模型筛出相关的并梳理压缩后返回；命令、路径、参数保留原文。\n"+
+			"返回 {experiences:[{intent_id, summary, digest}], note, candidates}；没有相关经验时 experiences 为空，"+
 			"note 会说明原因（含检索不可用时）。本工具只读本任务，不跨任务。",
 		obj(map[string]any{
-			"query": str("想找哪方面的经验，一句话自然语言即可"),
+			"query":      str("想找哪方面的经验，一句话自然语言即可"),
+			"candidates": intp("可选：投给模型的经验条数，按 id 倒序取最近 N 条，默认 10，上限 200；池子明显更大、想找更早的经验时调大，代价是输入更长"),
 		}, "query"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
-				Query string `json:"query"`
+				Query      string `json:"query"`
+				Candidates int    `json:"candidates"`
 			}
 			if err := json.Unmarshal(in, &a); err != nil {
 				return actool.Errorf(err.Error()), nil
@@ -1112,6 +1122,14 @@ func (t *ToolSet) readExperience() actool.CoreTool {
 			query := strings.TrimSpace(a.Query)
 			if query == "" {
 				return actool.Errorf("query 不能为空：用一句话说你想要哪方面的经验"), nil
+			}
+			// candidates 默认 10 条；显式指定时收敛到上限，<=0 也回到默认值。
+			candidates := a.Candidates
+			if candidates <= 0 {
+				candidates = experienceCandidatesDefault
+			}
+			if candidates > experienceCandidatesMax {
+				candidates = experienceCandidatesMax
 			}
 			if t.ts == nil {
 				return jsonResult(map[string]any{"experiences": []any{}, "note": "经验检索不可用（当前没有任务上下文）"})
@@ -1125,7 +1143,7 @@ func (t *ToolSet) readExperience() actool.CoreTool {
 					"note":        fmt.Sprintf("本轮已达经验检索上限（%d 次），请按已获得的信息继续", experienceReadsPerRun),
 				})
 			}
-			rows, err := t.ts.IntentExperiences(experienceCandidatesMax)
+			rows, err := t.ts.IntentExperiences(candidates)
 			if err != nil {
 				log.Printf("[experience] 读取经验失败 exp=%d: %v", t.ts.ID(), err)
 				return jsonResult(map[string]any{"experiences": []any{}, "note": "读取经验失败，请按当前上下文继续"})
@@ -1133,16 +1151,15 @@ func (t *ToolSet) readExperience() actool.CoreTool {
 			if len(rows) == 0 {
 				return jsonResult(map[string]any{"experiences": []any{}, "note": "本任务暂无经验（还没有意图写过经验）"})
 			}
-			key := experienceCacheKey(t.ts.ID(), query)
+			key := experienceCacheKey(t.ts.ID(), query, candidates)
 			if cached, ok := experienceCacheGet(key); ok {
 				return actool.Text(cached), nil
 			}
-			cands := preselectExperience(rows, query, experienceCandidates)
 			t.expReads++
 			req := llm.CompletionRequest{
 				System:    []string{experienceReadSystemPrompt},
-				Messages:  []llm.Message{llm.UserText(buildExperienceReadInput(query, cands))},
-				MaxTokens: 1500,
+				Messages:  []llm.Message{llm.UserText(buildExperienceReadInput(query, rows))},
+				MaxTokens: experienceReadMaxTokens,
 				Thinking:  "disabled", // retrieval is a lookup, not a reasoning step
 			}
 			rctx, cancel := context.WithTimeout(ctx, experienceReadTimeout)
@@ -1155,12 +1172,26 @@ func (t *ToolSet) readExperience() actool.CoreTool {
 				rctx = llmrec.WithTaskID(rctx, strconv.FormatInt(t.taskID, 10))
 			}
 			rctx = llmrec.WithWorker(rctx, experienceWorkerLane)
-			msg, _, _, callErr := t.prov.Complete(rctx, req)
+			msg, stopReason, _, callErr := t.prov.Complete(rctx, req)
 			if callErr != nil {
 				log.Printf("[experience] 经验检索失败 exp=%d: %v", t.ts.ID(), callErr)
 				return jsonResult(map[string]any{"experiences": []any{}, "note": "经验检索不可用，请按当前上下文继续"})
 			}
-			payload := buildExperienceDigest(msg.Text(), cands)
+			// 撞到 max_output_tokens 时模型交出的是半截 JSON，解析只会得到「无法解析」
+			// 而把已经写出来的内容整段丢掉。这里原样返回截断的原文：worker 自己读得懂
+			// 半截 JSON，信息一条不丢。也不写缓存——半截结果不该在 10 分钟里顶替掉
+			// 一次完整检索的机会。
+			if stopReason == "max_tokens" {
+				raw := msg.Text()
+				log.Printf("[experience] 检索输出被 %d token 上限截断 exp=%d，原样返回 %d 字",
+					experienceReadMaxTokens, t.ts.ID(), len([]rune(raw)))
+				return actool.Text(raw), nil
+			}
+			payload := buildExperienceDigest(msg.Text(), rows)
+			// 说清窗口有多宽：固定 10 条时，「没找到」和「10 条之外可能还有」是两种结论。
+			if note, ok := payload["note"].(string); ok {
+				payload["note"] = strings.TrimSpace(note + fmt.Sprintf("（仅检索最近 %d 条经验）", len(rows)))
+			}
 			body, mErr := json.Marshal(payload)
 			if mErr != nil {
 				return jsonResult(map[string]any{"experiences": []any{}, "note": "经验检索结果解析失败，请按当前上下文继续"})
@@ -1171,7 +1202,7 @@ func (t *ToolSet) readExperience() actool.CoreTool {
 	)
 }
 
-// experienceCache memoizes retrieval results per (task, normalized query). Two
+// experienceCache memoizes retrieval results per (task, window, normalized query). Two
 // workers asking the same thing in the same task should not pay twice; the entries
 // are tiny and expire, so this stays a bounded map with no eviction LRU.
 type experienceCacheEntry struct {
@@ -1184,8 +1215,8 @@ var experienceCache = struct {
 	m  map[string]experienceCacheEntry
 }{m: map[string]experienceCacheEntry{}}
 
-func experienceCacheKey(expID int64, query string) string {
-	return strconv.FormatInt(expID, 10) + "|" + strings.ToLower(strings.Join(strings.Fields(query), " "))
+func experienceCacheKey(expID int64, query string, candidates int) string {
+	return strconv.FormatInt(expID, 10) + "|" + strconv.Itoa(candidates) + "|" + strings.ToLower(strings.Join(strings.Fields(query), " "))
 }
 
 func experienceCacheGet(key string) (string, bool) {
@@ -1213,84 +1244,18 @@ func experienceCachePut(key, body string) {
 	experienceCache.m[key] = experienceCacheEntry{body: body, expire: time.Now().Add(experienceCacheTTL)}
 }
 
-// experienceShingles turns text into检索用的 shingles: ASCII words (>=2 chars) and
-// CJK bigrams. Chinese notes have no spaces, so word splitting alone would score
-// every Chinese query as zero-overlap and always fall back to "newest N".
-func experienceShingles(s string) map[string]struct{} {
-	out := make(map[string]struct{})
-	var word []rune
-	var prevHan rune
-	flush := func() {
-		if len(word) >= 2 {
-			out[string(word)] = struct{}{}
-		}
-		word = word[:0]
-	}
-	for _, r := range strings.ToLower(s) {
-		switch {
-		case unicode.Is(unicode.Han, r):
-			flush()
-			if prevHan != 0 {
-				out[string([]rune{prevHan, r})] = struct{}{}
-			}
-			prevHan = r
-		case unicode.IsLetter(r) || unicode.IsDigit(r):
-			prevHan = 0
-			word = append(word, r)
-		default:
-			prevHan = 0
-			flush()
-		}
-	}
-	flush()
-	return out
-}
-
-// preselectExperience ranks this task's notes against the query by shingle overlap
-// and returns at most limit of them (newest first on ties / no signal at all).
-// Pure local computation — it exists so the model never sees 200 notes at once.
-func preselectExperience(rows []db.ExperienceRow, query string, limit int) []db.ExperienceRow {
-	if limit <= 0 || limit > len(rows) {
-		limit = len(rows)
-	}
-	q := experienceShingles(query)
-	type scored struct {
-		row   db.ExperienceRow
-		score float64
-	}
-	out := make([]scored, 0, len(rows))
-	for _, r := range rows {
-		doc := experienceShingles(r.Summary + "\n" + r.Experience)
-		hit := 0
-		for t := range q {
-			if _, ok := doc[t]; ok {
-				hit++
-			}
-		}
-		score := 0.0
-		if len(q) > 0 {
-			score = float64(hit) / float64(len(q))
-		}
-		out = append(out, scored{row: r, score: score})
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].score > out[j].score })
-	picked := make([]db.ExperienceRow, 0, limit)
-	for _, s := range out[:limit] {
-		picked = append(picked, s.row)
-	}
-	return picked
-}
-
-// buildExperienceReadInput renders the retrieval prompt: the query plus the
-// preselected candidates, each truncated so 30 notes still fit a modest budget.
-func buildExperienceReadInput(query string, cands []db.ExperienceRow) string {
+// buildExperienceReadInput renders the retrieval prompt: the query plus the newest
+// N notes, verbatim. Nothing is truncated here — the model needs the whole note
+// (that "④ 坑" tail is usually what a query is after); the output side is capped
+// in buildExperienceDigest instead.
+func buildExperienceReadInput(query string, rows []db.ExperienceRow) string {
 	var b strings.Builder
 	b.WriteString("【想找的经验】\n")
 	b.WriteString(query)
-	fmt.Fprintf(&b, "\n\n【本任务已沉淀的经验（候选 %d 条，按相关度排序）】\n", len(cands))
-	for _, c := range cands {
+	fmt.Fprintf(&b, "\n\n【本任务已沉淀的经验（最近 %d 条，按时间倒序）】\n", len(rows))
+	for _, c := range rows {
 		fmt.Fprintf(&b, "\n### intent #%d · %s\n", c.IntentID, strings.TrimSpace(c.Summary))
-		b.WriteString(truncateRunes(c.Experience, experienceCandidateChar))
+		b.WriteString(strings.TrimSpace(c.Experience))
 		b.WriteByte('\n')
 	}
 	return b.String()
