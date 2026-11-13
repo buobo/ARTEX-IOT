@@ -3,7 +3,7 @@
 
 # ARTEX-IOT
 
-本项目基于 [ARTEX-God](https://github.com/Xiao1an/ARTEX-God) 二开，感谢原作者的开源；本分支为 **ARTEX-IOT**，仓库在 [buobo/ARTEX-IOT](https://github.com/buobo/ARTEX-IOT)。
+本项目基于 [ARTEX-God](https://github.com/Xiao1an/ARTEX-God) 二开，感谢原作者的开源；本分支为 **ARTEX-IOT**，仓库在 [buobo/ARTEX-IOT](https://github.com/buobo/ARTEX-IOT)，也欢迎大家关注我的个人博客：[ARTEX-IOT二开介绍 – 八爪鱼的blog](http://blogbo.cn/index.php/2026/11/13/artex-iot二开介绍/)。
 
 重心放在 **IoT 固件审计**：移除了面向公网资产的探测与扫描渗透，把“资产”换成“组件”——围绕固件里一个个可指认的组件（httpd、busybox、upnpd、MQTT 服务……）去做解包、逆向、漏洞验证与复现。
 
