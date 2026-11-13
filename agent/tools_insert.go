@@ -154,6 +154,12 @@ func (t *ToolSet) insertComponents() actool.CoreTool {
 				})
 			}
 
+			// binary_path 校验：按本任务已登记的解包根拼出宿主真实路径，文件不存在就拒绝整批。
+			// 只约束 agent；无任务上下文（组件库独立新增 / 空壳 ToolSet）时跳过。
+			if err := t.verifyComponentBinaries(inputs); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+
 			var taskIDs []int64
 			if t.taskID > 0 {
 				taskIDs = []int64{t.taskID}
@@ -184,6 +190,157 @@ func (t *ToolSet) insertComponents() actool.CoreTool {
 			})
 		},
 	)
+}
+
+// verifyComponentBinaries 校验每条 binary_path：按本任务已登记的解包根拼出宿主真实路径，
+// 命中普通文件才算通过（用 Lstat，符号链接不算——链接不是可执行文件本体）；任一条不通过就整批拒绝，并把「拼过哪些路径、解包根有哪些、下一步怎么查」
+// 一起回给模型，让它下一轮自己改对。
+//
+// 只管 agent：人的手工登记（POST /api/components）不走这里；没有任务上下文的 ToolSet
+// （组件库独立新增、toolcatalog 里用 nil store 造的空壳）直接跳过，不报错也不 panic。
+func (t *ToolSet) verifyComponentBinaries(items []db.ComponentInput) error {
+	if t.taskID <= 0 || t.dataDir == "" || t.as == nil {
+		return nil
+	}
+	need := false
+	for _, it := range items {
+		if strings.TrimSpace(it.BinaryPath) != "" {
+			need = true
+			break
+		}
+	}
+	if !need { // 全部没填路径：组件允许只登记名字
+		return nil
+	}
+	roots := t.firmwareExtractRoots()
+	taskDir := filepath.Join(t.dataDir, "tasks", strconv.FormatInt(t.taskID, 10))
+	var fails []string
+	for i, it := range items {
+		raw := strings.TrimSpace(it.BinaryPath)
+		if raw == "" {
+			continue
+		}
+		label := fmt.Sprintf("第 %d 条 %s（type=%s）binary_path=%s", i+1, strings.TrimSpace(it.Name), it.Type, raw)
+		container := filepath.ToSlash(raw)
+		if !strings.HasPrefix(container, "/") || strings.Contains(container, "..") {
+			fails = append(fails, label+" 格式不对：这里要写固件内绝对路径（以 / 开头、不含 ..），不是宿主机路径。")
+			continue
+		}
+		if len(roots) == 0 {
+			fails = append(fails, label+" 无法校验：本任务还没有登记解包根。请先解包并调 register_extract 登记解包目录，再重新登记该组件。")
+			continue
+		}
+		var tried []string
+		hit := ""
+		linkTarget, linkSuggest := "", ""
+		for _, root := range roots {
+			rootAbs := filepath.Join(taskDir, filepath.FromSlash(strings.TrimPrefix(root, "/")))
+			cand := filepath.Join(rootAbs, filepath.FromSlash(strings.TrimPrefix(container, "/")))
+			rel, rerr := filepath.Rel(t.dataDir, cand)
+			if rerr != nil {
+				rel = cand
+			}
+			tried = append(tried, filepath.ToSlash(rel))
+			// Lstat 不跟随软链：软链本身不是可执行文件本体，不能算通过。
+			fi, serr := os.Lstat(cand)
+			if serr != nil {
+				continue
+			}
+			if fi.Mode()&os.ModeSymlink != 0 {
+				if linkTarget == "" {
+					linkTarget = "（读取链接目标失败）"
+					if val, lerr := os.Readlink(cand); lerr == nil {
+						linkTarget = filepath.ToSlash(val)
+					}
+				}
+				if linkSuggest == "" {
+					linkSuggest = symlinkSuggestion(rootAbs, cand)
+				}
+				continue
+			}
+			if fi.Mode().IsRegular() {
+				hit = cand
+				break
+			}
+		}
+		if hit == "" {
+			if linkTarget != "" {
+				msg := fmt.Sprintf("%s 校验失败：该路径在解包根里是符号链接（-> %s），不算可执行文件本体。", label, linkTarget)
+				if linkSuggest != "" {
+					msg += fmt.Sprintf("请改登记被指向的真实文件：%s。", linkSuggest)
+				} else {
+					msg += "链接目标不在解包根里或也不是普通文件：请用 ls -l 确认指向，按真实文件路径登记。"
+				}
+				fails = append(fails, msg)
+				continue
+			}
+			fails = append(fails, fmt.Sprintf("%s 校验失败：按本任务解包根拼出来的文件都不存在。已尝试：%s。本任务解包根共 %d 个：%s。请先用 Bash 确认真实路径（当前目录即本任务目录，例：find . -name %s -type f），必要时 register_extract 更正解包根，再重新登记。",
+				label, strings.Join(tried, "、"), len(roots), strings.Join(roots, "、"), filepath.Base(container)))
+		}
+	}
+	if len(fails) > 0 {
+		return fmt.Errorf("%s", strings.Join(fails, "\n"))
+	}
+	return nil
+}
+
+// symlinkSuggestion 把一个落在解包根内的软链解析成「可以登记的真实文件路径」，用于错误提示。
+// 固件里的软链常是镜像内绝对路径（/sbin/ubusd）或多级跳转（tbusd -> ubusd -> busybox）：
+// 绝对目标按解包根解释，相对目标按链接所在目录解释；最多跟 5 跳，只有最终落到根内的普通文件才给建议。
+func symlinkSuggestion(rootAbs, linkPath string) string {
+	cur := linkPath
+	for hop := 0; hop < 5; hop++ {
+		val, err := os.Readlink(cur)
+		if err != nil {
+			return ""
+		}
+		var next string
+		if filepath.IsAbs(val) {
+			next = filepath.Join(rootAbs, filepath.FromSlash(strings.TrimPrefix(filepath.ToSlash(val), "/")))
+		} else {
+			next = filepath.Join(filepath.Dir(cur), val)
+		}
+		next = filepath.Clean(next)
+		fi, serr := os.Lstat(next)
+		if serr != nil {
+			return ""
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			cur = next
+			continue
+		}
+		if !fi.Mode().IsRegular() {
+			return ""
+		}
+		rel, rerr := filepath.Rel(rootAbs, next)
+		if rerr != nil || strings.HasPrefix(filepath.ToSlash(rel), "..") {
+			return ""
+		}
+		return "/" + filepath.ToSlash(rel)
+	}
+	return ""
+}
+
+// firmwareExtractRoots 取本任务登记的解包根（task_scope kind=firmware 的 extract_path）。
+// 这些值由 worker 写入，仍按不可信处理：空、绝对路径、含 .. 的一律跳过
+// （与 server 侧反编译导出的过滤规则一致）。
+func (t *ToolSet) firmwareExtractRoots() []string {
+	rows, err := t.as.ListTaskScope(t.taskID)
+	if err != nil {
+		return nil
+	}
+	var roots []string
+	for _, r := range rows {
+		if r.Kind != "firmware" {
+			continue
+		}
+		p := strings.TrimSpace(r.ExtractPath)
+		if p == "" || strings.HasPrefix(p, "/") || strings.Contains(filepath.ToSlash(p), "..") {
+			continue
+		}
+		roots = append(roots, p)
+	}
+	return roots
 }
 
 // addCompanyScope writes to company_scope table and triggers component attribution.
