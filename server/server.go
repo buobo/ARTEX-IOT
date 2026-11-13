@@ -181,6 +181,17 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		b := s.agentsForTask(t)
 		return b.pl, b.wk
 	})
+	// 漏洞判重审计：按任务解析 auditor（与 planner 同一条 LLM 链），并把「新漏洞落库」
+	// 接到批次队列上。审计只在任务内跑，所以解析失败（链路耗尽）时本批直接跳过。
+	s.engine.SetAuditorResolver(func(t *Task) *agent.Auditor {
+		if !s.taskRuntimeAvailable(t, "auditor") {
+			return nil
+		}
+		return s.agentsForTask(t).aud
+	})
+	agent.SetFindingAuditSink(func(taskID, findingID int64, source string) {
+		s.engine.EnqueueAudit(taskID, findingID, source, false)
+	})
 	// Global readiness (Ready()/llm_configured): a global active LLM provider is
 	// installed. Task-level runnability is separate (ReadyFor → the resolver above).
 	s.engine.SetReadiness(func() bool {
@@ -797,6 +808,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/exploration/findings/{id}/retests", s.startFindingRetest)
 	mux.HandleFunc("GET /api/finding-retest-recordings/{id}/stream", s.streamFindingRetestRecording)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
+	// 漏洞判重审计（人工触发）：单条强制重审 / 整任务判重 / 进度查询。
+	mux.HandleFunc("POST /api/exploration/findings/{id}/audit", s.auditFinding)
+	mux.HandleFunc("POST /api/tasks/{id}/audit", s.auditTaskFindings)
+	mux.HandleFunc("GET /api/tasks/{id}/audit/status", s.auditTaskStatus)
 	mux.HandleFunc("DELETE /api/exploration/findings/{id}", s.deleteFinding)
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
 	mux.HandleFunc("GET /api/exploration/graph", s.explorationGraph)
@@ -2140,6 +2155,18 @@ func (s *Server) findingStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, st)
 }
 
+// findingDetailDTO 是详情用的 DTO：与列表同一套字段，额外带合并快照（merged_from）。
+// 快照里是旧行的完整证据与报告，可能到 MB 级，只有详情页与 patch 的返回值需要它；
+// 列表、流量面板、复测列表、chat 提及都走 GetFinding（不带快照）。
+func (s *Server) findingDetailDTO(f *db.DBFinding) FindingDTO {
+	if f != nil && len(f.MergedFrom) == 0 {
+		if hist, err := s.m.pg.FindingMergeHistory(f.ID); err == nil && len(hist) > 0 {
+			f.MergedFrom = hist
+		}
+	}
+	return findingFromDB(f, s.resolveComponentIDs(f.ComponentIDs))
+}
+
 // getFinding returns one finding by its standalone-table id (DTO finding_id),
 // with anchored components resolved for display.
 func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
@@ -2157,8 +2184,7 @@ func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "finding not found")
 		return
 	}
-	components := s.resolveComponentIDs(f.ComponentIDs)
-	dto := findingFromDB(f, components)
+	dto := s.findingDetailDTO(f)
 	if contextTaskID := strings.TrimSpace(r.URL.Query().Get("context_task")); contextTaskID != "" {
 		contextTask := s.m.ResolveTask(contextTaskID)
 		if contextTask == nil {
@@ -2380,6 +2406,12 @@ func (s *Server) patchFinding(w http.ResponseWriter, r *http.Request) {
 		if !notified && from != *body.Status {
 			log.Printf("[notify] 状态变更事件未登记 finding=%d %s→%s（状态已更新）", id, from, *body.Status)
 		}
+		// 判重触发：从「不可合并」的终态改回可审状态，之前"不必审"的理由失效 → 强制重审。
+		if from != *body.Status && !auditStatusEligible(from) && auditStatusEligible(*body.Status) {
+			if f, ferr := s.m.pg.GetFinding(id); ferr == nil && f != nil && f.TaskID != nil {
+				s.engine.EnqueueAudit(*f.TaskID, id, "edit_status", true)
+			}
+		}
 	}
 	if body.Severity != nil {
 		if !db.ValidSeverity(*body.Severity) {
@@ -2427,7 +2459,7 @@ func (s *Server) patchFinding(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "finding not found")
 		return
 	}
-	writeJSON(w, 200, findingFromDB(f, s.resolveComponentIDs(f.ComponentIDs)))
+	writeJSON(w, 200, s.findingDetailDTO(f))
 }
 
 // deleteFinding removes a finding (findings row + originating exploration node).
@@ -2772,6 +2804,10 @@ func parseActivitySession(sess string) (db.ActivitySessionFilter, bool) {
 		return db.ActivitySessionFilter{Main: true, MainSeg: &seg}, true
 	case sess == "plan":
 		return db.ActivitySessionFilter{Worker: "planner"}, true
+	case sess == "audit":
+		// 判重 Agent 的会话：它的活动全带 worker=auditor（批次开跑、工具调用、合并、跳过）。
+		// ActivityPage 的 cond() 已支持按 worker 过滤，这里只做 key → filter 的映射。
+		return db.ActivitySessionFilter{Worker: "auditor"}, true
 	case strings.HasPrefix(sess, "intent:"):
 		id, err := strconv.ParseInt(strings.TrimPrefix(sess, "intent:"), 10, 64)
 		if err != nil {
@@ -3425,6 +3461,7 @@ func (s *Server) settingsPayload() map[string]any {
 	return map[string]any{
 		"traffic_capture":          s.m.TrafficEnabled(),
 		"agent_traffic_binding":    s.m.pg.GetBool(settingAgentTrafficBinding, false),
+		"finding_audit_enabled":    s.m.pg.GetBool(settingFindingAuditEnabled, true), // 漏洞判重审计总开关（默认开）
 		"llm_record":               s.m.LLMRecordEnabled(),
 		"web_search_enabled":       on,
 		"web_search_backend":       backend,
@@ -3502,7 +3539,8 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TrafficCapture      *bool `json:"traffic_capture"`
 		AgentTrafficBinding *bool `json:"agent_traffic_binding"`
-		LLMRecord           *bool `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
+		FindingAuditEnabled *bool `json:"finding_audit_enabled"` // 漏洞判重审计总开关；即时生效（队列保留，关闭期间不起批）
+		LLMRecord           *bool `json:"llm_record"`            // LLM 录制开关（默认关）；即时生效，无需重建 agent
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear.
 		WebSearchEnabled *bool   `json:"web_search_enabled"`
@@ -3695,6 +3733,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AgentTrafficBinding != nil {
 		if err := s.m.pg.SetBool(settingAgentTrafficBinding, *req.AgentTrafficBinding); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.FindingAuditEnabled != nil {
+		if err := s.m.pg.SetBool(settingFindingAuditEnabled, *req.FindingAuditEnabled); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
@@ -4093,4 +4137,98 @@ func atoiDefault(s string, d int) int {
 		return n
 	}
 	return d
+}
+
+// ---------------------------------------------------------------------------
+// 漏洞判重审计（人工触发）
+// ---------------------------------------------------------------------------
+
+// auditFinding 手动把一条漏洞放进判重队列：强制重审（忽略 audited_at），
+// 但仍跳过合并产物、已删任务与误报/已修复/忽略/已解决。
+func (s *Server) auditFinding(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	id := int64(atoiDefault(r.PathValue("id"), 0))
+	if id <= 0 {
+		writeErr(w, 400, "bad finding id")
+		return
+	}
+	f, err := pg.GetFinding(id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if f == nil {
+		writeErr(w, 404, "finding not found")
+		return
+	}
+	if f.TaskID == nil {
+		writeErr(w, 400, "漏洞没有归属任务，无法判重")
+		return
+	}
+	if !s.engine.AuditEnabled() {
+		writeErr(w, 403, "漏洞判重审计已在系统设置中关闭")
+		return
+	}
+	s.engine.EnqueueAudit(*f.TaskID, id, "manual_one", true)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"queued": true, "finding_id": id, "task_id": *f.TaskID,
+		"progress": s.engine.AuditProgress(fmt.Sprintf("%d", *f.TaskID)),
+	})
+}
+
+// auditTaskFindings 把整任务的活漏洞放进判重队列（按 40 条/批自动切分）。
+func (s *Server) auditTaskFindings(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	taskID := int64(atoiDefault(r.PathValue("id"), 0))
+	if taskID <= 0 {
+		writeErr(w, 400, "bad task id")
+		return
+	}
+	if t := s.engine.taskByID(fmt.Sprintf("%d", taskID)); t == nil {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	ids, err := pg.ActiveFindingIDs(taskID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if !s.engine.AuditEnabled() {
+		writeErr(w, 403, "漏洞判重审计已在系统设置中关闭")
+		return
+	}
+	// 幂等：批次已经在跑就只回当前进度，不重新入队（否则等于整轮强制重审一遍）。
+	// 注意只判 Running：还在 10 秒静默窗口里（Pending>0 但没开跑）时再点整任务判重，
+	// 应当把剩下的漏洞补进同一批并刷新窗口，而不是拒绝。
+	if p := s.engine.AuditProgress(fmt.Sprintf("%d", taskID)); p.Running {
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"queued": 0, "task_id": taskID, "progress": p, "note": "该任务已在判重中，返回当前进度",
+		})
+		return
+	}
+	// 一次性入队再 pump：逐条入队时人工来源会跳过静默窗口，第一条就起一个只有 1 条的批次。
+	s.engine.EnqueueAuditBatch(taskID, ids, "manual_task", true)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"queued": len(ids), "task_id": taskID,
+		"progress": s.engine.AuditProgress(fmt.Sprintf("%d", taskID)),
+	})
+}
+
+// auditTaskStatus 返回整任务判重的进度（待审条数 + 是否在跑）。
+func (s *Server) auditTaskStatus(w http.ResponseWriter, r *http.Request) {
+	if s.pg(w) == nil {
+		return
+	}
+	taskID := int64(atoiDefault(r.PathValue("id"), 0))
+	if taskID <= 0 {
+		writeErr(w, 400, "bad task id")
+		return
+	}
+	writeJSON(w, 200, s.engine.AuditProgress(fmt.Sprintf("%d", taskID)))
 }

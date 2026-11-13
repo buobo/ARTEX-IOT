@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -93,6 +94,11 @@ type ToolSet struct {
 	// intent id (engine callback, wired by the planner): the worker injects it before
 	// its next tool call and re-plans, without being killed. nil = tool unavailable.
 	steerWork func(intentID int64, msg string) error
+	// auditDB / auditState 只在 auditor 角色上注入：批量读漏洞原文（按 finding id，
+	// 不走节点）、以及本批次的归位状态（哪些 id 已经合并或判过不同）。
+	auditDB     *db.DB
+	auditState  *auditBatchState
+	auditSource string // 本批触发来源（finding/manual_one/edit_evidence…），只用于写库留痕
 	// notify, if set, wakes the task's planner after a graph change that should be
 	// re-planned promptly (currently: a new hint). nil = no wake (the hint is still
 	// stored and read on the next round triggered by other events). debounced.
@@ -180,6 +186,23 @@ func (t *ToolSet) Writes() WriteCounts { return t.writes }
 func NewToolSet(ts *db.ExplorationStore, worker string) *ToolSet {
 	return &ToolSet{ts: ts, worker: worker}
 }
+
+// FindingAuditSink 是「新漏洞落库」之后的审计入队回调，由 server 在启动时注入
+// （避免 agent 包反向依赖 server）。nil = 不起审计。
+var FindingAuditSink func(taskID, findingID int64, source string)
+
+// SetFindingAuditSink 注入审计入队回调（server 启动时调用一次）。
+func SetFindingAuditSink(fn func(taskID, findingID int64, source string)) { FindingAuditSink = fn }
+
+// SetAuditDB 给 auditor 工具注入 DB 句柄：audit_get_findings 要按 finding id 读
+// 证据与报告原文（这些字段不在探索节点 payload 里）。
+func (t *ToolSet) SetAuditDB(d *db.DB) { t.auditDB = d }
+
+// SetAuditState 注入本批次的归位状态（由 auditor 角色创建并回读）。
+func (t *ToolSet) SetAuditState(s *auditBatchState) { t.auditState = s }
+
+// SetAuditSource 记录本批的触发来源，写进合并 activity 的 metadata。
+func (t *ToolSet) SetAuditSource(source string) { t.auditSource = source }
 
 // SetTaskID sets the PG task id on this ToolSet so that report_finding can
 // dual-write to the standalone findings table (which survives task deletion).
@@ -1282,6 +1305,10 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		// PoC 索引回填：save_poc 发生在登记之前，那时没有 finding id，这里补上。
 		if recorded != nil {
 			t.backfillPocRefs(pocFiles, recorded.FindingID)
+			// 新漏洞落库 → 交给判重审计队列（批次攒够或静默窗口到期才真正开审）。
+			if recorded.FindingID > 0 && FindingAuditSink != nil {
+				FindingAuditSink(t.taskID, recorded.FindingID, "finding")
+			}
 		}
 		if t.notifyFinding != nil {
 			iid := input.IntentID
@@ -2074,5 +2101,397 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.addTaskScope(),
 		// list_untested_components：按需查本任务范围内未测组件(类型+分页)，自行决定补测。
 		t.listUntestedComponents(),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 漏洞判重审计工具（auditor）：一次会话内可多次调用
+// ---------------------------------------------------------------------------
+
+// auditScopeTasks 返回本批次可以读/可以合并的任务范围：当前任务 + 它的直接来源任务。
+// 与 list_findings 的可见范围一致（关联任务条目带 inherited=true）。
+func (t *ToolSet) auditScopeTasks() map[int64]bool {
+	scope := map[int64]bool{}
+	if t.taskID > 0 {
+		scope[t.taskID] = true
+	}
+	if t.ts != nil {
+		if srcs, err := t.ts.DirectSourceStores(); err == nil {
+			for _, s := range srcs {
+				scope[s.Task.TaskID] = true
+			}
+		}
+	}
+	return scope
+}
+
+// auditGetFindings 按 finding id 批量读原文（证据 + 报告），一次最多 5 条。
+// 不用 node_detail：一个探索节点可能挂多条漏洞，且报告只存在 findings 表里。
+func (t *ToolSet) auditGetFindings() actool.CoreTool {
+	return readTool("audit_get_findings",
+		"按漏洞 id 批量读原文（证据 + Markdown 报告 + 组件 + PoC + HTTP 复现请求摘要），一次 1-5 条。只能读本任务与直接来源任务的漏洞。判重前先读原文，不要只看标题。",
+		obj(map[string]any{
+			"ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"},
+				"description": "要读的漏洞 id，1-5 个"},
+		}, "ids"),
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				IDs []int64 `json:"ids"`
+			}
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if t.auditDB == nil {
+				return actool.Errorf("审计数据库不可用"), nil
+			}
+			if len(a.IDs) == 0 || len(a.IDs) > 5 {
+				return actool.Errorf(fmt.Sprintf("ids 需要 1-5 个（收到 %d 个）", len(a.IDs))), nil
+			}
+			scope := t.auditScopeTasks()
+			rows, err := t.auditDB.FindingsByIDs(a.IDs)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			// 先统一做范围校验，再返回任何正文：不在范围、以及「查不到」（不存在或已被合并）
+			// 用同一句报错，既满足 doc §5.2「不泄露存在性」，也避免模型把「静默略过」当成读到了。
+			found := map[int64]bool{}
+			unavailable := make([]int64, 0)
+			for _, f := range rows {
+				if f.TaskID == nil || !scope[*f.TaskID] {
+					unavailable = append(unavailable, f.ID)
+					continue
+				}
+				found[f.ID] = true
+			}
+			for _, id := range dedupeInt64(a.IDs) {
+				if !found[id] {
+					dupHit := false
+					for _, u := range unavailable {
+						if u == id {
+							dupHit = true
+							break
+						}
+					}
+					if !dupHit {
+						unavailable = append(unavailable, id)
+					}
+				}
+			}
+			if len(unavailable) > 0 {
+				return actool.Errorf(fmt.Sprintf("这些 id 不在本任务或直接来源任务的范围内：%s；只能读范围内的漏洞（已合并掉的旧编号也会这样报）",
+					formatAuditIDs(unavailable))), nil
+			}
+			if t.auditState != nil {
+				readIDs := make([]int64, 0, len(rows))
+				for _, f := range rows {
+					readIDs = append(readIDs, f.ID)
+				}
+				t.auditState.markRead(readIDs)
+			}
+			out := make([]map[string]any, 0, len(rows))
+			for _, f := range rows {
+				item := map[string]any{
+					"id": f.ID, "vulnclass": f.VulnClass, "name": f.Name, "severity": f.Severity,
+					"summary": f.Summary, "status": f.Status, "worker": f.Worker,
+					"component_ids": f.ComponentIDs, "poc_files": f.PocFiles,
+					"task_id": *f.TaskID, "inherited": *f.TaskID != t.taskID,
+					"report_chars":  len([]rune(f.Report)),
+					"traffic_count": f.TrafficCount,
+				}
+				ev, evCut := truncateRunes(f.Evidence, 12000), false
+				if len([]rune(f.Evidence)) > 12000 {
+					evCut = true
+				}
+				rp, rpCut := truncateRunes(f.Report, 20000), false
+				if len([]rune(f.Report)) > 20000 {
+					rpCut = true
+				}
+				item["evidence"] = ev
+				item["evidence_truncated"] = evCut
+				item["report"] = rp
+				item["report_truncated"] = rpCut
+				// HTTP 复现请求摘要（最多 3 条）：只看方法/URL/状态，帮助判断是不是同一个入口。
+				if tf, terr := t.auditDB.GetFindingTraffic(ctx, f.ID); terr == nil && tf != nil && len(tf.Bindings) > 0 {
+					repro := make([]map[string]any, 0, 3)
+					for i, b := range tf.Bindings {
+						if i >= 3 {
+							break
+						}
+						repro = append(repro, map[string]any{"role": b.Role, "method": b.Snapshot.Method,
+							"url": b.Snapshot.URL, "status": b.Snapshot.Status})
+					}
+					item["http_repro"] = repro
+				}
+				out = append(out, item)
+			}
+			return jsonResult(map[string]any{"findings": out})
+		})
+}
+
+// auditMergedFields 是模型给出的整合稿。
+type auditMergedFields struct {
+	Name, VulnClass, Severity, Summary, Evidence, Report string
+	ComponentIDs                                         []int64  `json:"component_ids"`
+	PocFiles                                             []string `json:"poc_files"`
+}
+
+// consolidateFindings 是唯一写库动作：把一组重复漏洞整合成一条新记录并删掉旧行。
+// 一次会话可以调多次（合几组就调几次），每次一个独立短事务。
+func (t *ToolSet) consolidateFindings() actool.CoreTool {
+	return writeTool("consolidate_findings",
+		"把一组（2-10 条）本质相同的漏洞整合成一条新漏洞：你重写标题/类型/严重度/摘要/证据/报告，工具会新建一条记录、把流量证据与复测历史迁过去、再删掉旧行。一次会话可以调用多次（每组一次）。内容必须是重新整合的，不是拼接。",
+		obj(map[string]any{
+			"finding_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本组要合并的漏洞 id，2-10 条，全部属于本任务或其直接来源任务"},
+			"reason":      str("一句话说明这组为什么是同一个漏洞（同一入口/同一缺陷类）"),
+			"merged": obj(map[string]any{
+				"name": str("整合后的漏洞标题"), "vulnclass": str("漏洞类别"), "severity": str("critical|high|medium|low"),
+				"summary":       str("整合后的摘要（≤16KB）"),
+				"evidence":      str("整合后的证据（请求/响应/命令输出，≤128KB）"),
+				"report":        str("整合后的 Markdown 详细报告，必填，≤128KB；要融合而不是拼接各条原文"),
+				"component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响组件 id，只能是这组旧漏洞原有组件的子集"},
+				"poc_files":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "PoC 文件名，只能是这组旧漏洞原有 PoC 的子集"},
+			}, "vulnclass", "severity", "summary", "evidence", "report"),
+		}, "finding_ids", "merged", "reason"),
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				FindingIDs []int64           `json:"finding_ids"`
+				Reason     string            `json:"reason"`
+				Merged     auditMergedFields `json:"merged"`
+			}
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if t.auditDB == nil || t.ts == nil {
+				return actool.Errorf("审计需要任务上下文"), nil
+			}
+			if len(a.FindingIDs) < 2 {
+				return actool.Errorf(fmt.Sprintf("合并至少需要两条漏洞（收到 %d 条）", len(a.FindingIDs))), nil
+			}
+			if len(a.FindingIDs) > db.MaxFindingMergeGroup {
+				return actool.Errorf(fmt.Sprintf("一次最多合并 %d 条（收到 %d 条）", db.MaxFindingMergeGroup, len(a.FindingIDs))), nil
+			}
+			// 规模上限：一次审计会话最多合并 10 组，防止把半个任务合掉。
+			if t.auditState != nil && t.auditState.mergeCount() >= db.MaxFindingMergeGroupsPerBatch {
+				return actool.Errorf(fmt.Sprintf("本批已合并 %d 组（上限 %d 组）；剩余的请判不同或留给下一批",
+					t.auditState.mergeCount(), db.MaxFindingMergeGroupsPerBatch)), nil
+			}
+			for name, v := range map[string]string{
+				"merged.name": a.Merged.Name, "merged.vulnclass": a.Merged.VulnClass,
+				"merged.severity": a.Merged.Severity, "merged.summary": a.Merged.Summary,
+				"merged.evidence": a.Merged.Evidence, "merged.report": a.Merged.Report,
+			} {
+				if strings.TrimSpace(v) == "" {
+					return actool.Errorf(fmt.Sprintf("%s 不能为空；合并必须由你重写整合内容，尤其 report 要写完整", name)), nil
+				}
+			}
+			if !db.ValidSeverity(a.Merged.Severity) {
+				return actool.Errorf("severity 必须是 critical|high|medium|low"), nil
+			}
+			// 机器兜底：语义判断归模型，但组内至少要有一种可机械判定的共性。
+			rows, err := t.auditDB.FindingsByIDs(a.FindingIDs)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			scope := t.auditScopeTasks()
+			for _, f := range rows {
+				if f.TaskID == nil || !scope[*f.TaskID] {
+					return actool.Errorf(fmt.Sprintf("#%d 不在本任务范围内；只能合并本任务或直接来源任务的漏洞", f.ID)), nil
+				}
+			}
+			if len(rows) != len(dedupeInt64(a.FindingIDs)) {
+				return actool.Errorf("有漏洞 id 不存在（可能已被合并）；请重新 list_findings"), nil
+			}
+			if _, ok := auditCommonality(rows); !ok {
+				return actool.Errorf("这组没有可判定的共性（vulnclass 不同、组件无交集、入口 URL 也不同）。若确实同源，请在 merged.evidence 中同时引用同一入口后再合并；否则请用 keep_separate"), nil
+			}
+			group := 0
+			if t.auditState != nil {
+				group = t.auditState.mergeCount() + 1
+			}
+			res, err := t.auditDB.ConsolidateFindings(ctx, db.FindingAuditMerge{
+				TaskID: t.taskID, ExplorationID: t.ts.ID(), FindingIDs: a.FindingIDs,
+				VulnClass: a.Merged.VulnClass, Name: a.Merged.Name, Severity: a.Merged.Severity,
+				Summary: a.Merged.Summary, Evidence: a.Merged.Evidence, Report: a.Merged.Report,
+				ComponentIDs: a.Merged.ComponentIDs, PocFiles: a.Merged.PocFiles,
+				Reason: a.Reason, Operator: "auditor", Group: group, Source: t.auditSource,
+			})
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if t.auditState != nil {
+				t.auditState.markMerged(a.FindingIDs, res.NewFindingID)
+			}
+			return jsonResult(map[string]any{
+				"ok": true, "new_id": res.NewFindingID, "deleted": res.Deleted,
+				"migrated": map[string]any{"traffic_bindings": res.TrafficBindings, "retests": res.Retests},
+				"note":     "已合并。新记录可以在本批内继续参与后续合并；如果还有别的重复组，继续调用本工具。",
+			})
+		})
+}
+
+// keepSeparate 记录「这几条不是重复」的结论，不写业务数据。
+func (t *ToolSet) keepSeparate() actool.CoreTool {
+	return writeTool("keep_separate",
+		"记录一组漏洞「本质不同、不合并」的结论（只看语义，不改任何漏洞数据）。一次会话可以调用多次，不同组给不同理由。considered 可以包含本批之外、你已读过原文的漏洞作为对照：只有本批目标会记为已判重。",
+		obj(map[string]any{
+			"reason":     str("为什么它们不是同一个漏洞（入口/参数/缺陷类哪一点不同）"),
+			"considered": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "这组看过的漏洞 id，1-10 条"},
+		}, "reason", "considered"),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				Reason     string  `json:"reason"`
+				Considered []int64 `json:"considered"`
+			}
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if strings.TrimSpace(a.Reason) == "" {
+				return actool.Errorf("reason 不能为空：要写清哪一点不同"), nil
+			}
+			if len(a.Considered) == 0 || len(a.Considered) > 10 {
+				return actool.Errorf(fmt.Sprintf("considered 需要 1-10 个漏洞 id（收到 %d 个）", len(a.Considered))), nil
+			}
+			if t.ts == nil {
+				return actool.Errorf("keep_separate 需要任务上下文"), nil
+			}
+			ids := dedupeInt64(a.Considered)
+			// 覆盖闸门的闸口在这里：没读过原文就给「判不同」结论，等于不读也能过闸。
+			// 但只校验「读过」，不校验「是否在本批」——允许引用本批之外、已读过原文的漏洞做对照。
+			if t.auditState != nil {
+				if unread := t.auditState.unreadIn(ids); len(unread) > 0 {
+					return actool.Errorf("这些 id 还没读过原文：" + formatAuditIDs(unread) +
+						"；先用 audit_get_findings 读一次，再判定不同"), nil
+				}
+			}
+			var recorded, contextIDs []int64
+			if t.auditState != nil {
+				recorded, contextIDs = t.auditState.splitTargets(ids)
+			}
+			summary := "判重结论：不是重复（" + formatAuditIDs(ids) + "）"
+			if len(contextIDs) > 0 && len(recorded) > 0 {
+				summary = "判重结论：不是重复（" + formatAuditIDs(recorded) + "；对照 " + formatAuditIDs(contextIDs) + "）"
+			}
+			meta, _ := json.Marshal(map[string]any{
+				"considered":       ids,
+				"verdict":          "distinct",
+				"reason":           a.Reason,
+				"batch_targets":    t.auditState.targetSnapshot(),
+				"recorded_targets": recorded,
+				"context_ids":      contextIDs,
+			})
+			if _, err := t.ts.AppendActivity(db.Activity{
+				Worker: "auditor", Kind: "text",
+				Summary:  summary,
+				Detail:   a.Reason,
+				Metadata: meta,
+			}); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if t.auditState != nil {
+				t.auditState.markDistinct(ids, a.Reason)
+			}
+			return jsonResult(map[string]any{
+				"ok": true, "considered": ids, "recorded": recorded, "context": contextIDs,
+				"note": "只有本批目标会记为已判重；对照条目仅留痕，不写 audited_at",
+			})
+		})
+}
+
+func dedupeInt64(in []int64) []int64 {
+	seen := map[int64]bool{}
+	out := make([]int64, 0, len(in))
+	for _, id := range in {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+func formatAuditIDs(ids []int64) string {
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		parts = append(parts, fmt.Sprintf("#%d", id))
+	}
+	return strings.Join(parts, "、")
+}
+
+// auditCommonality 检查组内是否有可机械判定的共性：
+// vulnclass 逐字相同 / 组件有交集 / 入口 URL path 有交集。任一满足即可（语义仍归模型）。
+func auditCommonality(rows []*db.DBFinding) (string, bool) {
+	if len(rows) < 2 {
+		return "", false
+	}
+	norm := func(s string) string { return strings.Join(strings.Fields(strings.ToLower(s)), "") }
+	first := norm(rows[0].VulnClass)
+	if first != "" {
+		same := true
+		for _, r := range rows[1:] {
+			if norm(r.VulnClass) != first {
+				same = false
+				break
+			}
+		}
+		if same {
+			return "vulnclass", true
+		}
+	}
+	comp := map[int64]bool{}
+	for _, c := range rows[0].ComponentIDs {
+		comp[c] = true
+	}
+	for _, r := range rows[1:] {
+		for _, c := range r.ComponentIDs {
+			if comp[c] {
+				return "component", true
+			}
+		}
+	}
+	paths := auditURLPaths(rows[0])
+	for _, r := range rows[1:] {
+		for p := range auditURLPaths(r) {
+			if paths[p] {
+				return "url:" + p, true
+			}
+		}
+	}
+	return "", false
+}
+
+var auditURLRe = regexp.MustCompile(`https?://[^\s"'<>）)，,；;]+`)
+
+// auditURLPaths 从证据/摘要里抽出 URL 的 path 部分（忽略 host 与 query）。
+func auditURLPaths(f *db.DBFinding) map[string]bool {
+	out := map[string]bool{}
+	for _, text := range []string{f.Evidence, f.Summary, f.Report} {
+		for _, m := range auditURLRe.FindAllString(text, 50) {
+			u := m
+			if i := strings.Index(u, "://"); i >= 0 {
+				u = u[i+3:]
+			}
+			if i := strings.IndexAny(u, "?#"); i >= 0 {
+				u = u[:i]
+			}
+			if i := strings.Index(u, "/"); i >= 0 {
+				p := strings.TrimRight(u[i:], "/")
+				if p != "" && p != "/" {
+					out[p] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
+// AuditorTools 是 auditor 角色可用的工具集：读列表复用 list_findings，
+// 读原文用 audit_get_findings，写库只有 consolidate_findings，判定不同用 keep_separate。
+func (t *ToolSet) AuditorTools() []actool.CoreTool {
+	return []actool.CoreTool{
+		t.listFindings(),
+		t.auditGetFindings(),
+		t.consolidateFindings(),
+		t.keepSeparate(),
 	}
 }

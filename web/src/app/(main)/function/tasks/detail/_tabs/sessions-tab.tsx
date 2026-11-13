@@ -18,6 +18,7 @@ import {
   RadioIcon,
   RotateCwIcon,
   ShieldAlertIcon,
+  ShieldCheckIcon,
   SquareIcon,
   Trash2Icon,
   UserIcon,
@@ -147,6 +148,7 @@ function sessionKeyOf(a: Activity): string {
   if (a.worker === "system" || a.kind === "llm_switch" || a.kind === "llm_failover") return "system";
   if (a.worker === "mainagent") return `main:${a.main_seg ?? 0}`; // one key per conversation segment
   if (a.worker === "planner") return "plan";
+  if (a.worker === "auditor") return "audit"; // 判重 Agent：批次开跑、工具调用、合并/跳过都在这里
   if (a.intent_id) return `intent:${a.intent_id}`;
   return "unknown";
 }
@@ -236,6 +238,7 @@ function fmtDuration(ms: number): string {
 const roleMeta = {
   mainagent: { label: "主 Agent", icon: UserIcon },
   planner: { label: "规划 Planner", icon: BrainIcon },
+  auditor: { label: "判重 Agent", icon: ShieldCheckIcon },
   worker: { label: "Workers", icon: RadioIcon },
   system: { label: "系统审计", icon: HistoryIcon },
 } as const;
@@ -275,6 +278,19 @@ const PLANNER_SESSION: Session = {
   last_activity: "",
 };
 
+// 判重 Agent 也是固定 UI 会话：它的活动是 worker="auditor" 的那批记录
+// （每批开跑留痕、4 个审计工具的调用与返回、合并/判不同结论、跳过与失败）。
+// 只读——批次由引擎调度，人工干预入口在发现页「整任务判重」与漏洞详情「重新判重」。
+const AUDITOR_ID = "s-auditor";
+const AUDITOR_SESSION: Session = {
+  id: AUDITOR_ID,
+  role: "auditor",
+  title: "判重 Agent · 重复漏洞审计",
+  status: "done",
+  live: false,
+  last_activity: "",
+};
+
 // LLM provider switches are task-level audit events rather than agent output. The
 // history endpoint has no "system" filter, so this fixed session is populated by
 // scanning the generic incremental activity endpoint and then tailed by task SSE.
@@ -292,6 +308,7 @@ const SYSTEM_SESSION: Session = {
 function keyForSession(s: Session): string {
   if (s.role === "mainagent") return `main:${s.seg ?? 0}`;
   if (s.role === "planner") return "plan";
+  if (s.role === "auditor") return "audit";
   if (s.role === "system") return "system";
   return `intent:${s.intent_id}`;
 }
@@ -1203,6 +1220,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   );
   const currentMainKey = mainSessionKey(currentSeg);
   const plannerLive = recentLive("plan");
+  const auditLive = recentLive("audit");
 
   // Which main segment is streaming RIGHT NOW. A main turn is serialized per task, so at
   // most one segment is live. Gate on the real running flag (sending / mainChatRunning)
@@ -1244,16 +1262,29 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     [mainSegs, liveMainSeg],
   );
 
+  // 判重 Agent 的会话项：只有「最近 5 秒有活动」才显示转圈，其余按已完成展示。
+  const auditorSession = React.useMemo<Session>(
+    () => ({ ...AUDITOR_SESSION, live: auditLive, status: auditLive ? "running" : "done" }),
+    [auditLive],
+  );
+
   const sessions = React.useMemo(() => {
-    const items = [...mainSessions, { ...PLANNER_SESSION, live: plannerLive }, ...workerSessions, SYSTEM_SESSION];
+    const items = [
+      ...mainSessions,
+      { ...PLANNER_SESSION, live: plannerLive },
+      auditorSession,
+      ...workerSessions,
+      SYSTEM_SESSION,
+    ];
     const located = focusSession ?? retainedSession;
     if (located && !items.some((s) => s.id === located.id)) items.push(located);
     return items;
-  }, [mainSessions, workerSessions, plannerLive, focusSession, retainedSession]);
+  }, [mainSessions, workerSessions, plannerLive, auditorSession, focusSession, retainedSession]);
 
   const grouped = {
     mainagent: sessions.filter((s) => s.role === "mainagent"),
     planner: sessions.filter((s) => s.role === "planner"),
+    auditor: sessions.filter((s) => s.role === "auditor"),
     worker: sessions.filter((s) => s.role === "worker"),
     system: sessions.filter((s) => s.role === "system"),
   };
@@ -1653,7 +1684,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             )}
           >
             <div className="flex w-full flex-col gap-3 p-2">
-              {(["mainagent", "planner", "system", "worker"] as const).map((role) => {
+              {(["mainagent", "planner", "auditor", "system", "worker"] as const).map((role) => {
                 const items = grouped[role];
                 if (!items.length) return null;
                 const Meta = roleMeta[role];

@@ -24,9 +24,11 @@ type taskAgentBundle struct {
 	plannerRuntime *taskLLMRuntime
 	workerRuntime  *taskLLMRuntime
 	mainRuntime    *taskLLMRuntime
+	audRuntime     *taskLLMRuntime
 	pl             *agent.Planner
 	wk             *agent.Worker
 	main           *agent.MainAgent
+	aud            *agent.Auditor
 }
 
 type llmAuditProfile struct {
@@ -595,9 +597,15 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	main.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	main.SetWebSearch(s.webSearchFor("mainagent"))
 	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
+	// 漏洞判重审计:批次会话角色,用任务链解析到的 provider(与 planner 同源),
+	// 单独的 transcript 会话文件与轮次上限(12 轮 / 300 秒)。
+	audRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "auditor"}
+	aud := agent.NewAuditor(s.m.pg, audRuntime, "task-router", s.m.dir, tx, audRuntime.CompactionWindow(), s.agentMaxTurns("auditor"))
+	aud.SetNonStreaming(audRuntime.nonStreaming)
+	aud.SetMaxTokens(audRuntime.maxTokens)
 	bundle := &taskAgentBundle{
 		runtime: goalRuntime, plannerRuntime: plannerRuntime, workerRuntime: workerRuntime,
-		mainRuntime: mainRuntime, pl: pl, wk: wk, main: main,
+		mainRuntime: mainRuntime, audRuntime: audRuntime, pl: pl, wk: wk, main: main, aud: aud,
 	}
 	s.taskAgents[t.ID] = bundle
 	return bundle

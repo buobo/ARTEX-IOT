@@ -211,6 +211,11 @@ var builtinAgents = []builtinAgent{
 	{"auto", "Auto", "assistant", "平台操作助手：用工具管理任务(建/看/暂停/给提示)与组件，并可创建/修改 skill、自定义工具、MCP。", nil, false, nil},
 	// 渗透测试:内置「独立渗透」agent。经对话页驱动,一人从侦察到收尾走完整条渗透链,自己规划自己执行自己验证。默认开启交互式 shell。
 	{"pentest", "渗透测试", "assistant", "独立渗透 agent：一人从侦察→找攻击面→深入利用→验证→收尾走完整条链，自己规划、自己执行、自己对抗式验证。", nil, true, intp(0)},
+	// auditor:内置「漏洞判重审计」agent。按批次工作(一批新漏洞一个会话,会话内可多次合并),
+	// 只在任务内跑,由 report_finding / 人工触发驱动,不经对话页。
+	{"auditor", "漏洞审计", "auditor", "判重审计：读本任务（含直接来源任务）的漏洞原文，把本质相同的整合成一条并删掉旧行；一次会话可合并多组。", []promptVar{
+		{"DataDir", "数据根目录（PoC/任务产物所在）", "/data", "runtime"},
+	}, false, intp(300)},
 }
 
 // seedBuiltins inserts the fixed built-in agents and their variable catalog (idempotent).

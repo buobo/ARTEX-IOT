@@ -167,6 +167,7 @@ func (s *Server) toolBindFindingTraffic() actool.CoreTool {
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
+			s.enqueueAuditOnEvidenceEdit(id, "edit_evidence")
 			return jsonResult(trafficSummary(list))
 		})
 }

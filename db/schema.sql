@@ -926,6 +926,9 @@ CREATE TABLE IF NOT EXISTS agents (
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT agents_role_ck CHECK (role IN ('goals','main','planner','worker','assistant'))
 );
+-- agents.role 白名单：判重审计（auditor）是新的内置角色，扩一次 CHECK（幂等重建）。
+ALTER TABLE agents DROP CONSTRAINT IF EXISTS agents_role_ck;
+ALTER TABLE agents ADD  CONSTRAINT agents_role_ck CHECK (role IN ('goals','main','planner','worker','assistant','auditor'));
 -- 加列迁移(已发版,旧库升级补列;新库 CREATE 已含。迁移不带 CHECK:旧库存量安全 + 后端写入白名单兜底)。
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_run_mode     TEXT    NOT NULL DEFAULT 'serial';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_merge_mode   TEXT    NOT NULL DEFAULT 'all';
@@ -1241,6 +1244,14 @@ ALTER TABLE findings ADD COLUMN IF NOT EXISTS poc_files JSONB NOT NULL DEFAULT '
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS name   TEXT NOT NULL DEFAULT '';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS report TEXT NOT NULL DEFAULT '';
+-- 漏洞判重审计（auditor）：merged_from 存被合并旧行的完整快照（一维平表）；
+-- audited_at/audit_result 记录归位结论，人工重审时用来判断是否已有结论。
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS merged_from  JSONB;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS audited_at   TIMESTAMPTZ;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS audit_result TEXT NOT NULL DEFAULT '';
+-- 待审判重的扫描索引：未合并产物、未审计过的行（对账/进度查询都走它）。
+CREATE INDEX IF NOT EXISTS idx_findings_audit_queue ON findings(task_id, id)
+    WHERE merged_from IS NULL AND audited_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_findings_task ON findings(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_time ON findings(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status, created_at DESC);

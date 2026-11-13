@@ -78,6 +78,7 @@ func (s *Server) orchestrationTools() []actool.CoreTool {
 		s.toolUpdateFindingReport(),
 		s.toolGetFindingTraffic(),
 		s.toolBindFindingTraffic(),
+		s.toolRequestFindingAudit(),
 	}
 }
 
@@ -449,6 +450,17 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 			if n == 0 {
 				return actool.Errorf(fmt.Sprintf("未找到 finding_id=%d 对应的漏洞记录(先用 report_finding 登记)", nodeID)), nil
 			}
+			// 判重触发：报告是判重依据之一。已经审过的漏洞要强制重审（旧结论基于旧报告）；
+			// 还没审过的若仍在待审集合里，批次开跑时会读到新报告，无需额外排队。
+			if fid, ferr := s.m.pg.FindingIDByNodeID(nodeID); ferr == nil && fid > 0 {
+				if f, ferr := s.m.pg.GetFinding(fid); ferr == nil && f != nil && f.TaskID != nil {
+					force := false
+					if meta, merr := s.m.pg.FindingAuditMeta([]int64{fid}); merr == nil {
+						force = meta[fid].Audited
+					}
+					s.engine.EnqueueAudit(*f.TaskID, fid, "edit_evidence", force)
+				}
+			}
 			return actool.Text(fmt.Sprintf("finding %d report updated (%d chars)", nodeID, len(a.Report))), nil
 		})
 }
@@ -504,6 +516,9 @@ func (s *Server) seedOrchestrationTools() {
 	s.upgradeReporterTriggerMessage() // 老库补迁移:让 reporter 回传 evidence_version(一次性)
 	s.seedFindingTrafficTools()       // 增加可选证据参数及只读证据工具，保留用户配置
 	s.seedFindingWorkflowTools()
+	// 判重审计的默认绑定：list_findings 这行是老工具，SeedTool 只在首插时写 agents，
+	// 所以老库里 auditor 一直没被绑上；这里补一次（函数内部有 flag，之后不再重复加）。
+	s.seedAuditorDefaultBindings()
 	// 注：pentest 的默认工具绑定无需迁移——BuiltinToolSeeds 在全新初始化时就把
 	// list_components/insert_components/report_finding/list_findings/list_companies 连同
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
@@ -944,6 +959,74 @@ func (s *Server) seedAutoDefaultBindings() {
 	if err := s.m.pg.AddAgentToToolBinding("auto", keys); err != nil {
 		log.Printf("[auto] 默认绑定失败: %v", err)
 		return
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
+}
+
+// toolRequestFindingAudit 让主 agent / Auto 主动要求判重审计：只入队，不改业务数据。
+// finding_id 审单条（强制重审），task_id 审该任务全部活漏洞（按批跑完）。
+func (s *Server) toolRequestFindingAudit() actool.CoreTool {
+	return roTool("request_finding_audit",
+		"要求漏洞判重审计：给 finding_id 审这一条，或给 task_id 审该任务全部在处理的漏洞（按批跑）。只加入队列，不改任何漏洞数据；审计会自动合并重复漏洞。",
+		objSchema(map[string]any{
+			"finding_id": map[string]any{"type": "integer", "description": "单条漏洞 id（与 task_id 二选一）"},
+			"task_id":    map[string]any{"type": "integer", "description": "整任务判重（与 finding_id 二选一）"},
+		}),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				FindingID int64 `json:"finding_id"`
+				TaskID    int64 `json:"task_id"`
+			}
+			_ = json.Unmarshal(in, &a)
+			if !s.engine.AuditEnabled() {
+				return actool.Errorf("漏洞判重审计已在系统设置中关闭；请先在系统设置里打开"), nil
+			}
+			if a.FindingID > 0 {
+				f, err := s.m.pg.GetFinding(a.FindingID)
+				if err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				if f == nil {
+					return actool.Errorf(fmt.Sprintf("没有 id=%d 的漏洞", a.FindingID)), nil
+				}
+				if f.TaskID == nil {
+					return actool.Errorf("该漏洞没有归属任务，无法判重"), nil
+				}
+				s.engine.EnqueueAudit(*f.TaskID, a.FindingID, "manual_one", true)
+				pr := s.engine.AuditProgress(fmt.Sprintf("%d", *f.TaskID))
+				return actool.Text(fmt.Sprintf("已加入判重队列：#%d（任务 %d，待审 %d 条，运行中=%v）", a.FindingID, *f.TaskID, pr.Pending, pr.Running)), nil
+			}
+			if a.TaskID > 0 {
+				ids, err := s.m.pg.ActiveFindingIDs(a.TaskID)
+				if err != nil {
+					return actool.Errorf(err.Error()), nil
+				}
+				// 一次性入队，避免逐条入队时第一条就起批（整任务判重第一批只审 1 条）。
+				s.engine.EnqueueAuditBatch(a.TaskID, ids, "manual_task", true)
+				pr := s.engine.AuditProgress(fmt.Sprintf("%d", a.TaskID))
+				return actool.Text(fmt.Sprintf("已加入判重队列：任务 %d 的 %d 条漏洞（待审 %d 条，已处理 %d/%d 条，运行中=%v）",
+					a.TaskID, len(ids), pr.Pending, pr.Done, pr.Total, pr.Running)), nil
+			}
+			return actool.Errorf("finding_id 或 task_id 至少给一个"), nil
+		})
+}
+
+// seedAuditorDefaultBindings 把判重审计工具绑给 auditor（老库里这些工具行已存在，
+// SeedTool 只插不更新，所以用一次性迁移补绑定），并让人能通过主 agent / Auto 触发审计。
+func (s *Server) seedAuditorDefaultBindings() {
+	const flag = "auditor_default_bindings_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	auditTools := []string{"list_findings", "audit_get_findings", "consolidate_findings", "keep_separate"}
+	if err := s.m.pg.AddAgentToToolBinding("auditor", auditTools); err != nil {
+		log.Printf("[auditor] 默认绑定失败（下次启动重试）: %v", err)
+		return
+	}
+	for _, key := range []string{"mainagent", "auto"} {
+		if err := s.m.pg.AddAgentToToolBinding(key, []string{"request_finding_audit"}); err != nil {
+			log.Printf("[auditor] %s 触发工具绑定失败: %v", key, err)
+		}
 	}
 	_ = s.m.pg.SetSetting(flag, "true")
 }

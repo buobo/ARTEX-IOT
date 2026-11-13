@@ -441,7 +441,36 @@ export interface Finding {
   source_task_id?: string;
   inherited?: boolean;
   components?: FindingComponent[];
+  // 判重审计:本行由哪几条旧漏洞整合而来(仅详情接口返回);audited_at/audit_result 是审计结论。
+  merged_from?: FindingMergedFrom[];
+  audited_at?: string;
+  audit_result?: string;
   ts: string;
+}
+
+// FindingMergedFrom 是合并前的旧漏洞快照(merged_from),只用于详情页展示「整合自 N 条」。
+export interface FindingMergedFrom {
+  id: string;
+  task_id?: string;
+  vulnclass?: string;
+  name?: string;
+  severity?: Severity;
+  status?: FindingStatus;
+  summary?: string;
+  worker?: string;
+  ts?: string;
+}
+
+// AuditQueueStatus 是任务的判重队列进度:pending=排队条数,running=是否正在跑一批。
+export interface AuditQueueStatus {
+  pending: number;
+  running: boolean;
+  done?: number; // 已处理条数
+  total?: number; // 本轮目标总数
+  batches_done?: number;
+  batches_total?: number;
+  // window_left 是 10 秒静默窗口的剩余秒数（0/缺省=没有待开批的窗口）。
+  window_left?: number;
 }
 
 // FindingsPage 是发现列表的服务端分页响应。
@@ -710,7 +739,7 @@ export interface LogLine {
   text: string;
 }
 
-export type SessionRole = "mainagent" | "planner" | "worker" | "system";
+export type SessionRole = "mainagent" | "planner" | "auditor" | "worker" | "system";
 export type SessionStatus = "running" | "paused" | "done" | "blocked" | "exhausted" | "pending" | "stopped" | "deleted";
 
 // Daily token aggregate bucket (GET /api/tokens/daily).
@@ -864,6 +893,7 @@ export interface TrafficHost {
 export interface Settings {
   traffic_capture: boolean;
   agent_traffic_binding: boolean; // Agent 自动绑定流量证据，默认关闭；不影响人工绑定
+  finding_audit_enabled?: boolean; // 漏洞判重审计总开关，默认开启；关闭后不起新批次
   llm_record: boolean; // LLM 录制开关（默认关）；关闭时不记录任何 LLM 调用
   // Web search. brave_key_set / tavily_key_set reflect whether a key is stored
   // (the values are never returned). On PUT, send the corresponding field to set/clear.

@@ -1544,6 +1544,7 @@ func (s *ExplorationStore) TokenStatsBySession() ([]SessionTokenUsage, error) {
 		CASE
 			WHEN COALESCE(a.worker,'')='mainagent' THEN 'main:' || COALESCE(a.main_seg,0)::text
 			WHEN COALESCE(a.worker,'')='planner' THEN 'plan'
+			WHEN COALESCE(a.worker,'')='auditor' THEN 'audit'
 			WHEN n.id IS NOT NULL THEN 'intent:' || n.id::text
 			ELSE ''
 		END AS session_key,
@@ -1553,7 +1554,7 @@ func (s *ExplorationStore) TokenStatsBySession() ([]SessionTokenUsage, error) {
 	LEFT JOIN exploration_nodes n
 	  ON n.id=a.node_id AND n.exploration_id=a.exploration_id AND n.kind='intent'
 	WHERE a.exploration_id=$1 AND a.kind='result'
-	  AND (COALESCE(a.worker,'') IN ('mainagent','planner') OR n.id IS NOT NULL)
+	  AND (COALESCE(a.worker,'') IN ('mainagent','planner','auditor') OR n.id IS NOT NULL)
 	GROUP BY session_key
 	ORDER BY session_key`, s.expID)
 	if err != nil {

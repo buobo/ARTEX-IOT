@@ -5,7 +5,7 @@ import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
-import { ArrowLeftIcon, ArrowUpRightIcon, ShieldAlertIcon } from "lucide-react";
+import { ArrowLeftIcon, ArrowUpRightIcon, RefreshCwIcon, ShieldAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
@@ -61,6 +61,7 @@ function FindingDetailInner() {
   const [finding, setFinding] = React.useState<Finding | null>(null);
   const [loaded, setLoaded] = React.useState(false);
   const [tab, setTab] = React.useState("overview");
+  const [auditing, setAuditing] = React.useState(false);
 
   const load = React.useCallback(() => {
     if (!id) {
@@ -76,6 +77,20 @@ function FindingDetailInner() {
   React.useEffect(() => {
     load();
   }, [load]);
+
+  // 重新判重：把这条漏洞强制送进审计队列（忽略此前的审计结论），由审计 Agent 复查重复。
+  const reaudit = React.useCallback(async () => {
+    if (!finding || auditing) return;
+    setAuditing(true);
+    try {
+      await api.auditFinding(finding.id);
+      toast.success(`#${finding.id} 已加入判重队列，10 秒后开跑，稍后刷新查看结果`);
+    } catch (e) {
+      toast.error("送审判重失败：" + (e as Error).message);
+    } finally {
+      setAuditing(false);
+    }
+  }, [auditing, finding]);
 
   const changeSeverity = React.useCallback(
     async (next: Severity) => {
@@ -114,7 +129,14 @@ function FindingDetailInner() {
   if (!finding) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-10 text-center">
-        <p className="text-muted-foreground">{loaded ? `未找到发现 ${id}` : "加载中…"}</p>
+        <p className="text-muted-foreground">
+          {loaded ? `未找到发现 ${id}` : "加载中…"}
+        </p>
+        {loaded && (
+          <p className="max-w-md text-xs text-muted-foreground">
+            该漏洞可能已在判重审计中并入其他条目（合并后旧编号会消失），请回发现列表按漏洞类型或入口查找。
+          </p>
+        )}
         {loaded && (
           <Button asChild variant="outline">
             <Link href="/function/findings">
@@ -150,6 +172,37 @@ function FindingDetailInner() {
           {finding.inherited && finding.source_task_id && (
             <Badge variant="outline">来源任务 #{finding.source_task_id} · 只读</Badge>
           )}
+          {finding.audited_at && (
+            <Badge
+              variant="outline"
+              className={
+                finding.audit_result === "error"
+                  ? "text-destructive"
+                  : finding.audit_result === "skipped"
+                    ? "text-muted-foreground"
+                    : undefined
+              }
+              title={`审计时间 ${fmtTime(finding.audited_at)}${
+                finding.audit_result === "skipped" ? "｜已跳过（未参与判重，可重新判重）" : ""
+              }${finding.audit_result === "error" ? "｜判重失败（可重新判重）" : ""}`}
+            >
+              {AUDIT_RESULT_LABEL[finding.audit_result ?? ""] ?? "已判重"}
+            </Badge>
+          )}
+          <div className="ml-auto flex items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs"
+              onClick={reaudit}
+              disabled={auditing}
+              title="让审计 Agent 复查这条漏洞是否与其他条目重复；重复的会合并成一条新漏洞"
+            >
+              <RefreshCwIcon className={auditing ? "size-3.5 animate-spin" : "size-3.5"} />
+              重新判重
+            </Button>
+          </div>
         </div>
         <TabsList>
           <TabsTrigger value="overview">概览</TabsTrigger>
@@ -172,6 +225,42 @@ function FindingDetailInner() {
                   <p className="text-sm leading-relaxed whitespace-pre-wrap">{finding.summary || "（无摘要）"}</p>
                 </CardContent>
               </Card>
+              {finding.merged_from && finding.merged_from.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm">整合自 {finding.merged_from.length} 条</CardTitle>
+                  </CardHeader>
+                  <CardContent className="flex flex-col divide-y">
+                    {finding.merged_from.map((m) => (
+                      <div key={m.id} className="flex items-start justify-between gap-3 py-2 first:pt-0 last:pb-0">
+                        <div className="flex min-w-0 flex-col gap-0.5">
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            <code className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
+                              #{m.id}
+                            </code>
+                            <span className="truncate text-sm">{m.name || m.vulnclass || "未分类"}</span>
+                          </div>
+                          {m.summary && (
+                            <span className="truncate text-xs text-muted-foreground">{m.summary}</span>
+                          )}
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          {m.task_id && (
+                            <Link
+                              href={`/function/tasks/detail?id=${m.task_id}`}
+                              className="text-xs text-primary hover:underline"
+                            >
+                              任务 #{m.task_id}
+                            </Link>
+                          )}
+                          {m.severity && <StatusBadge domain="severity" value={m.severity} dot />}
+                          {m.ts && <span className="text-xs text-muted-foreground">{fmtTime(m.ts)}</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              )}
               <FindingRetestPanel key={id} findingId={id} readOnly={finding.inherited} onCompleted={load} />
               <Card>
                 <CardHeader>
@@ -335,6 +424,16 @@ function FindingDetailInner() {
 }
 
 // useSearchParams must sit under a Suspense boundary for static export.
+// AUDIT_RESULT_LABEL 把审计结论翻译成徽标文案：merged=整合产物、distinct=已判重、
+// skipped=判重被跳过（未真正审）、error=判重失败。以前只看 merged，其它一律显示"已判重"，
+// 让人误以为跳过/失败的条目已经审过了。
+const AUDIT_RESULT_LABEL: Record<string, string> = {
+  merged: "整合产物",
+  distinct: "已判重",
+  skipped: "判重已跳过",
+  error: "判重失败",
+};
+
 export default function FindingDetailPage() {
   return (
     <React.Suspense fallback={null}>

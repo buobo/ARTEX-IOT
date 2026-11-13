@@ -3103,6 +3103,7 @@ export const tools: Tool[] = [
 export const settings: Settings = {
   traffic_capture: true,
   agent_traffic_binding: false,
+  finding_audit_enabled: true,
   llm_record: false,
   web_search_enabled: true,
   web_search_backend: "ddgs",

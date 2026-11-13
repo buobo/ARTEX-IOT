@@ -318,6 +318,12 @@ type FindingDTO struct {
 	Evidence  string `json:"evidence"`
 	Report    string `json:"report,omitempty"` // 详细报告(Markdown);仅详情接口返回,列表为空
 
+	// 判重审计：MergedFrom 是本行由哪几条旧漏洞整合而来（仅详情接口返回）；
+	// AuditedAt/AuditResult 表示这条漏洞是否已被审计过、结论是什么（merged/distinct/…）。
+	MergedFrom  []FindingMergedFromDTO `json:"merged_from,omitempty"`
+	AuditedAt   string                 `json:"audited_at,omitempty"`
+	AuditResult string                 `json:"audit_result,omitempty"`
+
 	IntentID        string                `json:"intent_id,omitempty"`
 	ParamID         string                `json:"param_id,omitempty"`
 	TaskID          string                `json:"task_id,omitempty"`
@@ -416,6 +422,20 @@ func findingComponentDTOs(ids []int64, components map[int64]*db.Component) []Fin
 	return out
 }
 
+// FindingMergedFromDTO 是 merged_from 里的一条旧漏洞快照（只给前端展示，不回传全文，
+// evidence/report 太长且已随合并过程留档在库）。
+type FindingMergedFromDTO struct {
+	ID        string `json:"id"`
+	TaskID    string `json:"task_id,omitempty"`
+	VulnClass string `json:"vulnclass,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Severity  string `json:"severity,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Summary   string `json:"summary,omitempty"`
+	Worker    string `json:"worker,omitempty"`
+	TS        string `json:"ts,omitempty"`
+}
+
 // findingFromDB converts a standalone DBFinding row to a FindingDTO. task_id and
 // task_description are empty when the originating task has been deleted (NULL).
 func findingFromDB(f *db.DBFinding, components map[int64]*db.Component) FindingDTO {
@@ -438,6 +458,23 @@ func findingFromDB(f *db.DBFinding, components map[int64]*db.Component) FindingD
 		TS:        rfc3339(f.CreatedAt),
 	}
 	d.Components = findingComponentDTOs(f.ComponentIDs, components)
+	for _, m := range f.MergedFrom {
+		mm := FindingMergedFromDTO{
+			ID: i64s(m.ID), VulnClass: m.VulnClass, Name: m.Name,
+			Severity: m.Severity, Status: m.Status, Summary: m.Summary, Worker: m.Worker,
+		}
+		if m.TaskID != nil {
+			mm.TaskID = i64s(*m.TaskID)
+		}
+		if !m.CreatedAt.IsZero() {
+			mm.TS = rfc3339(m.CreatedAt)
+		}
+		d.MergedFrom = append(d.MergedFrom, mm)
+	}
+	if f.AuditedAt != nil && !f.AuditedAt.IsZero() {
+		d.AuditedAt = rfc3339(*f.AuditedAt)
+	}
+	d.AuditResult = f.AuditResult
 	if f.TaskID != nil {
 		d.TaskID = i64s(*f.TaskID)
 		d.TaskDescription = f.TaskDescription

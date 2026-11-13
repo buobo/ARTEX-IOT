@@ -24,6 +24,7 @@ type PlannerVars struct{ Goal, Scope, ComponentSummary, DataDir, Now string }
 type WorkerVars struct{ ProxyAddr, WorkerName, DataDir, Now string }
 type MainVars struct{ Goal, ComponentSummary, FindingsSummary, DataDir, Now string }
 type GoalsVars struct{ EngagementDescription, DataDir, Now string }
+type AuditVars struct{ DataDir, Now string }
 
 // componentSummary 渲染 {{.ComponentSummary}}：组件总数 + 类型分布（按数量倒序，最多 6 类）。
 // 查库失败返回空串——这是"可选态势"，不能因为它让提示词渲染失败。

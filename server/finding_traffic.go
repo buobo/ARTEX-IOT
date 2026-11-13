@@ -412,3 +412,20 @@ func (s *Server) toolGetFindingTraffic() actool.CoreTool {
 			return jsonResult(result)
 		})
 }
+
+// enqueueAuditOnEvidenceEdit 在“证据/报告被人工改动”后把漏洞送回判重队列：
+// 已审过的强制重审（结论可能失效），未审过的若还在队列里就什么都不做（批次会读到最新内容）。
+func (s *Server) enqueueAuditOnEvidenceEdit(findingID int64, source string) {
+	if findingID <= 0 || s.engine == nil {
+		return
+	}
+	meta, err := s.m.pg.FindingAuditMeta([]int64{findingID})
+	if err != nil {
+		return
+	}
+	m, ok := meta[findingID]
+	if !ok || m.Merged || m.TaskID <= 0 {
+		return
+	}
+	s.engine.EnqueueAudit(m.TaskID, findingID, source, m.Audited)
+}

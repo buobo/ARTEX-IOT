@@ -9,6 +9,7 @@ import {
   ChevronRightIcon,
   FileTextIcon,
   FlaskConicalIcon,
+  GitMergeIcon,
   RotateCcwIcon,
   ShieldAlertIcon,
   Trash2Icon,
@@ -39,6 +40,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
+import { toast } from "sonner";
 import { statusMeta } from "@/lib/status";
 import type { ActiveFindingRetest, Finding, FindingRetestRecording, FindingStatus, Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -134,6 +136,21 @@ export function FindingsTable({
   onDelete,
   selectAllLabel = "选择当前页全部",
 }: FindingsTableProps) {
+  // 判重：把单条漏洞强制送进审计队列（重复的会被合并成一条新漏洞，旧编号消失）。
+  const [auditBusy, setAuditBusy] = React.useState<string>("");
+  const onAudit = React.useCallback(async (finding: Finding) => {
+    if (!finding.finding_id || auditBusy) return;
+    setAuditBusy(finding.finding_id);
+    try {
+      await api.auditFinding(finding.finding_id);
+      toast.success(`#${finding.finding_id} 已加入判重队列，10 秒后开跑`);
+    } catch (e) {
+      toast.error("送审判重失败：" + (e as Error).message);
+    } finally {
+      setAuditBusy("");
+    }
+  }, [auditBusy]);
+
   const selectableIds = items.map((finding) => finding.finding_id).filter((id): id is string => Boolean(id));
   const selectedCount = selectableIds.filter((id) => selectedIds.has(id)).length;
   let headerChecked: boolean | "indeterminate" = false;
@@ -289,6 +306,18 @@ export function FindingsTable({
                         复测
                       </Button>
                     ) : null}
+                    {f.finding_id && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => onAudit(f)}
+                        disabled={auditBusy === f.finding_id}
+                        title="重新判重：让审计 Agent 复查这条漏洞是否与其他条目重复"
+                      >
+                        <GitMergeIcon data-icon="inline-start" />
+                        判重
+                      </Button>
+                    )}
                     {f.finding_id && f.task_id && (
                       <Button size="sm" variant="ghost" onClick={() => onDeepen(f)}>
                         <FlaskConicalIcon data-icon="inline-start" />

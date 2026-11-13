@@ -6,6 +6,7 @@ import {
   BinaryIcon,
   CpuIcon,
   FlaskConicalIcon,
+  GitMergeIcon,
   KeyboardIcon,
   RadioTowerIcon,
   SearchIcon,
@@ -28,6 +29,7 @@ import { UpdateCard } from "./_components/update-card";
 export default function SystemSettingsPage() {
   const [trafficCapture, setTrafficCapture] = React.useState(false);
   const [agentTrafficBinding, setAgentTrafficBinding] = React.useState(false);
+  const [findingAudit, setFindingAudit] = React.useState(true);
   const [webSearch, setWebSearch] = React.useState(false);
   const [backend, setBackend] = React.useState("ddgs");
   const [braveKeySet, setBraveKeySet] = React.useState(false);
@@ -65,6 +67,7 @@ export default function SystemSettingsPage() {
   const apply = React.useCallback((s: Settings) => {
     setTrafficCapture(!!s.traffic_capture);
     setAgentTrafficBinding(!!s.agent_traffic_binding);
+    setFindingAudit(s.finding_audit_enabled !== false);
     setWebSearch(!!s.web_search_enabled);
     setBackend(s.web_search_backend || "ddgs");
     setBraveKeySet(!!s.brave_key_set);
@@ -191,6 +194,22 @@ export default function SystemSettingsPage() {
       })
       .catch((e) => {
         setAgentTrafficBinding(!v);
+        toast.error(`保存失败：${(e as Error).message}`);
+      })
+      .finally(() => setSaving(false));
+  };
+
+  const toggleFindingAudit = (v: boolean) => {
+    setFindingAudit(v); // optimistic
+    setSaving(true);
+    api
+      .setSettings({ finding_audit_enabled: v })
+      .then((s) => {
+        apply(s);
+        toast.success(v ? "已开启漏洞判重审计" : "已关闭漏洞判重审计");
+      })
+      .catch((e) => {
+        setFindingAudit(!v);
         toast.error(`保存失败：${(e as Error).message}`);
       })
       .finally(() => setSaving(false));
@@ -374,6 +393,33 @@ export default function SystemSettingsPage() {
               checked={agentTrafficBinding}
               disabled={!loaded || saving}
               onCheckedChange={toggleAgentTrafficBinding}
+            />
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <GitMergeIcon className="size-4" />
+              漏洞判重审计
+            </CardTitle>
+            <CardDescription id="finding-audit-description">
+              默认开启。新漏洞上报后，审计 Agent 会按批读原文、判断哪些是同一个漏洞，并把重复的整合成一条（旧记录归档进快照后删除）。
+              人工可在漏洞详情页「重新判重」或任务「发现」页「整任务判重」强制重审。
+              <br />
+              <b>会消耗 Token</b>：每批一次会话（12 轮 / 300 秒上限）。关闭后不再起新批次、手动触发会被拒绝，已排队的漏洞保留到重新开启。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex items-center justify-between gap-4">
+            <Label htmlFor="finding-audit" className="text-sm font-normal text-muted-foreground">
+              {findingAudit ? "已开启 · 自动合并重复漏洞" : "已关闭 · 不再触发判重"}
+            </Label>
+            <Switch
+              id="finding-audit"
+              aria-describedby="finding-audit-description"
+              checked={findingAudit}
+              disabled={!loaded || saving}
+              onCheckedChange={toggleFindingAudit}
             />
           </CardContent>
         </Card>

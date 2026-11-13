@@ -16,6 +16,7 @@ import type {
   Component,
   ComponentStatus,
   Audit,
+  AuditQueueStatus,
   BatchCategoryItem,
   BatchControlItem,
   ChatAttachment,
@@ -728,6 +729,14 @@ export const api = {
     a.remove();
     URL.revokeObjectURL(url);
   },
+  // ---- 判重审计 ----
+  // auditFinding 把单条漏洞强制送审(忽略 audited_at);auditTaskFindings 把整任务在
+  // 处理的漏洞按批送审;auditTaskStatus 取队列进度,供页面轮询展示。
+  auditFinding: (id: string) => post<{ queued: boolean; finding_id: number }>(`/exploration/findings/${id}/audit`),
+  auditTaskFindings: (taskId: string) =>
+    // note: 幂等分支会返回 note="该任务已在判重中"，页面据此换文案。
+    post<{ queued: number; note?: string }>(`/tasks/${taskId}/audit`),
+  auditTaskStatus: (taskId: string) => get<AuditQueueStatus>(`/tasks/${taskId}/audit/status`),
   getFinding: (id: string, contextTaskId?: string) =>
     get<Finding>(
       `/exploration/findings/${id}${contextTaskId ? `?context_task=${encodeURIComponent(contextTaskId)}` : ""}`,

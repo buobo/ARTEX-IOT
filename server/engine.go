@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -134,6 +135,13 @@ type Engine struct {
 	steerMu  sync.Mutex
 	steerBox map[int64][]string
 
+	// 漏洞判重审计（批次）：待审集合、静默窗口计时器与运行标记；resolveAud 由
+	// server 注入（按任务解析 auditor，复用该任务的 LLM 链与 transcript）。
+	auditMu     sync.Mutex
+	auditQ      map[string]*auditQueue
+	auditRecent map[string]map[int64]time.Time // taskID -> findingID -> 上次批次完成时间（120s 去抖）
+	resolveAud  func(t *Task) *agent.Auditor
+
 	plannerRound sync.Map // taskID -> int, planner round counter (for UI round separators)
 
 	// 任务级超时(见 docs/任务级超时与收尾设计.md):
@@ -193,7 +201,21 @@ func (e *Engine) BeginDelete(taskID string) bool {
 	e.paused.Store(taskID, true)
 	e.deleteMu.Unlock()
 	e.cancelExec(taskID, agent.AbortTaskDeleted)
+	e.forgetAuditQueue(taskID) // 任务要删了：判重队列直接清掉，别再起批
 	return true
+}
+
+// forgetAuditQueue 丢弃某任务的判重队列（任务删除时调用；不写库，行本身会被删）。
+func (e *Engine) forgetAuditQueue(key string) {
+	e.auditMu.Lock()
+	defer e.auditMu.Unlock()
+	if q := e.auditQ[key]; q != nil {
+		if q.timer != nil {
+			q.timer.Stop()
+		}
+		delete(e.auditQ, key)
+	}
+	delete(e.auditRecent, key)
 }
 
 func (e *Engine) AbortDelete(taskID string, keepPaused bool) {
@@ -1306,4 +1328,728 @@ func (e *Engine) claimNext(t *Task, name string) *db.Node {
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 漏洞判重审计队列（批次）
+// ---------------------------------------------------------------------------
+//
+// 模型：新漏洞入队 → 静默 10 秒或攒够 8 条就起一个批次会话 → 会话内可做多次合并。
+// 同任务串行（一个批次跑完才起下一个），跨任务并行；人工触发跳过限速与静默窗口。
+
+const (
+	auditIdleWindow    = 10 * time.Second  // 静默窗口：这段时间没有新漏洞才开批
+	auditBatchTrigger  = 8                 // 攒够这么多条提前开批
+	auditBatchMax      = 40                // 单批上限（与角色提示词一致）
+	auditPerMinute     = 3                 // 同任务每分钟最多几个批次（自动触发）
+	auditDailyCap      = 200               // 同任务每天最多审计多少条漏洞（自动触发）
+	auditBatchDailyCap = 60                // 同任务每天最多启动多少批次（自动触发）
+	auditQueueCap      = 200               // 待审集合上限：超出只保留最新 200 条
+	auditDedupeWindow  = 120 * time.Second // 同一漏洞两次入队的最小间隔（报告回写去抖）
+	auditDisabledRetry = 5 * time.Minute   // 后台总开关关闭 / auditor 未就绪时的重试间隔
+	auditMaxAttempts   = 2                 // 失败重试 1 次（首次 + 重试一次）
+)
+
+type auditQueue struct {
+	ids         []int64
+	seen        map[int64]bool
+	force       map[int64]bool
+	dirty       map[int64]bool
+	source      string
+	timer       *time.Timer
+	running     bool
+	starts      []time.Time
+	day         string    // 批次数统计的归属日（YYYY-MM-DD）
+	batches     int       // 当天已启动的批次数（只在自动触发路径上受限）
+	holdUntil   time.Time // 到这个时间之前不再起批（放回队列重试时的退避）
+	capNotice   string    // 每日上限提示的归属日：同一天只提示一次，避免每 5 分钟刷一条
+	windowUntil time.Time // 静默窗口到期时间；零值表示没有窗口（可以立刻起批）
+	// 注意：窗口只能由「入队」往后推，绝不能由 pump 自己重排定时器 —— pump 也是定时器回调，
+	// 那样会永远重排、永远开不了批（历史 bug）。
+	total       int // 本轮判重的目标总数（进度展示用）
+	done        int // 已处理条数
+	batchesDone int // 已完成批次数
+}
+
+// AuditProgress 是任务判重的进度快照，供页面展示「第 x/y 批，已处理 m/n 条」。
+type AuditProgress struct {
+	Pending      int  `json:"pending"`
+	Running      bool `json:"running"`
+	Done         int  `json:"done"`
+	Total        int  `json:"total"`
+	BatchesDone  int  `json:"batches_done"`
+	BatchesTotal int  `json:"batches_total"`
+	// WindowLeft 是静默窗口剩余秒数（0 表示没有待开批的窗口）。
+	// 前端拿它做逐秒倒计时；窗口每被一次点击刷新，这个值就从 30 重新开始。
+	WindowLeft int `json:"window_left"`
+}
+
+// SetAuditorResolver installs the per-task auditor resolver (wired by the server).
+func (e *Engine) SetAuditorResolver(fn func(t *Task) *agent.Auditor) { e.resolveAud = fn }
+
+func (e *Engine) taskByID(id string) *Task {
+	e.m.mu.RLock()
+	defer e.m.mu.RUnlock()
+	return e.m.tasks[id]
+}
+
+// auditEnabled 是后台总开关（系统设置 finding_audit_enabled，默认开）。
+func (e *Engine) auditEnabled() bool {
+	if e.m == nil || e.m.pg == nil {
+		return false
+	}
+	return e.m.pg.GetBool(settingFindingAuditEnabled, true)
+}
+
+// AuditEnabled 是对外暴露的总开关查询（人工触发接口用它给出明确报错）。
+func (e *Engine) AuditEnabled() bool { return e.auditEnabled() }
+
+// isManualAuditSource 判断来源是否人工触发（manual / manual_one / manual_task），
+// 人工触发忽略限速与每日上限。
+func isManualAuditSource(source string) bool {
+	return source == "manual" || strings.HasPrefix(source, "manual_")
+}
+
+func auditStatusEligible(status string) bool {
+	switch status {
+	case db.FindingFalsePositive, db.FindingIgnored, db.FindingFixed, db.FindingResolved:
+		return false
+	}
+	return true
+}
+
+// EnqueueAudit 把一个漏洞放进本任务的待审集合。force=true 表示人工/改动触发
+// （忽略已审计标记）；120 秒内的重复触发会被推迟到窗口结束，避免报告回写造成双跑。
+func (e *Engine) EnqueueAudit(taskID, findingID int64, source string, force bool) {
+	if taskID <= 0 || findingID <= 0 {
+		return
+	}
+	// 总开关关闭时仍然入队（不消耗模型、只是攒着），重新打开后 pump 会接着跑；
+	// 人工触发由接口层直接 403，不会走到这里。
+	key := strconv.FormatInt(taskID, 10)
+	e.auditMu.Lock()
+	if e.auditQ == nil {
+		e.auditQ = map[string]*auditQueue{}
+	}
+	if e.auditRecent == nil {
+		e.auditRecent = map[string]map[int64]time.Time{}
+	}
+	q := e.auditQ[key]
+	if q == nil {
+		q = &auditQueue{seen: map[int64]bool{}, force: map[int64]bool{}, dirty: map[int64]bool{}}
+		e.auditQ[key] = q
+	}
+	if q.seen[findingID] {
+		// 已经在队列里（或正在被当前批次处理）：只有强制触发才标 dirty，本批跑完补一轮。
+		if force {
+			q.dirty[findingID] = true
+		}
+		e.auditMu.Unlock()
+		return
+	}
+	if !force {
+		if last := e.auditRecent[key][findingID]; !last.IsZero() && time.Since(last) < auditDedupeWindow {
+			wait := auditDedupeWindow - time.Since(last)
+			e.auditMu.Unlock()
+			time.AfterFunc(wait, func() { e.EnqueueAudit(taskID, findingID, source, false) })
+			return
+		}
+	}
+	// 新一轮判重（队列空且没有批次在跑）从 0 开始计数：doc §3.2 的「第 x/y 批，已处理 m/n 条」
+	// 说的是本次触发的进度，不是历史累计。
+	if !q.running && len(q.ids) == 0 {
+		q.total, q.done, q.batchesDone = 0, 0, 0
+	}
+	q.ids = append(q.ids, findingID)
+	q.seen[findingID] = true
+	q.windowUntil = time.Now().Add(auditIdleWindow) // 新条目进来就刷新等待期
+	if force {
+		q.force[findingID] = true
+	}
+	if !isManualAuditSource(q.source) {
+		q.source = source
+	}
+	if q.total < q.done+len(q.ids) {
+		q.total = q.done + len(q.ids)
+	}
+	// 队列上限：超出只保留最新 200 条，丢掉最老的（记一条 activity 提示积压）。
+	var dropped []int64
+	if over := len(q.ids) - auditQueueCap; over > 0 {
+		dropped = append(dropped, q.ids[:over]...)
+		q.ids = append([]int64{}, q.ids[over:]...)
+		for _, id := range dropped {
+			delete(q.seen, id)
+		}
+	}
+	e.auditMu.Unlock()
+
+	if len(dropped) > 0 {
+		if t := e.taskByID(key); t != nil {
+			e.emitActivity(t, db.Activity{Worker: "auditor", Kind: "text", IsError: true,
+				Summary: fmt.Sprintf("判重队列积压：待审超过 %d 条，丢弃最早的 %d 条（可人工重新触发）", auditQueueCap, len(dropped))})
+		}
+	}
+	e.pumpAudit(key)
+}
+
+// EnqueueAuditBatch 一次性把一批漏洞放进队列，只在最后 pump 一次。
+//
+// 逐条调 EnqueueAudit 会有个坑：人工来源（manual_*）跳过静默窗口和「攒够 8 条」判断，
+// 第一次入队就会把队列里那唯一 1 条取走起批 —— 整任务判重于是先跑一个 1 条的批次。
+// 批量触发（整任务判重、人工整任务重审）必须走这里。
+func (e *Engine) EnqueueAuditBatch(taskID int64, ids []int64, source string, force bool) {
+	if len(ids) == 0 {
+		return
+	}
+	key := strconv.FormatInt(taskID, 10)
+	e.auditMu.Lock()
+	if e.auditQ == nil {
+		e.auditQ = map[string]*auditQueue{}
+	}
+	if e.auditRecent == nil {
+		e.auditRecent = map[string]map[int64]time.Time{}
+	}
+	q := e.auditQ[key]
+	if q == nil {
+		q = &auditQueue{seen: map[int64]bool{}, force: map[int64]bool{}, dirty: map[int64]bool{}}
+		e.auditQ[key] = q
+	}
+	// 新一轮判重（队列空且没有批次在跑）从 0 开始计数。
+	if !q.running && len(q.ids) == 0 {
+		q.total, q.done, q.batchesDone = 0, 0, 0
+	}
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if q.seen[id] {
+			// 已在队列里（或正在被本批处理）：批量触发是幂等的，不再标 dirty，
+			// 否则连点两次「整任务判重」会让整批在跑完后被强制再审一轮（双倍 Token）。
+			continue
+		}
+		if !force {
+			if last := e.auditRecent[key][id]; !last.IsZero() && time.Since(last) < auditDedupeWindow {
+				continue // 批量路径只做「跳过」，需要补审的用强制触发
+			}
+		}
+		q.ids = append(q.ids, id)
+		q.seen[id] = true
+		q.windowUntil = time.Now().Add(auditIdleWindow) // 有新条目才刷新等待期
+		if force {
+			q.force[id] = true
+		}
+		if q.total < q.done+len(q.ids) {
+			q.total = q.done + len(q.ids)
+		}
+	}
+	if isManualAuditSource(source) || !isManualAuditSource(q.source) {
+		q.source = source
+	}
+	var dropped []int64
+	if over := len(q.ids) - auditQueueCap; over > 0 {
+		dropped = append(dropped, q.ids[:over]...)
+		q.ids = append([]int64{}, q.ids[over:]...)
+		for _, id := range dropped {
+			delete(q.seen, id)
+			delete(q.force, id)
+		}
+	}
+	e.auditMu.Unlock()
+
+	if len(dropped) > 0 {
+		if t := e.taskByID(key); t != nil {
+			e.emitActivity(t, db.Activity{Worker: "auditor", Kind: "text", IsError: true,
+				Summary: fmt.Sprintf("判重队列积压：待审超过 %d 条，丢弃最早的 %d 条（可人工重新触发）", auditQueueCap, len(dropped))})
+		}
+	}
+	e.pumpAudit(key)
+}
+
+// pumpAudit 判断是否可以起批：总开关、同任务串行、静默/攒批/限速/每日上限。
+func (e *Engine) pumpAudit(key string) {
+	e.auditMu.Lock()
+	q := e.auditQ[key]
+	if q == nil || q.running || len(q.ids) == 0 {
+		if q != nil && len(q.ids) == 0 && !q.running {
+			q.windowUntil = time.Time{} // 队列空了就没有窗口，别让界面显示假倒计时
+		}
+		e.auditMu.Unlock()
+		return
+	}
+	if !e.auditEnabled() {
+		// 后台关掉了判重：队列保留，隔一段时间再看（重新打开后会接着跑）。
+		if q.timer != nil {
+			q.timer.Stop()
+		}
+		q.timer = time.AfterFunc(auditDisabledRetry, func() { e.pumpAudit(key) })
+		e.auditMu.Unlock()
+		return
+	}
+	// 退避窗口（auditor 未就绪 / 触顶 / 读库失败放回队列）：到期前不起批，
+	// 否则 requeue 后立刻 pump 会形成无间隔忙循环。
+	if now := time.Now(); !q.holdUntil.IsZero() && now.Before(q.holdUntil) {
+		wait := time.Until(q.holdUntil)
+		if q.timer != nil {
+			q.timer.Stop()
+		}
+		q.timer = time.AfterFunc(wait, func() { e.pumpAudit(key) })
+		e.auditMu.Unlock()
+		return
+	}
+	manual := isManualAuditSource(q.source)
+	// 静默窗口：窗口到期时间由「入队」维护（EnqueueAudit/EnqueueAuditBatch 把 windowUntil 推到 10 秒后），
+	// 这里只判断「还没到期就继续等」。绝对不能在这里无条件重排定时器 —— 定时器回调也是 pumpAudit，
+	// 那样会一直重排、永远走不到起批（曾经就是死循环，点一条判重 10 秒后一动不动）。
+	// 攒够 8 条提前开批只对自动触发生效：人工触发（含整任务判重）一律等满静默窗口。
+	if manual || len(q.ids) < auditBatchTrigger {
+		if wait := time.Until(q.windowUntil); wait > 0 {
+			if q.timer != nil {
+				q.timer.Stop()
+			}
+			q.timer = time.AfterFunc(wait, func() { e.pumpAudit(key) })
+			e.auditMu.Unlock()
+			return
+		}
+	}
+	q.windowUntil = time.Time{}
+	now := time.Now()
+	kept := q.starts[:0]
+	for _, ts := range q.starts {
+		if now.Sub(ts) < time.Minute {
+			kept = append(kept, ts)
+		}
+	}
+	q.starts = kept
+	if !manual && len(q.starts) >= auditPerMinute {
+		if q.timer != nil {
+			q.timer.Stop()
+		}
+		q.timer = time.AfterFunc(time.Minute, func() { e.pumpAudit(key) })
+		e.auditMu.Unlock()
+		return
+	}
+	// 每日批次上限：自动触发超限就排队到明天，人工触发不受限。
+	day := now.Format("2006-01-02")
+	if q.day != day {
+		q.day, q.batches = day, 0
+	}
+	if !manual && q.batches >= auditBatchDailyCap {
+		if q.timer != nil {
+			q.timer.Stop()
+		}
+		q.timer = time.AfterFunc(10*time.Minute, func() { e.pumpAudit(key) })
+		e.auditMu.Unlock()
+		return
+	}
+	take := q.ids
+	if len(take) > auditBatchMax {
+		take = take[:auditBatchMax]
+	}
+	q.ids = append([]int64{}, q.ids[len(take):]...)
+	force := map[int64]bool{}
+	for _, id := range take {
+		delete(q.seen, id)
+		if q.force[id] {
+			force[id] = true
+			delete(q.force, id)
+		}
+	}
+	q.running = true
+	q.starts = append(q.starts, now)
+	q.batches++
+	source := q.source
+	q.source = ""
+	e.auditMu.Unlock()
+
+	ids := append([]int64{}, take...)
+	go e.runAuditBatch(key, ids, source, force)
+}
+
+// requeueAuditFront 把一批没跑成的 id 放回队首（auditor 未就绪等可恢复情况），
+// 隔一段时间再 pump，避免丢队列也避免空转。
+func (e *Engine) requeueAuditFront(key string, ids []int64) {
+	e.requeueAuditUntil(key, ids, time.Now().Add(auditDisabledRetry))
+}
+
+// requeueAuditUntil 是 requeueAuditFront 的带截止时间版本：每日上限触顶时顺延到次日 0 点，
+// 而不是每 5 分钟回来一次（那样会一天刷几百条时间线）。
+func (e *Engine) requeueAuditUntil(key string, ids []int64, until time.Time) {
+	e.auditMu.Lock()
+	q := e.auditQ[key]
+	if q == nil {
+		q = &auditQueue{seen: map[int64]bool{}, force: map[int64]bool{}, dirty: map[int64]bool{}}
+		e.auditQ[key] = q
+	}
+	head := make([]int64, 0, len(ids)+len(q.ids))
+	for _, id := range ids {
+		if !q.seen[id] {
+			q.seen[id] = true
+			head = append(head, id)
+		}
+	}
+	q.ids = append(head, q.ids...)
+	if q.total < q.done+len(q.ids) {
+		q.total = q.done + len(q.ids)
+	}
+	wait := time.Until(until)
+	if wait < auditDisabledRetry {
+		wait = auditDisabledRetry // 至少隔 5 分钟，避免同一时刻反复起批
+	}
+	q.holdUntil = time.Now().Add(wait)
+	if q.timer != nil {
+		q.timer.Stop()
+	}
+	q.timer = time.AfterFunc(wait, func() { e.pumpAudit(key) })
+	e.auditMu.Unlock()
+}
+
+// markAuditSkipped 把队列里剩下的漏洞标成 skipped 并留痕（任务结束、积压超限等）。
+func (e *Engine) markAuditSkipped(key, reason string) int {
+	e.auditMu.Lock()
+	q := e.auditQ[key]
+	if q == nil {
+		e.auditMu.Unlock()
+		return 0
+	}
+	ids := append([]int64{}, q.ids...)
+	q.ids = nil
+	q.seen = map[int64]bool{}
+	q.dirty = map[int64]bool{}
+	q.force = map[int64]bool{}
+	q.source = ""
+	if q.timer != nil {
+		q.timer.Stop()
+		q.timer = nil
+	}
+	e.auditMu.Unlock()
+
+	for _, id := range ids {
+		_ = e.m.pg.MarkFindingSkipped(id)
+	}
+	if len(ids) > 0 {
+		if t := e.taskByID(key); t != nil {
+			e.emitActivity(t, db.Activity{Worker: "auditor", Kind: "text",
+				Summary: fmt.Sprintf("%s：%d 条漏洞未审计，已标记 skipped", reason, len(ids)),
+				Detail:  "可由人工在漏洞详情页点「重新判重」补审。"})
+		}
+	}
+	return len(ids)
+}
+
+// recordAuditDone 记下这批漏洞的完成时间（120 秒去抖用）。
+func (e *Engine) recordAuditDone(key string, ids []int64) {
+	if len(ids) == 0 {
+		return
+	}
+	e.auditMu.Lock()
+	if e.auditRecent == nil {
+		e.auditRecent = map[string]map[int64]time.Time{}
+	}
+	m := e.auditRecent[key]
+	if m == nil {
+		m = map[int64]time.Time{}
+		e.auditRecent[key] = m
+	}
+	now := time.Now()
+	for _, id := range ids {
+		m[id] = now
+	}
+	// 防止长期运行后无界增长：超过 2000 条就整体重建。
+	if len(m) > 2000 {
+		cut := now.Add(-auditDedupeWindow)
+		for id, ts := range m {
+			if ts.Before(cut) {
+				delete(m, id)
+			}
+		}
+	}
+	e.auditMu.Unlock()
+}
+
+// runAuditBatch 跑一个批次的审计会话，结束后自动 pump 下一批（含 dirty 补跑）。
+func (e *Engine) runAuditBatch(key string, ids []int64, source string, force map[int64]bool) {
+	requeued := false // 放回队首重试的批次不算「已处理」，避免进度虚高
+	defer func() {
+		e.auditMu.Lock()
+		if q := e.auditQ[key]; q != nil {
+			q.running = false
+			if !requeued {
+				q.done += len(ids)
+				q.batchesDone++
+			}
+			if q.total < q.done {
+				q.total = q.done
+			}
+			// dirty 的项重新入队，最多补跑一次（避免报告反复改写导致无限重审）。
+			for id := range q.dirty {
+				if !q.seen[id] {
+					q.ids = append(q.ids, id)
+					q.seen[id] = true
+					if q.total < q.done+len(q.ids) {
+						q.total = q.done + len(q.ids)
+					}
+				}
+				delete(q.dirty, id)
+			}
+		}
+		e.auditMu.Unlock()
+		e.pumpAudit(key)
+	}()
+
+	t := e.taskByID(key)
+	if t == nil || e.IsDeleting(key) || isTerminalStatus(t.lifecycleSnapshot().Status) {
+		// 任务已终局/删除：不再起审计，队列剩余 + 本批这些一起标 skipped 并留痕。
+		n := e.markAuditSkipped(key, "任务已结束")
+		for _, id := range ids {
+			_ = e.m.pg.MarkFindingSkipped(id)
+		}
+		requeued = true // 本批没有真的审，进度不算已处理
+		log.Printf("[audit] task %s: 任务已结束，队列 %d 条 + 本批 %d 条标 skipped", key, n, len(ids))
+		return
+	}
+	aud := e.resolveAuditor(t)
+	if aud == nil {
+		// 模型链路还没就绪：放回队首，稍后重试（不丢队列、不空转）。
+		log.Printf("[audit] task %s: auditor 未就绪，%d 条稍后重试", key, len(ids))
+		requeued = true
+		e.requeueAuditFront(key, ids)
+		return
+	}
+	taskIDInt, _ := strconv.ParseInt(key, 10, 64)
+	rows, err := e.m.pg.FindingsByIDs(ids)
+	if err != nil {
+		log.Printf("[audit] task %s: 读取漏洞失败: %v", key, err)
+		requeued = true
+		e.requeueAuditFront(key, ids)
+		return
+	}
+	meta, err := e.m.pg.FindingAuditMeta(ids)
+	if err != nil {
+		log.Printf("[audit] task %s: 读取审计状态失败: %v", key, err)
+		requeued = true
+		e.requeueAuditFront(key, ids)
+		return
+	}
+	targets := make([]*db.DBFinding, 0, len(rows))
+	skippedMerged := make([]int64, 0)
+	skippedOther := make([]int64, 0)
+	for _, f := range rows {
+		m, ok := meta[f.ID]
+		if !ok || m.Merged || m.TaskID != taskIDInt || !auditStatusEligible(m.Status) || (m.Audited && !force[f.ID]) {
+			if ok && m.Merged {
+				skippedMerged = append(skippedMerged, f.ID)
+			} else {
+				skippedOther = append(skippedOther, f.ID)
+			}
+			continue
+		}
+		targets = append(targets, f)
+	}
+	if len(skippedMerged) > 0 || len(skippedOther) > 0 {
+		// 执行前过滤留痕：让时间线能解释「这条为什么没被审」。
+		detail := ""
+		if len(skippedMerged) > 0 {
+			// 反查快照里记的旧 id → 新 id，文案对齐 doc §4.2 的「#283 已并入 #290」。
+			into := e.m.pg.FindingIDsMergedInto(skippedMerged)
+			parts := make([]string, 0, len(skippedMerged))
+			for _, id := range skippedMerged {
+				if nid, ok := into[id]; ok {
+					parts = append(parts, fmt.Sprintf("#%d 已并入 #%d", id, nid))
+				} else {
+					parts = append(parts, fmt.Sprintf("#%d 已并入其他漏洞", id))
+				}
+			}
+			detail += strings.Join(parts, "；") + "；"
+		}
+		if len(skippedOther) > 0 {
+			detail += fmt.Sprintf("%s 状态不适格/已审计/已不在本任务；", formatAuditIDList(skippedOther))
+		}
+		e.emitActivity(t, db.Activity{Worker: "auditor", Kind: "text",
+			Summary: "本批跳过 " + formatAuditIDList(append(append([]int64{}, skippedMerged...), skippedOther...)), Detail: detail})
+	}
+	if len(targets) == 0 {
+		e.recordAuditDone(key, ids)
+		return
+	}
+	if n, err := e.m.pg.CountAuditedToday(taskIDInt); err == nil && n+len(targets) > auditDailyCap && !isManualAuditSource(source) {
+		day := time.Now().Format("2006-01-02")
+		if e.takeAuditCapNotice(key, day) {
+			// 同一天只写一条：否则每 5 分钟回来一次就会把时间线刷满。
+			e.emitActivity(t, db.Activity{Worker: "auditor", Kind: "text",
+				Summary: fmt.Sprintf("本轮触发跳过：今日已审计 %d 条（上限 %d），剩余 %d 条排队到明天", n, auditDailyCap, len(ids))})
+		}
+		requeued = true
+		e.requeueAuditUntil(key, ids, nextAuditDayStart(time.Now()))
+		return
+	}
+	// 人工触发留痕：记来源、涉及 id、改动前各自的 audited_at（doc §3.2）。
+	if isManualAuditSource(source) {
+		before := map[string]any{}
+		for _, f := range targets {
+			if m := meta[f.ID]; m.AuditedAt != nil {
+				before[fmt.Sprintf("%d", f.ID)] = m.AuditedAt.Format(time.RFC3339)
+			}
+		}
+		idx := e.AuditProgress(key)
+		batchNo := idx.BatchesDone + 1
+		batchTotal := idx.BatchesTotal
+		if batchTotal < batchNo {
+			batchTotal = batchNo
+		}
+		metaJSON, _ := json.Marshal(map[string]any{
+			"source": source, "batch": batchNo, "batches_total": batchTotal, "ids": func() []int64 {
+				out := make([]int64, 0, len(targets))
+				for _, f := range targets {
+					out = append(out, f.ID)
+				}
+				return out
+			}(), "audited_at_before": before,
+		})
+		e.emitActivity(t, db.Activity{Worker: "auditor", Kind: "text", Tool: "request_finding_audit",
+			Summary:  fmt.Sprintf("整任务判重：第 %d/%d 批，本批 %d 条（%s）", batchNo, batchTotal, len(targets), source),
+			Detail:   "强制重审，忽略此前的审计结论。",
+			Metadata: metaJSON})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	emit := func(r db.Activity) { e.emitActivity(t, r) }
+
+	var res *agent.AuditBatchResult
+	drained := false // 首次 attempt 已把这批全部合并掉（旧行都没了），重试时无目标
+	for attempt := 1; attempt <= auditMaxAttempts; attempt++ {
+		if attempt > 1 {
+			// 上一次 attempt 可能已经合并掉一部分（旧行已删除）；把老清单再喂给模型，
+			// 模型只会读到「不在范围内」，白烧一轮。重试前重新读库。
+			if fresh := e.refreshAuditTargets(ids); fresh != nil {
+				targets = fresh
+			}
+			if len(targets) == 0 {
+				res, err, drained = &agent.AuditBatchResult{}, nil, true
+				break
+			}
+		}
+		res, err = aud.AuditBatch(ctx, taskIDInt, e.m.components, t.Store, targets, source, emit)
+		if err == nil {
+			break
+		}
+		log.Printf("[audit] task %s: 批次第 %d 次失败: %v", key, attempt, err)
+		if attempt < auditMaxAttempts {
+			e.emitActivity(t, db.Activity{Worker: "auditor", Kind: "text", IsError: true,
+				Summary: "判重批次失败，重试一次：" + err.Error()})
+		}
+	}
+	if err != nil {
+		for _, f := range targets {
+			_ = e.m.pg.MarkFindingAudited(f.ID, db.FindingAuditError)
+		}
+		e.emitActivity(t, db.Activity{Worker: "auditor", Kind: "text", IsError: true,
+			Summary: "判重审计失败（已重试一次）：" + err.Error()})
+		e.recordAuditDone(key, ids)
+		return
+	}
+	e.recordAuditDone(key, ids)
+	if drained {
+		e.emitActivity(t, db.Activity{Worker: "auditor", Kind: "text",
+			Summary: "判重审计完成：本批条目已在首次尝试中全部合并"})
+		return
+	}
+	summary := fmt.Sprintf("判重审计完成：本批 %d 条，合并 %d 组，判不同 %d 条", len(targets), res.Merged, len(res.Distinct))
+	if len(res.Uncovered) > 0 {
+		summary += fmt.Sprintf("，待复核 %d 条", len(res.Uncovered))
+	}
+	e.emitActivity(t, db.Activity{Worker: "auditor", Kind: "text", Summary: summary})
+	log.Printf("[audit] task %s: %s", key, summary)
+}
+
+// refreshAuditTargets 重读本批漏洞，并剔除已经被合并掉的旧行。
+// 返回 nil 表示读库失败（调用方保留原清单）。
+func (e *Engine) refreshAuditTargets(ids []int64) []*db.DBFinding {
+	fresh, err := e.m.pg.FindingsByIDs(ids)
+	if err != nil {
+		log.Printf("[audit] 重试前重读漏洞失败: %v", err)
+		return nil
+	}
+	meta, err := e.m.pg.FindingAuditMeta(ids)
+	if err != nil {
+		return fresh
+	}
+	out := make([]*db.DBFinding, 0, len(fresh))
+	for _, f := range fresh {
+		if m, ok := meta[f.ID]; ok && m.Merged {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// nextAuditDayStart 返回本地时区次日 0 点（每日上限触顶后顺延到这里）。
+func nextAuditDayStart(now time.Time) time.Time {
+	return time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+}
+
+// takeAuditCapNotice 判断「今天这条上限提示写过没有」：写过返回 false。
+func (e *Engine) takeAuditCapNotice(key, day string) bool {
+	e.auditMu.Lock()
+	defer e.auditMu.Unlock()
+	q := e.auditQ[key]
+	if q == nil {
+		return true
+	}
+	if q.capNotice == day {
+		return false
+	}
+	q.capNotice = day
+	return true
+}
+
+// formatAuditIDList 渲染「#1、#2」。
+func formatAuditIDList(ids []int64) string {
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		parts = append(parts, "#"+strconv.FormatInt(id, 10))
+	}
+	return strings.Join(parts, "、")
+}
+
+// resolveAuditor 返回任务当前的审计角色（未注入或链路不可用时为 nil）。
+func (e *Engine) resolveAuditor(t *Task) *agent.Auditor {
+	if e.resolveAud == nil {
+		return nil
+	}
+	return e.resolveAud(t)
+}
+
+// AuditProgress 返回某任务当前的判重进度（待审条数、是否在跑、已完成/总数、批次数）。
+func (e *Engine) AuditProgress(taskID string) AuditProgress {
+	e.auditMu.Lock()
+	defer e.auditMu.Unlock()
+	out := AuditProgress{}
+	q := e.auditQ[taskID]
+	if q == nil {
+		return out
+	}
+	out.Pending = len(q.ids)
+	out.Running = q.running
+	out.Done = q.done
+	out.Total = q.total
+	out.BatchesDone = q.batchesDone
+	out.BatchesTotal = (q.total + auditBatchMax - 1) / auditBatchMax
+	if out.BatchesTotal < out.BatchesDone {
+		out.BatchesTotal = out.BatchesDone
+	}
+	if !q.running && !q.windowUntil.IsZero() {
+		left := time.Until(q.windowUntil)
+		if left > 0 {
+			out.WindowLeft = int((left + time.Second - 1) / time.Second) // 向上取整：29.2s 显示 30
+		}
+	}
+	return out
+}
+
+// AuditStatus 保留旧的二元接口（pending/running），供既有调用点使用。
+func (e *Engine) AuditStatus(taskID string) (pending int, running bool) {
+	p := e.AuditProgress(taskID)
+	return p.Pending, p.Running
 }

@@ -249,6 +249,7 @@ type Manager struct {
 const (
 	settingTrafficCapture      = "traffic_capture"
 	settingAgentTrafficBinding = "agent_traffic_binding"
+	settingFindingAuditEnabled = "finding_audit_enabled" // 漏洞判重审计总开关（默认开）
 	settingWebSearchOn         = "web_search_enabled"
 	settingWebSearchBackend    = "web_search_backend"
 	settingBraveKey            = "brave_search_api_key"
