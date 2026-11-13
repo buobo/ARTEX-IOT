@@ -7,9 +7,9 @@
 
 重心放在 **IoT 固件审计**：移除了面向公网资产的探测与扫描渗透，把“资产”换成“组件”——围绕固件里一个个可指认的组件（httpd、busybox、upnpd、MQTT 服务……）去做解包、逆向、漏洞验证与复现。
 
-**支持：固件解包 · 二进制逆向（IDA 无头反编译，Web 端直接读函数源码）· PoC 生成与复现（可录屏）· 组件级漏洞挖掘与覆盖度追踪。**
+**支持：固件解包 · 二进制逆向（IDA 无头反编译，Web 端直接读函数反汇编代码）· PoC 生成与复现（可自主录屏）· 组件级漏洞挖掘与覆盖度追踪。**
 
-反编译导出的前提是 **IDA 9.0+**（提供无头 `idat`）与 **INP.py**。IDA 出于版权考虑请自行安装，只要保证 9.0 及以上；INP 插件来源于开源项目 IDA-NO-MCP，但本项目的 `INP.py` 有改动，**请使用仓库根目录的这一份**。
+反编译导出的前提是 **IDA 9.0+**（提供无头 `idat`）与 **INP.py**。IDA 出于版权考虑请自行安装，只要保证 9.0 及以上；INP 插件来源于开源项目 [IDA-NO-MCP](https://github.com/P4nda0s/IDA-NO-MCP)，但本项目的 `INP.py` 有改动，**请使用仓库根目录的这一份**。
 
 把 `INP.py` 放到 IDA 安装目录的 `plugins/` 下，然后在「系统配置 → 反编译」里填写 IDA 安装目录（或设置环境变量 `ARTEX_IDA_DIR`，也可以把 `idat` 加进 `PATH`）。
 
@@ -23,29 +23,57 @@
 
 > 完整交互见[在线 Demo](https://artex-demo.vercel.app/)。
 
-| 仪表盘（总览 / Token 消耗 / 活动流） | 任务列表 |
-| :---: | :---: |
-| ![仪表盘](screenshots/dashboard.png) | ![任务](screenshots/tasks.png) |
+| 仪表盘（总览 / Token 消耗 / 活动流） |
+| :---: |
+| ![仪表盘](screenshots/dashboard.png) |
 
-| 任务 · 执行过程（会话 / 工具调用） | 探索链路 |
-| :---: | :---: |
-| ![执行过程](screenshots/sessions.png) | ![探索链路](screenshots/graph.png) |
+| 任务列表 |
+| :---: |
+| ![任务](screenshots/tasks.png) |
 
-| 发现（漏洞） | 组件库（组件版本 / 固件版本 / 厂商） |
-| :---: | :---: |
-| ![发现](screenshots/findings.png) | ![组件库](screenshots/component.png) |
+| 任务 · 执行过程（会话 / 工具调用） |
+| :---: |
+| ![执行过程](screenshots/sessions.png) |
 
-| 反编译（函数列表 + 源码） | 人在环路对话 |
-| :---: | :---: |
-| ![反编译](screenshots/decompile.png) | ![对话](screenshots/chat.png) |
+| 探索链路 |
+| :---: |
+| ![探索链路](screenshots/graph.png) |
 
-| Agent 管理 | LLM 配置 |
-| :---: | :---: |
-| ![Agent](screenshots/agents.png) | ![LLM](screenshots/llm.png) |
+| 发现（漏洞） |
+| :---: |
+| ![发现](screenshots/findings.png) |
 
-| 拦截审批 | 后端日志 |
-| :---: | :---: |
-| ![拦截](screenshots/intercept.png) | ![日志](screenshots/logs.png) |
+| 漏洞复测（结论 / 证据 / 录屏） |
+| :---: |
+| ![复测](screenshots/retest.png) |
+
+| 组件库（组件版本 / 固件版本 / 厂商） |
+| :---: |
+| ![组件库](screenshots/component.png) |
+
+| 反编译（函数列表 + 反汇编） |
+| :---: |
+| ![反编译](screenshots/decompile.png) |
+
+| 人在环路对话 |
+| :---: |
+| ![对话](screenshots/chat.png) |
+
+| Agent 管理 |
+| :---: |
+| ![Agent](screenshots/agents.png) |
+
+| LLM 配置 |
+| :---: |
+| ![LLM](screenshots/llm.png) |
+
+| 拦截审批 |
+| :---: |
+| ![拦截](screenshots/intercept.png) |
+
+| 后端日志 |
+| :---: |
+| ![日志](screenshots/logs.png) |
 
 
 ---
@@ -70,6 +98,7 @@
 ### 方式一：一键安装脚本（推荐）
 
 ```bash
+# 本项目是 ARTEX-God 的 IoT 分支
 git clone https://github.com/buobo/ARTEX-IOT.git
 cd ARTEX-IOT
 ./install.sh
@@ -472,6 +501,8 @@ https://github.com/oritera/Cairn
 https://github.com/Autumn-27/ARTEX
 
 https://github.com/Xiao1an/ARTEX-God
+
+https://github.com/P4nda0s/IDA-NO-MCP
 
 
 ## 许可与免责声明
