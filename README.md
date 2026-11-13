@@ -24,43 +24,43 @@
 > 完整交互见[在线 Demo](https://artex-demo.vercel.app/)。
 
 <p align="center"><img src="screenshots/dashboard.png" alt="仪表盘" width="100%"></p>
-<p align="center"><sub>仪表盘（总览 / Token 消耗 / 活动流）</sub></p>
+<h4 align="center">仪表盘（总览 / Token 消耗 / 活动流）</h4>
 
 <p align="center"><img src="screenshots/tasks.png" alt="任务" width="100%"></p>
-<p align="center"><sub>任务列表</sub></p>
+<h4 align="center">任务列表</h4>
 
 <p align="center"><img src="screenshots/sessions.png" alt="执行过程" width="100%"></p>
-<p align="center"><sub>任务 · 执行过程（会话 / 工具调用）</sub></p>
+<h4 align="center">任务 · 执行过程（会话 / 工具调用）</h4>
 
 <p align="center"><img src="screenshots/graph.png" alt="探索链路" width="100%"></p>
-<p align="center"><sub>探索链路</sub></p>
+<h4 align="center">探索链路</h4>
 
 <p align="center"><img src="screenshots/findings.png" alt="发现" width="100%"></p>
-<p align="center"><sub>发现（漏洞）</sub></p>
+<h4 align="center">发现（漏洞）</h4>
 
 <p align="center"><img src="screenshots/retest.png" alt="复测" width="100%"></p>
-<p align="center"><sub>漏洞复测（结论 / 证据 / 录屏）</sub></p>
+<h4 align="center">漏洞复测（结论 / 证据 / 录屏）</h4>
 
 <p align="center"><img src="screenshots/component.png" alt="组件库" width="100%"></p>
-<p align="center"><sub>组件库（组件版本 / 固件版本 / 厂商）</sub></p>
+<h4 align="center">组件库（组件版本 / 固件版本 / 厂商）</h4>
 
 <p align="center"><img src="screenshots/decompile.png" alt="反编译" width="100%"></p>
-<p align="center"><sub>反编译（函数列表 + 反汇编）</sub></p>
+<h4 align="center">反编译（函数列表 + 反汇编）</h4>
 
 <p align="center"><img src="screenshots/chat.png" alt="对话" width="100%"></p>
-<p align="center"><sub>人在环路对话</sub></p>
+<h4 align="center">人在环路对话</h4>
 
 <p align="center"><img src="screenshots/agents.png" alt="Agent" width="100%"></p>
-<p align="center"><sub>Agent 管理</sub></p>
+<h4 align="center">Agent 管理</h4>
 
 <p align="center"><img src="screenshots/llm.png" alt="LLM" width="100%"></p>
-<p align="center"><sub>LLM 配置</sub></p>
+<h4 align="center">LLM 配置</h4>
 
 <p align="center"><img src="screenshots/intercept.png" alt="拦截" width="100%"></p>
-<p align="center"><sub>拦截审批</sub></p>
+<h4 align="center">拦截审批</h4>
 
 <p align="center"><img src="screenshots/logs.png" alt="日志" width="100%"></p>
-<p align="center"><sub>后端日志</sub></p>
+<h4 align="center">后端日志</h4>
 
 ---
 
