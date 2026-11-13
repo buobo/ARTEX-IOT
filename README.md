@@ -23,58 +23,44 @@
 
 > 完整交互见[在线 Demo](https://artex-demo.vercel.app/)。
 
-| 仪表盘（总览 / Token 消耗 / 活动流） |
-| :---: |
-| ![仪表盘](screenshots/dashboard.png) |
+<p align="center"><img src="screenshots/dashboard.png" alt="仪表盘" width="100%"></p>
+<p align="center"><sub>仪表盘（总览 / Token 消耗 / 活动流）</sub></p>
 
-| 任务列表 |
-| :---: |
-| ![任务](screenshots/tasks.png) |
+<p align="center"><img src="screenshots/tasks.png" alt="任务" width="100%"></p>
+<p align="center"><sub>任务列表</sub></p>
 
-| 任务 · 执行过程（会话 / 工具调用） |
-| :---: |
-| ![执行过程](screenshots/sessions.png) |
+<p align="center"><img src="screenshots/sessions.png" alt="执行过程" width="100%"></p>
+<p align="center"><sub>任务 · 执行过程（会话 / 工具调用）</sub></p>
 
-| 探索链路 |
-| :---: |
-| ![探索链路](screenshots/graph.png) |
+<p align="center"><img src="screenshots/graph.png" alt="探索链路" width="100%"></p>
+<p align="center"><sub>探索链路</sub></p>
 
-| 发现（漏洞） |
-| :---: |
-| ![发现](screenshots/findings.png) |
+<p align="center"><img src="screenshots/findings.png" alt="发现" width="100%"></p>
+<p align="center"><sub>发现（漏洞）</sub></p>
 
-| 漏洞复测（结论 / 证据 / 录屏） |
-| :---: |
-| ![复测](screenshots/retest.png) |
+<p align="center"><img src="screenshots/retest.png" alt="复测" width="100%"></p>
+<p align="center"><sub>漏洞复测（结论 / 证据 / 录屏）</sub></p>
 
-| 组件库（组件版本 / 固件版本 / 厂商） |
-| :---: |
-| ![组件库](screenshots/component.png) |
+<p align="center"><img src="screenshots/component.png" alt="组件库" width="100%"></p>
+<p align="center"><sub>组件库（组件版本 / 固件版本 / 厂商）</sub></p>
 
-| 反编译（函数列表 + 反汇编） |
-| :---: |
-| ![反编译](screenshots/decompile.png) |
+<p align="center"><img src="screenshots/decompile.png" alt="反编译" width="100%"></p>
+<p align="center"><sub>反编译（函数列表 + 反汇编）</sub></p>
 
-| 人在环路对话 |
-| :---: |
-| ![对话](screenshots/chat.png) |
+<p align="center"><img src="screenshots/chat.png" alt="对话" width="100%"></p>
+<p align="center"><sub>人在环路对话</sub></p>
 
-| Agent 管理 |
-| :---: |
-| ![Agent](screenshots/agents.png) |
+<p align="center"><img src="screenshots/agents.png" alt="Agent" width="100%"></p>
+<p align="center"><sub>Agent 管理</sub></p>
 
-| LLM 配置 |
-| :---: |
-| ![LLM](screenshots/llm.png) |
+<p align="center"><img src="screenshots/llm.png" alt="LLM" width="100%"></p>
+<p align="center"><sub>LLM 配置</sub></p>
 
-| 拦截审批 |
-| :---: |
-| ![拦截](screenshots/intercept.png) |
+<p align="center"><img src="screenshots/intercept.png" alt="拦截" width="100%"></p>
+<p align="center"><sub>拦截审批</sub></p>
 
-| 后端日志 |
-| :---: |
-| ![日志](screenshots/logs.png) |
-
+<p align="center"><img src="screenshots/logs.png" alt="日志" width="100%"></p>
+<p align="center"><sub>后端日志</sub></p>
 
 ---
 
