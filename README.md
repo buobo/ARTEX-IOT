@@ -522,5 +522,5 @@ https://github.com/P4nda0s/IDA-NO-MCP
 
 感谢 SecureNexusLab 对本项目的大力支持与宣传推广
 
-![](screenshots/SNL-Logo.png)
+<img src="screenshots/SNL-Logo.png" width="25%">
 
