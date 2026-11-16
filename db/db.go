@@ -218,6 +218,46 @@ var builtinAgents = []builtinAgent{
 	}, false, intp(300)},
 }
 
+// migratePocBareNamePrompt 把库里的 PoC 提示词说法统一成「填 save_poc 返回的 name」。
+// 只对模板里还含旧句子的 agent 做定点替换并追加新版本（SavePrompt，旧版本留档可回滚）。
+func (d *DB) migratePocBareNamePrompt() error {
+	const oldText = "值取 save_poc 返回的 path"
+	const newText = "值取 save_poc 返回的 name（只填单层文件名，不要带 poc/ 前缀）"
+	rows, err := d.Query(`SELECT a.id, p.template_text FROM agents a
+JOIN agent_prompts p ON p.id = a.current_prompt_id
+WHERE p.template_text LIKE '%值取 save_poc 返回的 path%'`)
+	if err != nil {
+		return err
+	}
+	type hit struct {
+		id   int64
+		tmpl string
+	}
+	var hits []hit
+	for rows.Next() {
+		var h hit
+		if err := rows.Scan(&h.id, &h.tmpl); err != nil {
+			rows.Close()
+			return err
+		}
+		hits = append(hits, h)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, h := range hits {
+		next := strings.ReplaceAll(h.tmpl, oldText, newText)
+		if next == h.tmpl {
+			continue
+		}
+		if _, err := d.SavePrompt(h.id, next, "poc_files 统一为裸文件名", "system"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // seedBuiltins inserts the fixed built-in agents and their variable catalog (idempotent).
 func (d *DB) seedBuiltins() error {
 	for _, a := range builtinAgents {
@@ -256,6 +296,16 @@ ON CONFLICT (agent_id, var_name) DO UPDATE
 			return fmt.Errorf("seed interactive_shell defaults: %w", err)
 		}
 		_ = d.SetSetting("interactive_shell_default_v1", "true")
+	}
+	// poc_files 统一为裸文件名（一次性）：把已种进库的旧说法「值取 save_poc 返回的 path」
+	// 定点替换成「值取 save_poc 返回的 name」。只换这一句、不重写整篇——用户可能自己改过
+	// prompt，整篇覆盖会吃掉他的编辑；替换不到（已经改过）就只置标记。
+	// 放 Go 侧而不是 schema.sql：后者每次启动都重放，裸 UPDATE 会反复执行。
+	if v, _, _ := d.GetSetting("poc_bare_name_v1"); v != "true" {
+		if err := d.migratePocBareNamePrompt(); err != nil {
+			return fmt.Errorf("migrate poc_files prompt: %w", err)
+		}
+		_ = d.SetSetting("poc_bare_name_v1", "true")
 	}
 	// Seed the built-in browser (Playwright) MCP once — DISABLED by default (用户
 	// 需要时自行启用), no proxy by default. The traffic-capture toggle injects/strips

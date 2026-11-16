@@ -5,10 +5,11 @@ import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
-import { ArrowLeftIcon, ArrowUpRightIcon, RefreshCwIcon, ShieldAlertIcon } from "lucide-react";
+import { ArrowLeftIcon, ArrowUpRightIcon, DownloadIcon, RefreshCwIcon, ShieldAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
+import { FindingDownloadDialog } from "@/components/finding-download-dialog";
 import { FindingRetestPanel } from "@/components/finding-retest-panel";
 import { FindingTrafficPanel } from "@/components/finding-traffic-panel";
 import { Markdown } from "@/components/markdown";
@@ -24,6 +25,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { statusMeta } from "@/lib/status";
 import type { Finding, FindingStatus, Severity } from "@/lib/types";
+import { BACK_TO_PARAM, backTo, withFrom } from "@/lib/utils";
 
 import { FindingLineageView } from "./lineage";
 
@@ -58,9 +60,15 @@ function FindingDetailInner() {
   const searchParams = useSearchParams();
   const id = searchParams.get("id") ?? "";
   const contextTaskId = searchParams.get("context_task") ?? "";
+  // 返回按钮回到来的那一页（列表 / 任务详情的某个 tab / 仪表盘…），没有 from 时回发现列表。
+  const backHref = backTo(searchParams.get(BACK_TO_PARAM), "/function/findings");
+  // 本页地址：页内跳任务详情时带上它，任务详情的返回就能回到这里。
+  const hereUrl = `/function/findings/detail?${searchParams.toString()}`;
   const [finding, setFinding] = React.useState<Finding | null>(null);
   const [loaded, setLoaded] = React.useState(false);
   const [tab, setTab] = React.useState("overview");
+  // 产物下载：一个 finding 一个包（只含这条漏洞的东西）。
+  const [downloadOpen, setDownloadOpen] = React.useState(false);
   const [auditing, setAuditing] = React.useState(false);
 
   const load = React.useCallback(() => {
@@ -139,8 +147,8 @@ function FindingDetailInner() {
         )}
         {loaded && (
           <Button asChild variant="outline">
-            <Link href="/function/findings">
-              <ArrowLeftIcon /> 返回发现列表
+            <Link href={backHref}>
+              <ArrowLeftIcon /> 返回
             </Link>
           </Button>
         )}
@@ -157,7 +165,7 @@ function FindingDetailInner() {
         <div className="flex flex-wrap items-center gap-2">
           <SidebarTrigger className="-ml-1" />
           <Button asChild variant="ghost" size="icon" className="size-7">
-            <Link href="/function/findings">
+            <Link href={backHref} title="返回上一页">
               <ArrowLeftIcon />
             </Link>
           </Button>
@@ -190,6 +198,17 @@ function FindingDetailInner() {
             </Badge>
           )}
           <div className="ml-auto flex items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs"
+              onClick={() => setDownloadOpen(true)}
+              title="下载这条漏洞的报告、PoC、复现视频与证据"
+            >
+              <DownloadIcon className="size-3.5" />
+              下载产物
+            </Button>
             <Button
               type="button"
               variant="ghost"
@@ -247,7 +266,7 @@ function FindingDetailInner() {
                         <div className="flex shrink-0 items-center gap-1.5">
                           {m.task_id && (
                             <Link
-                              href={`/function/tasks/detail?id=${m.task_id}`}
+                              href={withFrom(`/function/tasks/detail?id=${m.task_id}`, hereUrl)}
                               className="text-xs text-primary hover:underline"
                             >
                               任务 #{m.task_id}
@@ -261,7 +280,13 @@ function FindingDetailInner() {
                   </CardContent>
                 </Card>
               )}
-              <FindingRetestPanel key={id} findingId={id} readOnly={finding.inherited} onCompleted={load} />
+              <FindingRetestPanel
+                key={id}
+                findingId={id}
+                readOnly={finding.inherited}
+                from={hereUrl}
+                onCompleted={load}
+              />
               <Card>
                 <CardHeader>
                   <CardTitle className="text-sm">证据 / PoC</CardTitle>
@@ -393,7 +418,7 @@ function FindingDetailInner() {
                 <FieldRow label="所属任务">
                   {finding.task_id ? (
                     <Link
-                      href={`/function/tasks/detail?id=${finding.task_id}`}
+                      href={withFrom(`/function/tasks/detail?id=${finding.task_id}`, hereUrl)}
                       className="inline-flex max-w-[16rem] items-center gap-1 text-primary hover:underline"
                       title={finding.task_description}
                     >
@@ -419,6 +444,13 @@ function FindingDetailInner() {
           <FindingLineageView findingId={finding.id} />
         </TabsContent>
       </div>
+      {downloadOpen ? (
+        <FindingDownloadDialog
+          findingIds={[finding.id]}
+          findingName={title}
+          onClose={() => setDownloadOpen(false)}
+        />
+      ) : null}
     </Tabs>
   );
 }

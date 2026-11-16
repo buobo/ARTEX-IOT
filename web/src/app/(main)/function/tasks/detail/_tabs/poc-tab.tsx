@@ -6,6 +6,7 @@ import { CheckIcon, CopyIcon, DownloadIcon, FileCode2Icon, RefreshCwIcon } from 
 import { toast } from "sonner";
 
 import { api } from "@/lib/api";
+import { withFrom } from "@/lib/utils";
 import type { PocFileContent, PocFileEntry } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -179,14 +180,18 @@ export function HighlightedCode({
 
 // ---------------- 关联漏洞 ----------------
 
-function FindingChips({ refs }: { refs: PocFileEntry["referenced_by"] }) {
+function FindingChips({ refs, taskId }: { refs: PocFileEntry["referenced_by"]; taskId: string }) {
   if (refs.length === 0) {
     return <span className="text-muted-foreground text-xs">未关联漏洞</span>;
   }
   return (
     <div className="flex flex-wrap gap-1">
       {refs.map((r) => (
-        <Link key={r.id} href={`/function/findings/detail?id=${r.id}`} title={r.severity || ""}>
+        <Link
+          key={r.id}
+          href={withFrom(`/function/findings/detail?id=${r.id}`, `/function/tasks/detail?id=${encodeURIComponent(taskId)}&tab=poc`)}
+          title={r.severity || ""}
+        >
           <Badge
             variant="outline"
             className={`text-xs ${SEVERITY_STYLE[(r.severity || "").toLowerCase()] ?? ""}`}
@@ -265,7 +270,7 @@ function PocViewer({
           <DialogDescription asChild>
             <div className="flex flex-wrap items-center gap-2 pt-2">
               <span className="text-muted-foreground text-xs">关联漏洞：</span>
-              <FindingChips refs={file?.referenced_by ?? []} />
+              <FindingChips refs={file?.referenced_by ?? []} taskId={taskId} />
             </div>
           </DialogDescription>
         </DialogHeader>
@@ -374,7 +379,7 @@ export function PocTab({ taskId }: { taskId: string }) {
                     {new Date(f.modified_at).toLocaleString("zh-CN")}
                   </TableCell>
                   <TableCell>
-                    <FindingChips refs={f.referenced_by} />
+                    <FindingChips refs={f.referenced_by} taskId={taskId} />
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">

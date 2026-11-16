@@ -238,6 +238,57 @@ function interceptPageQuery(page: number, size: number, filter: InterceptApprova
   return query.toString();
 }
 
+// ---- 漏洞产物（每个 finding 一个包） ----
+export type FindingArtifactKey = "report" | "poc" | "video" | "traffic" | "evidence";
+
+export interface FindingArtifactFile {
+  name: string;
+  bytes: number;
+  duration_ms?: number;
+}
+
+export interface FindingArtifactItem {
+  key: FindingArtifactKey;
+  label: string;
+  count: number;
+  bytes: number;
+  available: boolean;
+  note?: string;
+  files: FindingArtifactFile[];
+}
+
+export interface FindingArtifactSet {
+  id: number;
+  name: string;
+  task_id: number;
+  total_bytes: number;
+  items: FindingArtifactItem[];
+}
+
+// authHeaders 统一鉴权头（没有 token 时返回空对象）。
+function authHeaders(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// saveBlobResponse 把 fetch 的二进制响应存成本地文件，文件名取 Content-Disposition
+// （filename* 优先，中文中文名不乱码；取不到用兜底名）。
+async function saveBlobResponse(r: Response, fallbackName: string) {
+  const blob = await r.blob();
+  const disp = r.headers.get("Content-Disposition") ?? "";
+  const star = disp.match(/filename\*=UTF-8''([^;]+)/i);
+  const plain = disp.match(/filename="?([^";]+)"?/i);
+  const filename = star ? decodeURIComponent(star[1]) : (plain?.[1] ?? fallbackName);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export const api = {
   // 后端应用版本号（release 时由 ldflags 注入，默认 "dev"）。
   health: () => get<{ ok: boolean; service: string; version: string }>("/health"),
@@ -699,7 +750,7 @@ export const api = {
   // exportFindings 触发发现页导出并下载文件。scope=selected 时传 ids(finding_id 列表);
   // scope=filtered 时传当前筛选(沿用 FindingQuery 的筛选字段);scope=all 忽略筛选。
   exportFindings: async (opts: {
-    format: "md-single" | "md-zip" | "csv" | "json";
+    format: "md-single" | "md-zip" | "csv" | "json" | "zip";
     scope: "filtered" | "all" | "selected";
     filters?: Omit<FindingQuery, "page" | "pageSize">;
     ids?: string[];
@@ -710,24 +761,43 @@ export const api = {
     } else if (opts.scope === "filtered" && opts.filters) {
       for (const [k, v] of findingFilterParams(opts.filters)) p.set(k, v);
     }
-    const token = getToken();
-    const r = await fetch(`/api/exploration/findings/export?${p.toString()}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
+    const r = await fetch(`/api/exploration/findings/export?${p.toString()}`, { headers: authHeaders() });
     if (!r.ok) throw new Error(`export: ${r.status}`);
-    const blob = await r.blob();
-    // 文件名优先取后端 Content-Disposition,取不到则用默认名。
-    const disp = r.headers.get("Content-Disposition") ?? "";
-    const m = disp.match(/filename="?([^"]+)"?/);
-    const filename = m?.[1] ?? `findings-export`;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    await saveBlobResponse(r, "findings-export");
+  },
+  // findingArtifacts 拉漏洞的产物清单(format=manifest,不下载文件),弹框据此渲染勾选项。
+  findingArtifacts: async (ids: string | string[]): Promise<FindingArtifactSet[]> => {
+    const list = Array.isArray(ids) ? ids : [ids];
+    const p = new URLSearchParams({ format: "manifest", scope: "selected", ids: list.join(",") });
+    const res = await get<{ generated_at: string; findings: FindingArtifactSet[] }>(
+      `/exploration/findings/export?${p.toString()}`,
+    );
+    return res.findings ?? [];
+  },
+  // downloadFindingArtifacts 按勾选项下载产物包:一个 finding 一个 zip,批量时外层再打一层。
+  // files 是逐文件勾选的产物条目名（如 "poc/x.py" / "videos/3-terminal-31s.mp4"），
+  // 传了就只打这些文件；不传 = items 里各类别的全部文件。
+  downloadFindingArtifacts: async (
+    ids: string | string[],
+    items: FindingArtifactKey[],
+    files?: string[],
+  ) => {
+    const list = Array.isArray(ids) ? ids : [ids];
+    const p = new URLSearchParams({ format: "zip", scope: "selected", ids: list.join(",") });
+    if (items.length > 0) p.set("items", items.join(","));
+    if (files && files.length > 0) p.set("files", files.join(","));
+    const r = await fetch(`/api/exploration/findings/export?${p.toString()}`, { headers: authHeaders() });
+    if (!r.ok) {
+      let msg = `下载失败: ${r.status}`;
+      try {
+        const j = (await r.json()) as { error?: string };
+        if (j?.error) msg = j.error;
+      } catch {
+        // 非 JSON 错误体:保留状态码文案
+      }
+      throw new Error(msg);
+    }
+    await saveBlobResponse(r, `findings-${Date.now()}.zip`);
   },
   // ---- 判重审计 ----
   // auditFinding 把单条漏洞强制送审(忽略 audited_at);auditTaskFindings 把整任务在
@@ -825,6 +895,11 @@ export const api = {
     ),
   activeFindingRetests: () =>
     get<{ retests: ActiveFindingRetest[] }>("/exploration/findings/retests/active").then((r) => arr(r.retests)),
+  // deleteFindingRetest 硬删一条复测记录及其录屏文件、复测会话与转录（人侧专用，不可恢复）。
+  deleteFindingRetest: (retestId: number) =>
+    del<{ deleted: number; recordings: number; bytes: number; conversation_deleted: boolean; warnings?: string[] }>(
+      `/exploration/finding-retests/${retestId}`,
+    ),
   startFindingRetest: (id: string, notes: string) =>
     post<{ retest: FindingRetest; created: boolean }>(`/exploration/findings/${encodeURIComponent(id)}/retests`, {
       notes,

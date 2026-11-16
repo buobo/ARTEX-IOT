@@ -807,6 +807,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/findings/retests/active", s.listActiveFindingRetests)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/retests", s.startFindingRetest)
 	mux.HandleFunc("GET /api/finding-retest-recordings/{id}/stream", s.streamFindingRetestRecording)
+	// 人侧专用：硬删一条复测记录及其录屏/会话/转录（Agent 工具面不暴露）。
+	mux.HandleFunc("DELETE /api/exploration/finding-retests/{id}", s.deleteFindingRetest)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
 	// 漏洞判重审计（人工触发）：单条强制重审 / 整任务判重 / 进度查询。
 	mux.HandleFunc("POST /api/exploration/findings/{id}/audit", s.auditFinding)
@@ -2207,7 +2209,13 @@ func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 //	scope   = filtered（沿用页面筛选）| all（全部）| selected（勾选的 ids）
 //	format  = md-single（整合一份 .md）| md-zip（一漏洞一 .md,打包 zip）
 //	          | csv | json
+//	          | manifest（单条漏洞的产物清单 JSON，弹框用，不下载）
+//	          | zip（产物包：一个 finding 一个 zip，批量时外层再打一层）
 //	ids     = 逗号分隔的 finding id（scope=selected 时必填）
+//	items   = format=manifest|zip 时勾选的产物，逗号分隔：
+//	          report,poc,video,traffic,evidence（缺省=全部）
+//	files   = format=zip 时逐文件勾选，逗号分隔的产物条目名（如 report.md,poc/x.py）；
+//	          只接受这条漏洞清单里出现过的名字，缺省=items 全选
 //	筛选参数 severity/status/vulnclass/task_id/q/sort 与列表接口一致（scope=filtered 用）。
 func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -2255,7 +2263,7 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer os.RemoveAll(stage)
-	if err = s.evidenceStore().StageFindingsExport(r.Context(), fs, stage, format == "md-zip"); err != nil {
+	if err = s.evidenceStore().StageFindingsExport(r.Context(), fs, stage, format == "md-zip" || format == "zip"); err != nil {
 		evidenceError(w, err)
 		return
 	}
@@ -2263,7 +2271,9 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	stamp := now.Format("20060102-150405")
 	setDownload := func(contentType, filename string) {
 		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+		// RFC 5987 filename* 让中文 finding 名不乱码；filename 作兜底。
+		w.Header().Set("Content-Disposition",
+			`attachment; filename="`+sanitizeFilename(filename)+`"; filename*=UTF-8''`+url.PathEscape(filename))
 	}
 
 	switch format {
@@ -2301,6 +2311,94 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(out)
+	case "manifest":
+		want, err := parseFindingArtifactItems(q.Get("items"))
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		sets := make([]findingArtifactSet, 0, len(fs))
+		for _, f := range fs {
+			sets = append(sets, s.findingArtifacts(r.Context(), f, want))
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]any{"generated_at": now.Format(time.RFC3339), "findings": sets})
+	case "zip":
+		want, err := parseFindingArtifactItems(q.Get("items"))
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		// sets 既是清单也是白名单：files 只能挑这里出现过的条目名。
+		sets := make([]findingArtifactSet, 0, len(fs))
+		for _, f := range fs {
+			sets = append(sets, s.findingArtifacts(r.Context(), f, want))
+		}
+		var only map[string]bool
+		if _, hasFiles := q["files"]; hasFiles {
+			only = parseFindingArtifactFiles(q.Get("files"))
+			if len(only) == 0 {
+				writeErr(w, 400, "files 为空：至少要勾选一个文件")
+				return
+			}
+			if err := validateArtifactFiles(sets, only); err != nil {
+				writeErr(w, 400, err.Error())
+				return
+			}
+		}
+		// 勾选项里一个可用（且被选中）的条目都没有 → 直接 400，不返回空包。
+		usable := false
+		for _, set := range sets {
+			for _, item := range set.Items {
+				if !item.Available {
+					continue
+				}
+				for _, file := range item.Files {
+					if only == nil || only[file.Name] {
+						usable = true
+					}
+				}
+			}
+		}
+		if !usable {
+			writeErr(w, 400, "所选漏洞都没有可下载产物")
+			return
+		}
+		if len(fs) == 1 {
+			// 单条：直接返回这条 finding 的包（根下就是 report.md / poc/ / videos/ …）。
+			name := findingZipName(fs[0])
+			path := filepath.Join(stage, name)
+			if _, err := s.buildFindingArtifactZip(r.Context(), path, fs[0], want, only, stage, now); err != nil {
+				writeErr(w, 500, err.Error())
+				return
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				writeErr(w, 500, err.Error())
+				return
+			}
+			defer file.Close()
+			setDownload("application/zip", name)
+			http.ServeContent(w, r, name, now, file)
+			return
+		}
+		// 批量：外层 zip 里每条 finding 一个独立 zip，绝不混装。
+		path := filepath.Join(stage, "findings.zip")
+		if err := s.buildFindingsArtifactBundle(r.Context(), path, fs, want, only, stage, now); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		defer file.Close()
+		setDownload("application/zip", "findings-"+stamp+".zip")
+		http.ServeContent(w, r, "findings.zip", now, file)
 	default:
 		writeErr(w, 400, "bad format: "+format)
 	}

@@ -605,6 +605,103 @@ func (s *Server) retestTerminalSnapshot(ctx context.Context, in json.RawMessage)
 
 // streamFindingRetestRecording 播放录屏。文件随任务归档时会消失，
 // 这里返回 409 + 明确提示，而不是让前端看到莫名的 404。
+// deleteFindingRetest 硬删一条复测记录及其全部相关数据（**人侧专用**，Agent 工具面没有）：
+// 复测行 + 录屏行（外键 CASCADE）、录屏目录（mp4 与直敲留下的 .cmd 脚本）、
+// 复测会话及其转录文件。没有软删/回收站，删了不可恢复。
+//
+// 运行中的复测一律拒绝：录制协程还在往 mp4 和 DB 写，边删边写会留下半截文件与脏行。
+func (s *Server) deleteFindingRetest(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	id, ok := pathInt(r, "id")
+	if !ok || id <= 0 {
+		writeErr(w, 400, "bad retest id")
+		return
+	}
+	ctx := r.Context()
+	retest, err := pg.FindingRetestByID(ctx, id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if retest == nil {
+		writeErr(w, 404, "复测记录已删除")
+		return
+	}
+	recs, err := pg.RetestRecordingsAll(ctx, id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if retest.Status == "pending" || retest.Status == "running" {
+		writeErr(w, 409, "该复测仍在进行，请先在会话里停止再删")
+		return
+	}
+	for _, rec := range recs {
+		switch rec.Status {
+		case "starting", "recording", "stopping":
+			writeErr(w, 409, "该复测的录屏仍在录制，请先停止录屏再删")
+			return
+		}
+	}
+
+	var warnings []string
+	var freed int64
+	for _, rec := range recs {
+		if rec.TmuxSession != "" {
+			_ = exec.Command("tmux", "kill-session", "-t", rec.TmuxSession).Run()
+		}
+		freed += rec.SizeBytes
+		// 录屏行自带 task_id：按行定位目录，不猜当前上下文任务。
+		dir := filepath.Join(s.m.dir, "tasks", strconv.FormatInt(rec.TaskID, 10),
+			"recordings", strconv.FormatInt(rec.RetestID, 10))
+		if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
+			warnings = append(warnings, fmt.Sprintf("录屏目录删除失败 %s: %v", dir, err))
+		}
+	}
+
+	convDeleted := false
+	if retest.ConversationID != nil {
+		convID := *retest.ConversationID
+		s.cancelConversation(convID)
+		if err := pg.DeleteConversation(convID); err != nil {
+			warnings = append(warnings, "删除复测会话失败: "+err.Error())
+		} else {
+			convDeleted = true
+			// 转录文件按会话名匹配（conv-<id>.jsonl / conv-<id>-xxx），存在的都清掉。
+			matches, _ := filepath.Glob(filepath.Join(s.m.dir, "transcripts", fmt.Sprintf("conv-%d*", convID)))
+			for _, m := range matches {
+				if err := os.RemoveAll(m); err != nil && !os.IsNotExist(err) {
+					warnings = append(warnings, fmt.Sprintf("转录文件删除失败 %s: %v", m, err))
+				}
+			}
+		}
+	}
+
+	deleted, err := pg.DeleteFindingRetest(ctx, id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if !deleted {
+		writeErr(w, 404, "复测记录已删除")
+		return
+	}
+	log.Printf("[retest %d] 人工删除：录屏 %d 段 / %d 字节，会话 %v", id, len(recs), freed, convDeleted)
+	res := map[string]any{
+		"deleted":              id,
+		"recordings":           len(recs),
+		"bytes":                freed,
+		"conversation_deleted": convDeleted,
+	}
+	if len(warnings) > 0 {
+		res["warnings"] = warnings
+	}
+	writeJSON(w, 200, res)
+}
+
 func (s *Server) streamFindingRetestRecording(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {

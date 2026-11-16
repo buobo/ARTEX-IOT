@@ -50,7 +50,7 @@ import type {
   FindingStatus,
   Severity,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, withFrom } from "@/lib/utils";
 
 import { ComponentTree, componentPathOf } from "./_components/component-tree";
 import {
@@ -251,7 +251,9 @@ export default function FindingsPage() {
   // 导出弹窗状态:范围(当前筛选/全部/选中) × 格式(md 单文件/md 分文件 zip/csv/json)。
   const [exportOpen, setExportOpen] = React.useState(false);
   const [exportScope, setExportScope] = React.useState<"filtered" | "all" | "selected">("filtered");
-  const [exportFormat, setExportFormat] = React.useState<"md-single" | "md-zip" | "csv" | "json">("md-single");
+  const [exportFormat, setExportFormat] = React.useState<"md-single" | "md-zip" | "csv" | "json" | "zip">(
+    "md-single",
+  );
   const [exporting, setExporting] = React.useState(false);
 
   const toggleSelected = React.useCallback((id: string, checked: boolean) => {
@@ -1075,7 +1077,7 @@ export default function FindingsPage() {
                         {group.task_id !== null && (
                           <Button size="icon-sm" variant="ghost" asChild>
                             <Link
-                              href={`/function/tasks/detail?id=${group.task_id}`}
+                              href={withFrom(`/function/tasks/detail?id=${group.task_id}`, "/function/findings")}
                               aria-label={`查看任务 #${group.task_id}`}
                             >
                               <ArrowUpRightIcon />
@@ -1243,6 +1245,9 @@ export default function FindingsPage() {
                 </label>
                 <label htmlFor="export-format-json" className="flex items-center gap-2 text-sm">
                   <RadioGroupItem id="export-format-json" value="json" /> JSON（.json）
+                </label>
+                <label htmlFor="export-format-zip" className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem id="export-format-zip" value="zip" /> 全产物 zip（报告+PoC+视频+证据，一漏洞一个包）
                 </label>
               </RadioGroup>
             </div>

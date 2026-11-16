@@ -173,6 +173,47 @@ func (d *DB) FindingRetestForConversation(ctx context.Context, conversationID in
 	return r, err
 }
 
+// FindingRetestByID 取单条复测记录（含 snapshot）；不存在返回 (nil, nil)。
+func (d *DB) FindingRetestByID(ctx context.Context, id int64) (*FindingRetest, error) {
+	r, err := scanRetest(d.QueryRowContext(ctx, `SELECT `+retestCols+` FROM finding_retests WHERE id=$1`, id))
+	if err != nil || r == nil {
+		return r, err
+	}
+	err = d.QueryRowContext(ctx, `SELECT snapshot FROM finding_retests WHERE id=$1`, r.ID).Scan(&r.Snapshot)
+	return r, err
+}
+
+// RetestRecordingsAll 取该复测的全部录屏行（**含已丢弃**），供人侧硬删除时找齐
+// 文件路径与 tmux 会话；人侧展示仍用过滤 discarded 的查询。
+func (d *DB) RetestRecordingsAll(ctx context.Context, retestID int64) ([]*FindingRetestRecording, error) {
+	rows, err := d.QueryContext(ctx, `SELECT `+recordingCols+` FROM finding_retest_recordings
+WHERE retest_id=$1 ORDER BY id`, retestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*FindingRetestRecording{}
+	for rows.Next() {
+		r, err := scanRecording(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// DeleteFindingRetest 硬删一条复测记录；录屏行由外键 ON DELETE CASCADE 带走。
+// 只在人侧删除接口里调用（Agent 工具面没有这个能力）。
+func (d *DB) DeleteFindingRetest(ctx context.Context, id int64) (bool, error) {
+	res, err := d.ExecContext(ctx, `DELETE FROM finding_retests WHERE id=$1`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
 // FailPendingRetestForConversation seals a conversation's unfinished retest when
 // the runner could not even load it — the retest ID is unknown on that path, so
 // the conversation ID is the only handle. Without it a transient read error

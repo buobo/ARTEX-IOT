@@ -1246,11 +1246,11 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 // --- worker write tools ---
 
 func (t *ToolSet) addFinding() actool.CoreTool {
-	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。PoC 文件用 poc_files 参数传（值取 save_poc 返回的 path），工具会逐个校验文件存在，缺一个就登记失败。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
+	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。PoC 文件用 poc_files 参数传（值取 save_poc 返回的 name，只填单层文件名，不要带 poc/ 前缀），工具会逐个校验文件存在，缺一个就登记失败。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
 		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要"),
 		"intent_id": idp("当前任务的意图 id"), "component_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响组件 id"},
 		"evidence":         str("证据/PoC 文本（人类可读）；PoC 文件请在 poc_files 里给文件名"),
-		"poc_files":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "PoC 文件名数组，取自 save_poc 返回的 path（如 [\"cgi_inject.py\"] 或 [\"poc/cgi_inject.py\"]）；文件必须已存在，否则登记失败"},
+		"poc_files":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "PoC 文件名数组，取 save_poc 返回的 name（如 [\"cgi_inject.py\"]）：只填单层文件名，不要带 poc/ 前缀或目录（物理路径由工具拼接）；文件必须已存在，否则登记失败并给出该查的目录"},
 		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
 		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。",
 			"items": obj(map[string]any{"traffic_id": str("traffic_search 返回的真实流量 ID"), "role": map[string]any{"type": "string", "enum": []string{"baseline", "proof", "verification", "supporting"}}, "note": str("该流量如何支持漏洞结论")}, "traffic_id")},

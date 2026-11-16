@@ -37,6 +37,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
+import { BACK_TO_PARAM, backTo, withFrom } from "@/lib/utils";
 import type { LLMProfile, Task } from "@/lib/types";
 
 import { ComponentsTab } from "./_tabs/components-tab";
@@ -66,6 +67,8 @@ const TABS = [
   { value: "intercept", label: "拦截审批" },
   { value: "report", label: "报告" },
 ];
+
+const TASK_TABS: string[] = TABS.map((t) => t.value);
 
 function taskProfileIDs(task: Task): string[] {
   if (task.llm_profile_ids && task.llm_profile_ids.length > 0) {
@@ -213,7 +216,24 @@ function TaskDetailInner() {
   const [task, setTask] = React.useState<Task | null>(null);
   const [paused, setPaused] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
-  const [tab, setTab] = React.useState("sessions");
+  // tab 进 URL：从漏洞详情「返回」时能回到原来的 tab（?tab=findings 等）。
+  const [tab, setTabState] = React.useState(() => {
+    const t = searchParams.get("tab");
+    return t && TASK_TABS.includes(t) ? t : "sessions";
+  });
+  const setTab = React.useCallback(
+    (next: string) => {
+      setTabState(next);
+      const q = new URLSearchParams(searchParams.toString());
+      q.set("tab", next);
+      router.replace(`/function/tasks/detail?${q.toString()}`, { scroll: false });
+    },
+    [router, searchParams],
+  );
+  // 返回按钮回到来的那一页（任务列表 / 漏洞详情 / 仪表盘…），没有 from 时回任务列表。
+  const backHref = backTo(searchParams.get(BACK_TO_PARAM), "/function/tasks");
+  // 本页地址：传给页内跳漏洞详情时用，漏洞详情的返回能回到这里（带当前 tab）。
+  const hereUrl = `/function/tasks/detail?id=${encodeURIComponent(id)}&tab=${tab}`;
   const [interceptPendingCount, setInterceptPendingCount] = React.useState(0);
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
   const [archiving, setArchiving] = React.useState(false);
@@ -310,8 +330,8 @@ function TaskDetailInner() {
         <p className="text-muted-foreground">{loaded ? `任务 ${id} 已被删除、归档或不存在` : "加载中…"}</p>
         {loaded && (
           <Button asChild variant="outline">
-            <Link href="/function/tasks">
-              <ArrowLeftIcon /> 返回任务列表
+            <Link href={backHref}>
+              <ArrowLeftIcon /> 返回
             </Link>
           </Button>
         )}
@@ -358,7 +378,7 @@ function TaskDetailInner() {
         <div className="flex items-center gap-2">
           <SidebarTrigger className="-ml-1" />
           <Button asChild variant="ghost" size="icon" className="size-7">
-            <Link href="/function/tasks">
+            <Link href={backHref} title="返回上一页">
               <ArrowLeftIcon />
             </Link>
           </Button>

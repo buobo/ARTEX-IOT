@@ -4,9 +4,17 @@ import * as React from "react";
 
 import Link from "next/link";
 
-import { ArrowDownIcon, ArrowUpIcon, ArrowUpRightIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react";
+import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  ArrowUpRightIcon,
+  ChevronRightIcon,
+  DownloadIcon,
+  RefreshCwIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 
+import { FindingDownloadDialog } from "@/components/finding-download-dialog";
 import { StatusBadge } from "@/components/status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,7 +24,7 @@ import { api } from "@/lib/api";
 import { useStoredSortPreference } from "@/lib/sort-preference";
 import { statusMeta } from "@/lib/status";
 import type { AuditQueueStatus, Finding, FindingStatus } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, withFrom } from "@/lib/utils";
 
 type FindingSortField = "time";
 
@@ -49,12 +57,14 @@ function Row({
   contextTaskId,
   onStatus,
   onAudit,
+  onDownload,
   auditing,
 }: {
   f: Finding;
   contextTaskId: string;
   onStatus: (f: Finding, next: FindingStatus) => void;
   onAudit: (f: Finding) => void;
+  onDownload: (f: Finding) => void;
   auditing: boolean;
 }) {
   const [open, setOpen] = React.useState(false);
@@ -121,6 +131,17 @@ function Row({
         {f.finding_id && (
           <button
             type="button"
+            onClick={() => onDownload(f)}
+            className="text-muted-foreground hover:text-primary inline-flex shrink-0 items-center gap-0.5 text-xs"
+            title="下载这条漏洞的报告、PoC、复现视频与证据"
+          >
+            <DownloadIcon className="size-3" />
+            导出
+          </button>
+        )}
+        {f.finding_id && (
+          <button
+            type="button"
             onClick={() => onAudit(f)}
             disabled={auditing}
             className="text-muted-foreground hover:text-primary inline-flex shrink-0 items-center gap-0.5 text-xs disabled:opacity-40"
@@ -131,11 +152,12 @@ function Row({
         )}
         {f.finding_id && (
           <Link
-            href={
+            href={withFrom(
               f.inherited
                 ? `/function/findings/detail?id=${f.finding_id}&context_task=${contextTaskId}`
-                : `/function/findings/detail?id=${f.finding_id}`
-            }
+                : `/function/findings/detail?id=${f.finding_id}`,
+              `/function/tasks/detail?id=${encodeURIComponent(contextTaskId)}&tab=findings`,
+            )}
             className="text-muted-foreground hover:text-primary inline-flex shrink-0 items-center gap-0.5 text-xs"
             title="查看漏洞详情"
           >
@@ -187,6 +209,8 @@ export function FindingsTab({ taskId }: { taskId: string }) {
 
   const [audit, setAudit] = React.useState<AuditQueueStatus | null>(null);
   const [auditing, setAuditing] = React.useState(false);
+  // 下载产物：一个 finding 一个包。
+  const [downloadTarget, setDownloadTarget] = React.useState<{ id: string; name: string } | null>(null);
   // 静默窗口倒计时：轮询每 3 秒给一次 window_left，前端每秒自减，
   // 两次轮询之间秒数也在动（否则按钮上的秒数是死的）。
   // 点击判重时本地先把窗口置成 30，等下一次轮询再用后端值校准。
@@ -347,6 +371,12 @@ export function FindingsTab({ taskId }: { taskId: string }) {
             contextTaskId={taskId}
             onStatus={onStatus}
             onAudit={onAuditOne}
+            onDownload={(row) =>
+              setDownloadTarget({
+                id: String(row.finding_id),
+                name: row.name || row.vulnclass || `#${row.finding_id}`,
+              })
+            }
             auditing={auditing}
           />
         ))}
@@ -354,6 +384,13 @@ export function FindingsTab({ taskId }: { taskId: string }) {
           <p className="px-4 py-8 text-center text-sm text-muted-foreground">本任务及直接关联任务暂无确认发现。</p>
         )}
       </CardContent>
+      {downloadTarget ? (
+        <FindingDownloadDialog
+          findingIds={[downloadTarget.id]}
+          findingName={downloadTarget.name}
+          onClose={() => setDownloadTarget(null)}
+        />
+      ) : null}
     </Card>
   );
 }

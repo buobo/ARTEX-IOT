@@ -4,10 +4,22 @@ import * as React from "react";
 
 import Link from "next/link";
 
-import { RotateCcwIcon } from "lucide-react";
+import { RotateCcwIcon, Trash2Icon } from "lucide-react";
+import { toast } from "sonner";
 
 import { FindingRetestDialog } from "@/components/finding-retest-dialog";
 import { Markdown } from "@/components/markdown";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,6 +28,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/u
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api";
+import { withFrom } from "@/lib/utils";
 import type { FindingRetest, FindingRetestRecording } from "@/lib/types";
 
 const statusLabels = {
@@ -27,6 +40,18 @@ const statusLabels = {
 };
 const verdictLabels = { reproduced: "仍可复现", fixed: "已修复", inconclusive: "无法确认" };
 
+function fmtBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
 function active(r: FindingRetest) {
   return r.status === "pending" || r.status === "running";
 }
@@ -35,11 +60,14 @@ export function FindingRetestPanel({
   findingId,
   findingName,
   readOnly = false,
+  from,
   onCompleted,
 }: {
   findingId: string;
   findingName?: string;
   readOnly?: boolean;
+  /** 复测会话「返回」要回到的原页面（这里是任务详情的复测 tab）。 */
+  from?: string;
   onCompleted?: () => void;
 }) {
   const [items, setItems] = React.useState<FindingRetest[] | null>(null);
@@ -47,6 +75,7 @@ export function FindingRetestPanel({
   const [open, setOpen] = React.useState(false);
   const requestSeq = React.useRef(0);
   const previousItems = React.useRef<FindingRetest[]>([]);
+  const [deletingId, setDeletingId] = React.useState<number | null>(null);
 
   const load = React.useCallback(async () => {
     const seq = ++requestSeq.current;
@@ -64,6 +93,27 @@ export function FindingRetestPanel({
       if (seq === requestSeq.current) setError((e as Error).message);
     }
   }, [findingId, onCompleted]);
+
+  // 硬删一条复测记录：连录屏文件、复测会话与转录一起删，不可恢复。
+  const removeRetest = React.useCallback(
+    async (item: FindingRetest) => {
+      setDeletingId(item.id);
+      try {
+        const res = await api.deleteFindingRetest(item.id);
+        const size = res.bytes > 0 ? `，释放 ${fmtBytes(res.bytes)}` : "";
+        toast.success(`已删除复测 #${item.id}（录屏 ${res.recordings} 段${size}）`);
+        if (res.warnings?.length) toast.warning(`部分文件删除失败：${res.warnings.join("；")}`);
+        previousItems.current = previousItems.current.filter((row) => row.id !== item.id);
+        setItems((prev) => (prev ? prev.filter((row) => row.id !== item.id) : prev));
+        void load();
+      } catch (e) {
+        toast.error(`删除失败：${(e as Error).message}`);
+      } finally {
+        setDeletingId(null);
+      }
+    },
+    [load],
+  );
 
   React.useEffect(() => {
     void load();
@@ -89,7 +139,7 @@ export function FindingRetestPanel({
         </div>
         {running?.conversation_id != null ? (
           <Button asChild variant="outline" size="sm">
-            <Link href={`/chat?c=${running.conversation_id}`} title="查看正在进行的复测会话">
+            <Link href={withFrom(`/chat?c=${running.conversation_id}`, from ?? "")} title="查看正在进行的复测会话">
               <Spinner data-icon="inline-start" aria-hidden="true" />
               复测中
             </Link>
@@ -136,13 +186,51 @@ export function FindingRetestPanel({
                   <span className="text-muted-foreground text-xs">
                     #{item.id} · {new Date(item.created_at).toLocaleString("zh-CN")}
                   </span>
-                  {item.conversation_id != null ? (
-                    <Button asChild variant="ghost" size="sm" className="ml-auto">
-                      <Link href={`/chat?c=${item.conversation_id}`}>查看会话</Link>
-                    </Button>
-                  ) : (
-                    <span className="text-muted-foreground text-xs">会话已删除</span>
-                  )}
+                  <div className="ml-auto flex items-center gap-1">
+                    {item.conversation_id != null ? (
+                      <Button asChild variant="ghost" size="sm">
+                        <Link href={withFrom(`/chat?c=${item.conversation_id}`, from ?? "")}>查看会话</Link>
+                      </Button>
+                    ) : (
+                      <span className="text-muted-foreground text-xs">会话已删除</span>
+                    )}
+                    {!readOnly ? (
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-muted-foreground hover:text-destructive"
+                            disabled={active(item) || deletingId === item.id}
+                            title={
+                              active(item)
+                                ? "该复测仍在进行，先停止再删"
+                                : "删除这条复测记录及其录屏、会话与转录（不可恢复）"
+                            }
+                          >
+                            {deletingId === item.id ? <Spinner data-icon="inline-start" /> : <Trash2Icon className="size-3.5" />}
+                            删除
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>永久删除复测 #{item.id}？</AlertDialogTitle>
+                            <AlertDialogDescription className="break-words">
+                              将删除这条复测记录、它的 {item.recordings?.length ?? 0} 段录屏
+                              {item.recordings?.length
+                                ? `（${fmtBytes(item.recordings.reduce((sum, rec) => sum + (rec.size_bytes ?? 0), 0))}）`
+                                : ""}
+                              、复测会话与转录文件。漏洞本身、其它复测记录和报告不受影响。此操作不可恢复。
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>取消</AlertDialogCancel>
+                            <AlertDialogAction onClick={() => void removeRetest(item)}>永久删除</AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                    ) : null}
+                  </div>
                 </div>
                 {item.status === "completed" && item.summary ? (
                   <p className="whitespace-pre-wrap break-words text-sm">{item.summary}</p>

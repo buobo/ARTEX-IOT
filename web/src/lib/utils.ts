@@ -109,3 +109,22 @@ export function formatCurrency(
 
   return new Intl.NumberFormat(locale, formatOptions).format(amount);
 }
+
+// ---- 详情页「返回」回到来的那一页 ----
+// 入口页把当前地址写进详情 URL 的 from 参数，详情页的返回按钮读它；
+// 直接打开（没有 from）时退回默认列表页。
+export const BACK_TO_PARAM = "from";
+
+// backTo 取 from 参数并校验：只接受站内绝对路径（拒绝 //evil、反斜杠、其它协议）。
+export function backTo(raw: string | null | undefined, fallback: string): string {
+  const v = (raw ?? "").trim();
+  if (!v.startsWith("/") || v.startsWith("//") || v.includes("\\")) return fallback;
+  return v;
+}
+
+// withFrom 给详情页链接挂上「我从哪来」；from 为空时原样返回。
+export function withFrom(href: string, from: string): string {
+  if (!from) return href;
+  const sep = href.includes("?") ? "&" : "?";
+  return `${href}${sep}${BACK_TO_PARAM}=${encodeURIComponent(from)}`;
+}

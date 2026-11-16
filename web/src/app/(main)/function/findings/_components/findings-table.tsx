@@ -14,6 +14,7 @@ import {
   ShieldAlertIcon,
   Trash2Icon,
   VideoIcon,
+  DownloadIcon,
 } from "lucide-react";
 
 import { CopyButton } from "@/components/copy-button";
@@ -39,11 +40,12 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { FindingDownloadDialog } from "@/components/finding-download-dialog";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
 import { statusMeta } from "@/lib/status";
 import type { ActiveFindingRetest, Finding, FindingRetestRecording, FindingStatus, Severity } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, withFrom } from "@/lib/utils";
 
 export const SEVERITIES: Severity[] = ["critical", "high", "medium", "low"];
 
@@ -138,6 +140,8 @@ export function FindingsTable({
 }: FindingsTableProps) {
   // 判重：把单条漏洞强制送进审计队列（重复的会被合并成一条新漏洞，旧编号消失）。
   const [auditBusy, setAuditBusy] = React.useState<string>("");
+  // 下载产物：一个 finding 一个包，弹框只针对当前这条。
+  const [downloadTarget, setDownloadTarget] = React.useState<{ id: string; name: string } | null>(null);
   const onAudit = React.useCallback(async (finding: Finding) => {
     if (!finding.finding_id || auditBusy) return;
     setAuditBusy(finding.finding_id);
@@ -161,8 +165,10 @@ export function FindingsTable({
   }
 
   return (
-    /* 固定列宽保证展开内容不撑开表格；窄屏只在表格内部横向滚动。 */
-    <Table className="min-w-[60rem] table-fixed">
+    <>
+    {/* table-fixed 固定列宽，展开内容不撑开表格；不设最小宽度，整行在一屏内显示完，
+        名称列吃掉剩余空间（过长就截断，hover 有 title）。 */}
+    <Table className="w-full table-fixed">
       <TableHeader>
         <TableRow>
           <TableHead className="w-8">
@@ -173,13 +179,13 @@ export function FindingsTable({
             />
           </TableHead>
           <TableHead className="w-8" />
-          <TableHead className="w-20">严重度</TableHead>
-          <TableHead>漏洞名称</TableHead>
-          <TableHead className="w-44">组件</TableHead>
+          <TableHead className="w-16">严重度</TableHead>
+          <TableHead className="w-[24%] min-w-[8rem]">漏洞名称</TableHead>
+          <TableHead className="w-36">组件</TableHead>
           <TableHead className="w-28">状态</TableHead>
-          <TableHead className="w-32">所属任务</TableHead>
-          <TableHead className="w-24">时间</TableHead>
-          <TableHead className="w-48">操作</TableHead>
+          <TableHead className="w-28">所属任务</TableHead>
+          <TableHead className="w-20">时间</TableHead>
+          <TableHead className="w-60">操作</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -239,7 +245,7 @@ export function FindingsTable({
                 <TableCell>
                   {f.components && f.components.length > 0 ? (
                     <div className="flex flex-wrap gap-1">
-                      {f.components.slice(0, 3).map((a) => (
+                      {f.components.slice(0, 2).map((a) => (
                         <code
                           key={a.id}
                           className="max-w-full truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
@@ -248,8 +254,8 @@ export function FindingsTable({
                           {a.label}
                         </code>
                       ))}
-                      {f.components.length > 3 && (
-                        <span className="text-xs text-muted-foreground">+{f.components.length - 3}</span>
+                      {f.components.length > 2 && (
+                        <span className="text-xs text-muted-foreground">+{f.components.length - 2}</span>
                       )}
                     </div>
                   ) : (
@@ -277,7 +283,7 @@ export function FindingsTable({
                 <TableCell>
                   {f.task_id ? (
                     <Link
-                      href={`/function/tasks/detail?id=${f.task_id}`}
+                      href={withFrom(`/function/tasks/detail?id=${f.task_id}`, "/function/findings")}
                       onClick={(e) => e.stopPropagation()}
                       className="inline-flex max-w-full items-center gap-1 text-primary hover:underline"
                       title={f.task_description}
@@ -291,17 +297,20 @@ export function FindingsTable({
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground tabular-nums">{fmtTime(f.ts)}</TableCell>
                 <TableCell onClick={(e) => e.stopPropagation()}>
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-0.5 whitespace-nowrap">
                     {retest ? (
-                      <Button asChild size="sm" variant="ghost">
-                        <Link href={`/chat?c=${retest.conversation_id}`} title="查看正在进行的复测会话">
+                      <Button asChild size="sm" variant="ghost" className="h-7 gap-1 px-1.5 text-xs">
+                        <Link
+                          href={withFrom(`/chat?c=${retest.conversation_id}`, "/function/findings")}
+                          title="查看正在进行的复测会话"
+                        >
                           <Spinner data-icon="inline-start" />
                           复测中
                         </Link>
                       </Button>
                     ) : null}
                     {!retest && f.finding_id && !f.inherited ? (
-                      <Button size="sm" variant="ghost" onClick={() => onRetest(f)} title="在独立会话中复测该漏洞">
+                      <Button size="sm" variant="ghost" className="h-7 gap-1 px-1.5 text-xs" onClick={() => onRetest(f)} title="在独立会话中复测该漏洞">
                         <RotateCcwIcon data-icon="inline-start" />
                         复测
                       </Button>
@@ -310,6 +319,7 @@ export function FindingsTable({
                       <Button
                         size="sm"
                         variant="ghost"
+                        className="h-7 gap-1 px-1.5 text-xs"
                         onClick={() => onAudit(f)}
                         disabled={auditBusy === f.finding_id}
                         title="重新判重：让审计 Agent 复查这条漏洞是否与其他条目重复"
@@ -319,9 +329,26 @@ export function FindingsTable({
                       </Button>
                     )}
                     {f.finding_id && f.task_id && (
-                      <Button size="sm" variant="ghost" onClick={() => onDeepen(f)}>
+                      <Button size="sm" variant="ghost" className="h-7 gap-1 px-1.5 text-xs" onClick={() => onDeepen(f)}>
                         <FlaskConicalIcon data-icon="inline-start" />
                         深入
+                      </Button>
+                    )}
+                    {f.finding_id && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 gap-1 px-1.5 text-xs"
+                        onClick={() =>
+                          setDownloadTarget({
+                            id: String(f.finding_id),
+                            name: f.name || f.vulnclass || `#${f.finding_id}`,
+                          })
+                        }
+                        title="导出这条漏洞的报告、PoC、复现视频与证据（一个 finding 一个压缩包）"
+                      >
+                        <DownloadIcon data-icon="inline-start" />
+                        导出
                       </Button>
                     )}
                     {f.finding_id && (
@@ -485,6 +512,14 @@ export function FindingsTable({
         )}
       </TableBody>
     </Table>
+    {downloadTarget ? (
+      <FindingDownloadDialog
+        findingIds={[downloadTarget.id]}
+        findingName={downloadTarget.name}
+        onClose={() => setDownloadTarget(null)}
+      />
+    ) : null}
+    </>
   );
 }
 

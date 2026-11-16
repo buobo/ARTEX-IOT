@@ -2,7 +2,10 @@
 
 import * as React from "react";
 
+import Link from "next/link";
+
 import {
+  ArrowLeftIcon,
   ArrowUpIcon,
   Bot,
   ChevronDownIcon,
@@ -58,6 +61,7 @@ import { api } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { isBtwCommand } from "@/lib/side-questions";
+import { BACK_TO_PARAM, backTo } from "@/lib/utils";
 import type { Activity, Agent, ChatAttachment, Conversation, LLMProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -494,6 +498,12 @@ function ChatView({
   onTitleMaybeChanged: () => void;
   onConvUpdated: () => void;
 }) {
+  // 从复测/发现等页面带 from= 进来时显示返回按钮（静态导出首屏没有 window，挂载后再读）。
+  const [backHref, setBackHref] = React.useState("");
+  React.useEffect(() => {
+    const raw = new URLSearchParams(window.location.search).get(BACK_TO_PARAM);
+    setBackHref(raw ? backTo(raw, "") : "");
+  }, []);
   const approvalFocus = useApprovalFocus({ conversationId: conv.id });
   const [messages, setMessages] = React.useState<Activity[]>([]);
   const [running, setRunning] = React.useState(false);
@@ -763,6 +773,13 @@ function ChatView({
     <SideQuestionWorkspace side={side} label={agent?.name ?? conv.agent_key} composerLayout="inline">
       {/* header: which agent + live + token meta */}
       <div className="flex min-w-0 flex-wrap items-center gap-2 border-b px-4 py-2.5">
+        {backHref ? (
+          <Button asChild variant="ghost" size="icon" className="size-7 shrink-0" title="返回上一页">
+            <Link href={backHref}>
+              <ArrowLeftIcon className="size-4" />
+            </Link>
+          </Button>
+        ) : null}
         <Bot className="text-muted-foreground size-4 shrink-0" />
         <span className="min-w-0 max-w-48 truncate text-sm font-medium">{agent?.name ?? conv.agent_key}</span>
         <span className="text-muted-foreground hidden shrink-0 font-mono text-xs sm:inline">{conv.agent_key}</span>
@@ -1054,6 +1071,8 @@ export default function ChatPage() {
     if (id !== selectedId) {
       const url = new URL(window.location.href);
       url.searchParams.delete("approval");
+      // 切换会话后「返回」上下文失效：清掉 from，免得回来时还指向上一页。
+      url.searchParams.delete(BACK_TO_PARAM);
       setSourceRequested(false);
       window.history.replaceState(null, "", url);
     }

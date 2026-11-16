@@ -134,7 +134,7 @@ import type {
   TaskCategory,
   TaskStatus,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, withFrom } from "@/lib/utils";
 
 // fmtBytes renders a human file size for the upload manifest.
 function fmtBytes(n: number): string {
@@ -1216,7 +1216,7 @@ const TaskRow = React.memo(function TaskRow({
       <TableCell className="text-muted-foreground">
         <div className="max-w-[70px]">
           <Link
-            href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}
+            href={withFrom(`/function/tasks/detail?id=${encodeURIComponent(task.id)}`, "/function/tasks")}
             className="block truncate rounded-sm hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             title={task.description}
           >
@@ -1304,7 +1304,7 @@ const TaskRow = React.memo(function TaskRow({
       <TableCell className="sticky right-0 z-10 bg-card text-right shadow-[-1px_0_0_0_hsl(var(--border))] group-hover:bg-muted/50">
         <div className="flex items-center justify-end gap-0.5">
           <Button size="icon" variant="ghost" asChild aria-label="查看任务详情" title="查看任务详情">
-            <Link href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}>
+            <Link href={withFrom(`/function/tasks/detail?id=${encodeURIComponent(task.id)}`, "/function/tasks")}>
               <EyeIcon />
             </Link>
           </Button>
@@ -1388,7 +1388,7 @@ function TaskNameEditor({ task, onRename }: { task: Task; onRename: (task: Task,
   return (
     <div className="flex min-w-0 items-center gap-1">
       <Link
-        href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`}
+        href={withFrom(`/function/tasks/detail?id=${encodeURIComponent(task.id)}`, "/function/tasks")}
         className="min-w-0 truncate rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         title={task.name?.trim() ? task.name : task.description}
       >
@@ -2728,7 +2728,7 @@ function DraggableCategoryTask({ task, disabled, moving }: { task: Task; disable
       </ItemMedia>
       <ItemContent className="min-w-0">
         <ItemTitle className="w-full min-w-0">
-          <Link href={`/function/tasks/detail?id=${encodeURIComponent(task.id)}`} className="truncate hover:underline">
+          <Link href={withFrom(`/function/tasks/detail?id=${encodeURIComponent(task.id)}`, "/function/tasks")} className="truncate hover:underline">
             {task.name?.trim() || task.description || `任务 #${task.id}`}
           </Link>
         </ItemTitle>

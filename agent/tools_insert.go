@@ -964,13 +964,24 @@ func cleanPocName(raw string) (string, error) {
 	name := strings.TrimSpace(raw)
 	name = strings.Trim(name, "`'\"")
 	if name == "" {
-		return "", fmt.Errorf("name 不能为空")
+		return "", fmt.Errorf("文件名不能为空：填单层文件名，例如 cgi_inject.py")
 	}
-	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") || strings.HasPrefix(name, ".") {
-		return "", fmt.Errorf("name 只能是单层文件名（不含路径/上跳）：%s", raw)
+	// 报错统一带「改成什么」的示例：模型最常见的错法是照抄 save_poc 的 path（poc/x.py）。
+	if strings.Contains(name, "..") {
+		return "", fmt.Errorf("文件名不能含上跳（%q）：直接写单层文件名（例如 cgi_inject.py）", name)
+	}
+	if strings.ContainsAny(name, "/\\") {
+		base := filepath.Base(name)
+		if base == "" || base == "." || base == ".." || strings.HasPrefix(base, ".") || strings.Contains(base, "..") {
+			return "", fmt.Errorf("文件名只接受单层文件名，收到 %q：不要带目录或上跳，直接写文件名（例如 cgi_inject.py）", name)
+		}
+		return "", fmt.Errorf("文件名只接受单层文件名，收到 %q → 改成 %q 后重试（poc/ 由工具自动拼接）", name, base)
+	}
+	if strings.HasPrefix(name, ".") {
+		return "", fmt.Errorf("文件名不能以 . 开头（%q）：例如 cgi_inject.py", name)
 	}
 	if !pocExts[strings.ToLower(filepath.Ext(name))] {
-		return "", fmt.Errorf("name 扩展名不支持：%s（可用 .py/.sh/.c/.js/.rb/.txt/.http/.md）", name)
+		return "", fmt.Errorf("文件名扩展名不支持：%q（可用 .py/.sh/.c/.js/.rb/.txt/.http/.md），例如 cgi_inject.py", name)
 	}
 	return name, nil
 }
@@ -1081,10 +1092,38 @@ func (t *ToolSet) validatePocFiles(names []string) ([]string, error) {
 		out = append(out, name)
 	}
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("poc_files 里的文件不存在：%s。先用 save_poc 落盘（它返回 path），把文件名传进来",
-			strings.Join(missing, "、"))
+		// 报错要能一次改对：给出实际查的目录、该目录里现在有什么、正确写法。
+		have := listPocNames(dir, 3)
+		msg := fmt.Sprintf("poc 文件不在 %s 下：缺 %s。", dir, strings.Join(missing, "、"))
+		example := "cgi_inject.py"
+		if len(have) > 0 {
+			msg += "该目录现有：" + strings.Join(have, "、") + "。"
+			example = have[0]
+		}
+		msg += fmt.Sprintf("poc_files 只填单层文件名（如 %s）；以 save_poc 返回的 name 为准，不要带 poc/ 前缀。", example)
+		return nil, fmt.Errorf("%s", msg)
 	}
 	return out, nil
+}
+
+// listPocNames 列出 poc 目录里最多 n 个文件名（跳过 INDEX.md），按名字排序。
+// 只用于报错信息：目录很大时不刷屏。
+func listPocNames(dir string, n int) []string {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, n)
+	for _, e := range ents {
+		if e.IsDir() || e.Name() == "INDEX.md" {
+			continue
+		}
+		out = append(out, e.Name())
+		if len(out) >= n {
+			break
+		}
+	}
+	return out
 }
 
 // savePoc 是 PoC 落盘工具：路径、目录、索引全由代码决定。
@@ -1093,9 +1132,10 @@ func (t *ToolSet) savePoc() actool.CoreTool {
 		"save_poc",
 		"把已复现漏洞的 PoC 存成本任务的 PoC 文件，并自动登记到 poc/INDEX.md。\n"+
 			"不要用 shell 重定向自己写文件——路径写错会让复测跑不起来。\n"+
-			"写完把文件名填进 report_finding 的 poc_files 参数（工具会校验文件存在，缺了就登记失败）。\n"+
+			"写完把返回的 name 填进 report_finding 的 poc_files（只填单层文件名，如 cgi_inject.py；"+
+			"不要带 poc/ 前缀或任何目录——物理路径由工具自己拼）。\n"+
 			"name 只接受单层文件名，扩展名限 .py/.sh/.c/.js/.rb/.txt/.http/.md；同名覆盖。\n"+
-			"返回：{path, absolute_path, bytes}",
+			"返回：{name, path, absolute_path, bytes}（poc_files 用 name，path 仅供展示）",
 		obj(map[string]any{
 			"name":         str("文件名，例如 cgi_inject.py"),
 			"content":      str("PoC 正文（完整可运行脚本/命令序列/payload）"),
@@ -1139,6 +1179,9 @@ func (t *ToolSet) savePoc() actool.CoreTool {
 			if err := os.WriteFile(path, []byte(a.Content), 0o644); err != nil {
 				return actool.Errorf(fmt.Sprintf("写入 PoC 失败: %v", err)), nil
 			}
+			if st, err := os.Stat(path); err != nil || st.IsDir() {
+				return actool.Errorf(fmt.Sprintf("写入后找不到 PoC 文件：%s。请重新调用 save_poc（不要用 shell 重定向写文件）", path)), nil
+			}
 			component := strings.TrimSpace(a.Component)
 			if component == "" && a.ComponentID > 0 && t.as != nil {
 				if cs, err := t.as.GetByIDs([]int64{a.ComponentID}); err == nil && len(cs) > 0 {
@@ -1152,13 +1195,14 @@ func (t *ToolSet) savePoc() actool.CoreTool {
 				return actool.Errorf(fmt.Sprintf("更新 poc/INDEX.md 失败: %v", err)), nil
 			}
 			out := map[string]any{
+				"name":          name,
 				"path":          "poc/" + name,
 				"absolute_path": path,
 				"bytes":         len(a.Content),
 			}
 			if overwritten != "" {
 				out["overwritten"] = true
-				out["note"] = overwritten + "；poc_files 里填这个名字仍指向这一份"
+				out["note"] = overwritten + "；poc_files 填 name=" + name + " 仍指向这一份"
 			}
 			return jsonResult(out)
 		})
