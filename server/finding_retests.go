@@ -242,6 +242,17 @@ func (s *Server) findingRetestTools() []actool.CoreTool {
 				if err := json.Unmarshal(in, &a); err != nil {
 					return actool.Errorf(err.Error()), nil
 				}
+				bad, err := s.discardedRecordingRefs(ctx, a.Summary+"\n"+a.Evidence)
+				if err != nil {
+					return actool.Errorf("校验录屏引用失败: " + err.Error()), nil
+				}
+				if len(bad) > 0 {
+					ids := make([]string, 0, len(bad))
+					for _, id := range bad {
+						ids = append(ids, "#"+strconv.FormatInt(id, 10))
+					}
+					return actool.Errorf(fmt.Sprintf("evidence/summary 引用了已丢弃的录屏 %s：请改为指向本次仍有效的录屏（action=list 的 path），或重录一段再引用", strings.Join(ids, "、"))), nil
+				}
 				if err := s.m.pg.RecordFindingRetestResult(ctx, intercept.ConvIDFromContext(ctx), a.Verdict, a.Summary, a.Evidence); err != nil {
 					return actool.Errorf(err.Error()), nil
 				}
@@ -250,23 +261,65 @@ func (s *Server) findingRetestTools() []actool.CoreTool {
 	}, s.retestRecordingTools()...)
 }
 
+// recordingRefRe 匹配 evidence 里对录屏文件的引用（recordings/<retest>/<rec>.mp4）。
+var recordingRefRe = regexp.MustCompile(`recordings/(\d+)/(\d+)\.mp4`)
+
+// discardedRecordingRefs 找出文本里引用、但本次复测已丢弃的录屏 id（按出现顺序去重）。
+func (s *Server) discardedRecordingRefs(ctx context.Context, text string) ([]int64, error) {
+	if s.m == nil || s.m.pg == nil || !recordingRefRe.MatchString(text) {
+		return nil, nil
+	}
+	discarded, err := s.m.pg.DiscardedRecordingIDs(ctx, intercept.ConvIDFromContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+	return discardedRefsAmong(text, discarded), nil
+}
+
+// discardedRefsAmong 是纯函数：从文本里挑出落在 discarded 集合里的录屏 id。
+func discardedRefsAmong(text string, discarded map[int64]struct{}) []int64 {
+	if len(discarded) == 0 {
+		return nil
+	}
+	var out []int64
+	seen := map[int64]struct{}{}
+	for _, m := range recordingRefRe.FindAllStringSubmatch(text, -1) {
+		id, err := strconv.ParseInt(m[2], 10, 64)
+		if err != nil {
+			continue
+		}
+		if _, ok := discarded[id]; !ok {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
 // retestRecordingTools 提供「显式上镜」录制：只有经这里的工具执行的命令才进视频。
 func (s *Server) retestRecordingTools() []actool.CoreTool {
 	return []actool.CoreTool{
-		wrTool("retest_recording", "控制本复测会话的录屏。先 action=capabilities 看可用后端；start 必须指定 app，由你根据证据类型自行决定：terminal（命令行证据：curl/nc/gdb/qemu）或 chrome（界面证据：登录跳转/XSS/CSRF/前端权限，需要 http(s) target）。mark 记录关键时间点；stop 生成 mp4 并返回路径。注意：只有经 retest_terminal_exec / retest_terminal_send 执行的命令会出现在 terminal 录像中。",
+		wrTool("retest_recording", "控制本复测会话的录屏。先 action=capabilities 看可用后端；start 必须指定 app，由你根据证据类型自行决定：terminal（命令行证据：curl/nc/gdb/qemu）或 chrome（界面证据：登录跳转/XSS/CSRF/前端权限，需要 http(s) target）。mark 记录关键时间点；stop 生成 mp4 并返回路径。list 列出本次复测仍有效的录屏（id / path / 时长 / marks）。discard 丢弃一段不合格的录屏：必须给 recording_id 与 reason，丢弃后这段视频对人侧不可见（行留痕可审计），evidence 里也不能再引用它；本次复测最多丢弃 5 段，录坏了就丢掉重录。注意：只有经 retest_terminal_exec / retest_terminal_send 执行的命令会出现在 terminal 录像中。",
 			objSchema(map[string]any{
-				"action": map[string]any{"type": "string", "enum": []string{"capabilities", "start", "stop", "mark", "status"}},
-				"app":    map[string]any{"type": "string", "enum": []string{"terminal", "chrome"}, "description": "start 时必填，自行判断"},
-				"target": strParam("app=chrome 时的起始 URL（http/https）"),
-				"label":  strParam("本次录制名称，便于报告引用"),
-				"note":   strParam("mark 的时间点说明"),
+				"action":       map[string]any{"type": "string", "enum": []string{"capabilities", "start", "stop", "mark", "status", "list", "discard"}},
+				"app":          map[string]any{"type": "string", "enum": []string{"terminal", "chrome"}, "description": "start 时必填，自行判断"},
+				"target":       strParam("app=chrome 时的起始 URL（http/https）"),
+				"label":        strParam("本次录制名称，便于报告引用"),
+				"note":         strParam("mark 的时间点说明"),
+				"recording_id": map[string]any{"type": "integer", "description": "discard 必填：要丢弃的录屏 id（先 action=list 查）"},
+				"reason":       strParam("discard 必填：一句话说明这段录屏为什么不能用（黑屏 / 步骤跑偏 / 录到敏感信息 …）"),
 			}, "action"), s.retestRecordingTool),
-		wrTool("retest_terminal_exec", "在可见终端中执行一条命令并等待结束：返回输出与退出码，同时该命令及输出会出现在录屏里。语义与 Bash 等价但会上镜；普通 Bash 执行的命令不会出现在录像中。交互式程序（gdb/nc/tail）请改用 retest_terminal_send + retest_terminal_snapshot。",
+		wrTool("retest_terminal_exec", "在可见终端中执行命令并等待结束：命令与输出都会出现在录屏里，画面里显示的就是命令原文。一条字符串会按 shell 语法自动拆成多条（顶层 ; && || 换行）逐条执行、逐条上镜，&& / || 的短路语义保留；也可用 commands 数组显式分步。含 heredoc / 复合语句（for/if/case）/ 后台 & / exit / set -e 这类命令整条按脚本执行（画面里是 bash .cmd-N.sh）。语义与 Bash 等价但会上镜；普通 Bash 执行的命令不会出现在录像中。交互式程序（gdb/nc/tail）请改用 retest_terminal_send + retest_terminal_snapshot。",
 			objSchema(map[string]any{
-				"command":   strParam("要执行的命令（bash 语法）"),
-				"cwd":       strParam("工作目录，默认本会话工作目录"),
-				"timeout_s": map[string]any{"type": "integer", "description": "超时秒数，默认 120，最大 600"},
-			}, "command"), s.retestTerminalExec),
+				"command":   strParam("要执行的命令（bash 语法）；含多条时按 ; && || 换行自动拆开逐条执行"),
+				"commands":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "按顺序逐条执行的命令列表（与 command 二选一，优先用本字段）"},
+				"cwd":       strParam("工作目录，默认本会话工作目录；与终端当前目录不同时会在第一条命令前补 cd"),
+				"timeout_s": map[string]any{"type": "integer", "description": "超时秒数（整次调用预算，拆开的各条共用），默认 120，最大 600"},
+			}), s.retestTerminalExec),
 		wrTool("retest_terminal_send", "向可见终端输入文本（默认追加回车），用于 gdb/nc 等交互式程序；不等待输出，随后用 retest_terminal_snapshot 查看。需要能看到终端输出时使用。",
 			objSchema(map[string]any{
 				"input":   strParam("要输入的文本"),
@@ -281,11 +334,13 @@ func (s *Server) retestRecordingTools() []actool.CoreTool {
 
 func (s *Server) retestRecordingTool(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 	var a struct {
-		Action string `json:"action"`
-		App    string `json:"app"`
-		Target string `json:"target"`
-		Label  string `json:"label"`
-		Note   string `json:"note"`
+		Action      string `json:"action"`
+		App         string `json:"app"`
+		Target      string `json:"target"`
+		Label       string `json:"label"`
+		Note        string `json:"note"`
+		RecordingID int64  `json:"recording_id"`
+		Reason      string `json:"reason"`
 	}
 	if err := json.Unmarshal(in, &a); err != nil {
 		return actool.Errorf(err.Error()), nil
@@ -331,8 +386,61 @@ func (s *Server) retestRecordingTool(ctx context.Context, in json.RawMessage) (a
 		}
 		row.URL = recordingURL(row.ID)
 		return jsonResult(map[string]any{"recording": row})
+	case "list":
+		rows, err := s.m.pg.RetestRecordingsForDiscard(ctx, convID)
+		if err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
+		items := make([]map[string]any, 0, len(rows))
+		for _, row := range rows {
+			items = append(items, map[string]any{
+				"recording_id": row.ID, "app": row.App, "status": row.Status,
+				"path": row.Path, "duration_ms": row.DurationMS, "size_bytes": row.SizeBytes,
+				"exec_count": row.ExecCount, "marks": row.Marks, "started_at": row.StartedAt,
+			})
+		}
+		return jsonResult(map[string]any{"recordings": items, "discard_limit": db.RetestDiscardMax})
+	case "discard":
+		if a.RecordingID <= 0 {
+			return actool.Errorf("必须指定 recording_id：先用 action=list 查本次复测的录屏 id"), nil
+		}
+		if rec := s.recorderFor(convID); rec != nil && rec.recID == a.RecordingID {
+			return actool.Errorf("这段录屏还在录制中：先 action=stop 再丢弃"), nil
+		}
+		row, err := s.m.pg.DiscardRetestRecording(ctx, convID, a.RecordingID, a.Reason)
+		if err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
+		freed, deleted := int64(0), false
+		warn := ""
+		if row.Path == "" {
+			warn = "该录屏没有文件（录制失败或未落盘）"
+		} else if !filepath.IsLocal(row.Path) {
+			warn = "录屏路径异常，未删除文件"
+		} else {
+			abs := filepath.Join(s.m.dir, "tasks", strconv.FormatInt(row.TaskID, 10), row.Path)
+			if fi, err := os.Stat(abs); err != nil || fi.IsDir() {
+				warn = "录屏文件已不存在"
+			} else {
+				freed = fi.Size()
+				if err := os.Remove(abs); err != nil {
+					warn = "文件删除失败: " + err.Error()
+				} else {
+					deleted = true
+				}
+			}
+		}
+		res := map[string]any{
+			"discarded": true, "recording_id": row.ID, "app": row.App,
+			"duration_ms": row.DurationMS, "freed_bytes": freed, "file_deleted": deleted,
+			"hint": "这段录屏对人侧已不可见。要留证请重录一段，并让 evidence 指向新录屏（path 见 action=list）。",
+		}
+		if warn != "" {
+			res["note"] = warn
+		}
+		return jsonResult(res)
 	}
-	return actool.Errorf("action 只能是 capabilities / start / stop / mark / status"), nil
+	return actool.Errorf("action 只能是 capabilities / start / stop / mark / status / list / discard"), nil
 }
 
 func (s *Server) recordingCapabilities() map[string]any {
@@ -391,15 +499,22 @@ func (s *Server) terminalRecorder(ctx context.Context, needExplicit bool) (*rete
 
 func (s *Server) retestTerminalExec(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 	var a struct {
-		Command  string `json:"command"`
-		Cwd      string `json:"cwd"`
-		TimeoutS int    `json:"timeout_s"`
+		Command  string   `json:"command"`
+		Commands []string `json:"commands"`
+		Cwd      string   `json:"cwd"`
+		TimeoutS int      `json:"timeout_s"`
 	}
 	if err := json.Unmarshal(in, &a); err != nil {
 		return actool.Errorf(err.Error()), nil
 	}
-	if strings.TrimSpace(a.Command) == "" {
-		return actool.Errorf("command 不能为空"), nil
+	var steps []recStep
+	for _, c := range a.Commands {
+		if v := strings.TrimSpace(c); v != "" {
+			steps = append(steps, recStep{Conn: ";", Command: v})
+		}
+	}
+	if len(steps) == 0 && strings.TrimSpace(a.Command) == "" {
+		return actool.Errorf("command 或 commands 至少给一个"), nil
 	}
 	rec, err := s.terminalRecorder(ctx, true)
 	if err != nil {
@@ -417,12 +532,29 @@ func (s *Server) retestTerminalExec(ctx context.Context, in json.RawMessage) (ac
 		convID := intercept.ConvIDFromContext(ctx)
 		cwd = filepath.Join(s.m.dir, "sessions", fmt.Sprintf("conv-%d", convID))
 	}
-	out, code, running, err := rec.run(ctx, a.Command, cwd, timeout)
+	var run *termRun
+	if len(steps) > 0 {
+		run, err = rec.runExplicit(ctx, steps, cwd, timeout)
+	} else {
+		run, err = rec.run(ctx, a.Command, cwd, timeout)
+	}
 	if err != nil {
 		return actool.Errorf(err.Error()), nil
 	}
-	res := map[string]any{"output": out, "exit_code": code, "running": running}
-	if running {
+	res := map[string]any{
+		"mode":      run.Mode,
+		"steps":     run.Steps,
+		"exit_code": run.Code,
+		"running":   run.Running,
+		"output":    joinStepOutput(run.Steps),
+	}
+	if len(run.Skipped) > 0 {
+		res["skipped_steps"] = run.Skipped
+	}
+	if run.Mode == "script" {
+		res["note"] = "含 heredoc / 复合语句 / 会改变会话 shell 状态的命令整条按脚本执行，画面里是 bash .cmd-N.sh"
+	}
+	if run.Running {
 		res["hint"] = "命令仍在运行（已超时）。可用 retest_terminal_snapshot 继续观察，或 retest_terminal_send(\"\\u0003\") 中断。"
 	}
 	return jsonResult(res)
@@ -492,6 +624,11 @@ func (s *Server) streamFindingRetestRecording(w http.ResponseWriter, r *http.Req
 		writeErr(w, 404, "recording not found")
 		return
 	}
+	// 已丢弃的录屏对人侧不可见：拿着旧 URL 也当不存在。
+	if rec.DiscardedAt != nil {
+		writeErr(w, 404, "recording not found")
+		return
+	}
 	abs := filepath.Join(s.m.dir, "tasks", strconv.FormatInt(rec.TaskID, 10), rec.Path)
 	if fi, err := os.Stat(abs); err != nil || fi.IsDir() {
 		state, _ := pg.TaskArchiveState(rec.TaskID)
@@ -534,8 +671,28 @@ func (s *Server) seedFindingRetester() error {
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	// tools 行是 ON CONFLICT DO NOTHING 种进来的：之后改工具描述/入参（例如此次
+	// retest_terminal_exec 新增 commands 分步）不会自己生效，用独立标记刷一次。
+	const refreshFlag = "retest_recording_discard_v1"
+	var refreshed string
+	err = tx.QueryRow(`SELECT value FROM settings WHERE key=$1`, refreshFlag).Scan(&refreshed)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if refreshed != "true" {
+		for _, t := range s.findingRetestTools() {
+			schema, _ := json.Marshal(t.InputSchema())
+			if _, err = tx.Exec(`UPDATE tools SET description=$2, schema=$3 WHERE key=$1`,
+				t.Name(), t.Description(), schema); err != nil {
+				return err
+			}
+		}
+		if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES ($1,'true') ON CONFLICT(key) DO UPDATE SET value='true'`, refreshFlag); err != nil {
+			return err
+		}
+	}
 	if done == "true" {
-		return nil
+		return tx.Commit()
 	}
 	var id int64
 	err = tx.QueryRow(`INSERT INTO agents(key,name,description,role,builtin,enabled)
@@ -604,11 +761,16 @@ set -g escape-time 0
 // 默认 bash 提示符没有颜色，xterm 里看起来就是一片灰白；这里给提示符上色，
 // 并让 ls/grep 在交互场景下带颜色（--color=auto 在管道里自动关闭，不会污染文本）。
 const retestShellRC = `PS1='\[\e[1;36m\]\u@\h\[\e[0m\]:\[\e[1;33m\]\w\[\e[0m\]\$ '
-export COLORTERM=truecolor
+export TERM="${TERM:-xterm-256color}" COLORTERM=truecolor
 alias ls='ls --color=auto'
 alias grep='grep --color=auto'
 alias egrep='egrep --color=auto'
 bind 'set bell-style none' 2>/dev/null
+# 退出码无痕回传：命令跑完、提示符重画之前把 $? 写进 ARTEX_RC。
+# 用 PROMPT_COMMAND 而不是 "; echo $?"，画面上不会多出一行，命令原文不被污染。
+if [ -n "$ARTEX_RC" ]; then
+  PROMPT_COMMAND='printf %s $? > "$ARTEX_RC"'
+fi
 `
 
 // runHeader 注入到每条命令脚本头部：脚本是非交互执行的，别名不生效，
@@ -619,13 +781,13 @@ grep() { command grep --color=auto "$@"; }
 `
 
 var (
-	recANSI = regexp.MustCompile("\x1b\\[[0-9;?]*[a-zA-Z]")
-	recGeom = regexp.MustCompile(`(\d+)x(\d+)\+`)
+	recANSI   = regexp.MustCompile("\x1b\\[[0-9;?]*[a-zA-Z]")
+	recGeom   = regexp.MustCompile(`(\d+)x(\d+)\+`)
 	recPrompt = regexp.MustCompile(`^[\w.-]+@[\w.-]+:[^$#]*[$#]\s*$`)
 )
 
 var (
-	pocPathRe = regexp.MustCompile(`(?:^|[\s"'=:])poc/([A-Za-z0-9][A-Za-z0-9._-]*)`)
+	pocPathRe   = regexp.MustCompile(`(?:^|[\s"'=:])poc/([A-Za-z0-9][A-Za-z0-9._-]*)`)
 	cmdSkipWord = map[string]bool{
 		"cd": true, "export": true, "echo": true, "printf": true,
 		"set": true, "local": true, "true": true, "sleep": true,
@@ -682,6 +844,183 @@ func cmdSlug(s string) string {
 	return out
 }
 
+// recStep 是一条待上镜的命令：Conn 是它与前一条之间的连接符（; && ||）。
+type recStep struct {
+	Conn    string
+	Command string
+}
+
+// splitCommands 把一条命令行按 shell 语法拆成可逐条上镜的若干条。
+// 只认顶层（不在引号 / 转义 / $() 里）的 ; && || 和换行；管道 | 属于同一条命令。
+// 第二个返回值为非空时表示拆不了或不能直敲，调用方整条按脚本方式执行
+// （画面里是一次 bash .cmd-N.sh），避免污染交互 shell 或把代码块拆坏。
+func splitCommands(raw string) ([]recStep, string) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil, "命令为空"
+	}
+	if strings.Contains(s, "<<") {
+		return nil, "含 heredoc / herestring"
+	}
+	if strings.HasSuffix(s, "\\") {
+		return nil, "以续行符结尾"
+	}
+	for _, kw := range []string{"for ", "while ", "until ", "if ", "case ", "select ", "function "} {
+		if strings.HasPrefix(s, kw) {
+			return nil, "复合语句（" + strings.TrimSpace(kw) + "）"
+		}
+	}
+	if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "(") {
+		return nil, "复合语句 / 子 shell"
+	}
+
+	var (
+		out      []recStep
+		cur      strings.Builder
+		conn     = ";"
+		quote    rune
+		depth    int
+		backtick bool
+	)
+	flush := func() {
+		if v := strings.TrimSpace(cur.String()); v != "" {
+			out = append(out, recStep{Conn: conn, Command: v})
+		}
+		cur.Reset()
+		conn = ";"
+	}
+	rs := []rune(s)
+	for i := 0; i < len(rs); i++ {
+		c := rs[i]
+		if quote != 0 {
+			cur.WriteRune(c)
+			switch {
+			case c == '\\' && quote == '"' && i+1 < len(rs):
+				i++
+				cur.WriteRune(rs[i])
+			case c == quote:
+				quote = 0
+			}
+			continue
+		}
+		if backtick {
+			cur.WriteRune(c)
+			if c == '`' {
+				backtick = false
+			}
+			continue
+		}
+		switch {
+		case c == '"' || c == '\'':
+			quote = c
+			cur.WriteRune(c)
+		case c == '`':
+			backtick = true
+			cur.WriteRune(c)
+		case c == '\\' && i+1 < len(rs):
+			cur.WriteRune(c)
+			i++
+			cur.WriteRune(rs[i])
+		case c == '(':
+			depth++
+			cur.WriteRune(c)
+		case c == ')':
+			if depth > 0 {
+				depth--
+			}
+			cur.WriteRune(c)
+		case depth == 0 && (c == ';' || c == '\n'):
+			flush()
+		case depth == 0 && c == '&' && i+1 < len(rs) && rs[i+1] == '&':
+			flush()
+			conn = "&&"
+			i++
+		case depth == 0 && c == '|' && i+1 < len(rs) && rs[i+1] == '|':
+			flush()
+			conn = "||"
+			i++
+		default:
+			cur.WriteRune(c)
+		}
+	}
+	if quote != 0 {
+		return nil, "引号未闭合"
+	}
+	if backtick {
+		return nil, "反引号未闭合"
+	}
+	if depth != 0 {
+		return nil, "括号未闭合"
+	}
+	flush()
+	if len(out) == 0 {
+		return nil, "命令为空"
+	}
+	for _, st := range out {
+		if why := notTypableReason(st.Command); why != "" {
+			return nil, why
+		}
+	}
+	return out, ""
+}
+
+// notTypableReason 判断一条命令能不能直接敲进交互 shell。
+// 直敲与脚本的差别在于「跑在会话 shell 里而不是子 shell」：会改变会话 shell
+// 状态的语句（set -e / trap / exec / exit …）必须退回脚本方式，
+// 否则一次复测之后整个录屏终端就废了。
+func notTypableReason(cmd string) string {
+	if strings.HasSuffix(cmd, "&") && !strings.HasSuffix(cmd, "&&") {
+		return "含后台执行 &"
+	}
+	f := strings.Fields(cmd)
+	if len(f) == 0 {
+		return "命令为空"
+	}
+	switch f[0] {
+	case "exit", "exec", "set", "trap", "shopt", "bind", "enable", "ulimit", "umask", "logout":
+		return "会改变会话 shell 状态（" + f[0] + "）"
+	}
+	return ""
+}
+
+// termStep 是一条上镜命令的执行结果。
+type termStep struct {
+	N        int    `json:"n"`
+	Conn     string `json:"conn"`
+	Command  string `json:"command"`
+	Output   string `json:"output"`
+	ExitCode int    `json:"exit_code"`
+	Running  bool   `json:"running,omitempty"`
+}
+
+// termRun 是一次 retest_terminal_exec 的完整结果。
+type termRun struct {
+	Mode    string     `json:"mode"` // split=逐条直敲原命令；script=整条走临时脚本
+	Steps   []termStep `json:"steps"`
+	Code    int        `json:"exit_code"`
+	Running bool       `json:"running"`
+	Skipped []int      `json:"skipped_steps,omitempty"`
+}
+
+// joinStepOutput 给只认 output 的旧调用方留一个可用文本：
+// 单条直接回原文，多条按 #n 加标题拼接。
+func joinStepOutput(steps []termStep) string {
+	switch len(steps) {
+	case 0:
+		return ""
+	case 1:
+		return steps[0].Output
+	}
+	var b strings.Builder
+	for _, st := range steps {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "=== #%d %s\n%s", st.N, st.Command, st.Output)
+	}
+	return b.String()
+}
+
 // retestRecorder 是一次录制的运行时句柄；与 DB 行 1:1。
 type retestRecorder struct {
 	mu        sync.Mutex
@@ -704,6 +1043,14 @@ type retestRecorder struct {
 	startedAt time.Time
 	seq       int64
 	stopped   bool
+
+	// execMu 串行化对同一个 pane 的写操作：两条命令同时往一个交互 shell 里
+	// 敲，后一条会被当成前一条程序的 stdin，两条都拿不到退出码。
+	execMu sync.Mutex
+	// rcPath 是 PROMPT_COMMAND 回传退出码的文件（会话级，与 artEx rc 里的 ARTEX_RC 对应）。
+	rcPath string
+	// paneCwd 是录屏终端当前所处目录，用于判断要不要在命令前补 cd。
+	paneCwd string
 
 	xvfb   *exec.Cmd
 	xterm  *exec.Cmd
@@ -1028,16 +1375,35 @@ func (r *retestRecorder) startTerminal() error {
 		return fmt.Errorf("写 tmux 配置失败: %w", err)
 	}
 	r.tmuxConf = conf
+	r.rcPath = filepath.Join(os.TempDir(), fmt.Sprintf("artex-rc-state-%d-%d", r.convID, r.recID))
+	_ = os.Remove(r.rcPath)
+	r.paneCwd = r.dir
 	rc := filepath.Join(os.TempDir(), fmt.Sprintf("artex-rc-%d-%d", r.convID, r.recID))
 	if err := os.WriteFile(rc, []byte(retestShellRC), 0o600); err != nil {
 		return fmt.Errorf("写录屏终端 rc 失败: %w", err)
 	}
 	r.rcFile = rc
-	tm := exec.Command("tmux", "-f", conf, "new-session", "-d", "-s", r.session,
-		"-x", strconv.Itoa(recCols), "-y", strconv.Itoa(recRows), "-c", r.dir,
-		"bash --rcfile "+shellQuote(rc)+" -i")
-	if out, err := tm.CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux 启动失败: %s", strings.TrimSpace(string(out)))
+
+	newSession := func(withEnv bool) error {
+		args := []string{"-f", conf, "new-session", "-d", "-s", r.session,
+			"-x", strconv.Itoa(recCols), "-y", strconv.Itoa(recRows), "-c", r.dir}
+		if withEnv {
+			args = append(args, "-e", "ARTEX_RC="+r.rcPath)
+		}
+		args = append(args, "bash --rcfile "+shellQuote(rc)+" -i")
+		if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("%s", strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	if err := newSession(true); err != nil {
+		// tmux < 3.2 不支持 new-session -e，退不进去就直接把 rcPath 置空：
+		// typeAndWait 会自己回落到脚本方式（画面里恢复成 bash .cmd-N.sh）。
+		_ = exec.Command("tmux", "kill-session", "-t", r.session).Run()
+		r.rcPath = ""
+		if err2 := newSession(false); err2 != nil {
+			return fmt.Errorf("tmux 启动失败: %v", err)
+		}
 	}
 	_ = exec.Command("tmux", "set-option", "-t", r.session, "-g", "status", "off").Run()
 	_ = exec.Command("tmux", "set-option", "-t", r.session, "-g", "history-limit", "5000").Run()
@@ -1139,6 +1505,9 @@ func (r *retestRecorder) cleanupDirs() {
 	if r.rcFile != "" {
 		_ = os.Remove(r.rcFile)
 	}
+	if r.rcPath != "" {
+		_ = os.Remove(r.rcPath)
+	}
 	if r.tmuxConf != "" {
 		_ = os.Remove(r.tmuxConf)
 	}
@@ -1149,15 +1518,193 @@ func (r *retestRecorder) cleanupDirs() {
 
 // run 把命令写进脚本文件再送进可见终端：避免引号/换行/heredoc 转义地狱，
 // 也让回显只占一行，输出切片边界确定。
-func (r *retestRecorder) run(ctx context.Context, command, cwd string, timeout time.Duration) (string, int, bool, error) {
+func (r *retestRecorder) nextSeq() int64 {
 	r.mu.Lock()
-	if r.stopped {
-		r.mu.Unlock()
-		return "", 0, false, errors.New("录制已停止")
-	}
+	defer r.mu.Unlock()
 	r.seq++
-	seq := r.seq
-	r.mu.Unlock()
+	return r.seq
+}
+
+// run 执行一次 retest_terminal_exec：能直敲就逐条把原命令敲进可见终端
+// （画面里就是原命令本身），拆不了或会污染会话 shell 的整条退回脚本方式。
+func (r *retestRecorder) run(ctx context.Context, command, cwd string, timeout time.Duration) (*termRun, error) {
+	return r.runLocked(ctx, command, false, nil, cwd, timeout)
+}
+
+// runExplicit 用于调用方已用 commands 数组显式分好步的情况：不再拆字符串。
+func (r *retestRecorder) runExplicit(ctx context.Context, steps []recStep, cwd string, timeout time.Duration) (*termRun, error) {
+	return r.runLocked(ctx, "", true, steps, cwd, timeout)
+}
+
+func (r *retestRecorder) runLocked(ctx context.Context, command string, explicit bool, steps []recStep, cwd string, timeout time.Duration) (*termRun, error) {
+	r.execMu.Lock()
+	defer r.execMu.Unlock()
+	if r.stopped {
+		return nil, errors.New("录制已停止")
+	}
+	script := command
+	direct := steps
+	why := ""
+	if explicit {
+		var parts []string
+		direct = nil
+		for _, st := range steps {
+			v := strings.TrimSpace(st.Command)
+			if v == "" {
+				continue
+			}
+			parts = append(parts, v)
+			direct = append(direct, recStep{Conn: st.Conn, Command: v})
+		}
+		script = strings.Join(parts, "\n")
+		for _, st := range direct {
+			if w := notTypableReason(st.Command); w != "" {
+				why = w
+				break
+			}
+		}
+		if len(direct) > 0 && direct[0].Conn == "" {
+			direct[0].Conn = ";"
+		}
+	} else {
+		direct, why = splitCommands(command)
+	}
+	if why != "" || len(direct) == 0 {
+		out, code, running, err := r.runScript(ctx, script, cwd, timeout)
+		if err != nil {
+			return nil, err
+		}
+		return &termRun{Mode: "script", Code: code, Running: running, Steps: []termStep{{
+			N: 1, Conn: ";", Command: script, Output: out, ExitCode: code, Running: running,
+		}}}, nil
+	}
+	return r.runSteps(ctx, direct, cwd, timeout)
+}
+
+// runSteps 逐条上镜：每条单独贴进 pane、等它跑完再发下一条。
+// && / || 的短路语义保留：前一条失败（|| 时是成功）就跳过后续，并记在 skipped 里。
+func (r *retestRecorder) runSteps(ctx context.Context, steps []recStep, cwd string, timeout time.Duration) (*termRun, error) {
+	res := &termRun{Mode: "split"}
+	deadline := time.Now().Add(timeout)
+	dir := strings.TrimSpace(cwd)
+	needCd := dir != "" && filepath.Clean(dir) != filepath.Clean(r.paneCwd)
+	prev := 0
+	for i, st := range steps {
+		if i > 0 {
+			if (st.Conn == "&&" && prev != 0) || (st.Conn == "||" && prev == 0) {
+				res.Skipped = append(res.Skipped, i+1)
+				continue
+			}
+		}
+		cmd := st.Command
+		withCd := false
+		if needCd {
+			if isCdCommand(cmd) {
+				// 命令自己就在换目录：再加前缀只会出现 «cd X && cd X»（真实录制里出现过）。
+				needCd = false
+				r.paneCwd = "" // 去哪由命令自己决定，下一次调用重新补前缀
+			} else {
+				cmd = "cd -- " + shellQuote(dir) + " && " + cmd
+				needCd = false
+				withCd = true
+			}
+		}
+		remain := time.Until(deadline)
+		if remain <= 0 {
+			res.Running = true
+			break
+		}
+		out, code, running, err := r.typeAndWait(ctx, cmd, remain)
+		if err != nil {
+			return nil, err
+		}
+		res.Steps = append(res.Steps, termStep{N: i + 1, Conn: st.Conn, Command: cmd, Output: out, ExitCode: code, Running: running})
+		prev = code
+		res.Code = code
+		if withCd && !running && code == 0 {
+			r.paneCwd = filepath.Clean(dir)
+		}
+		if running {
+			res.Running = true
+			break
+		}
+	}
+	return res, nil
+}
+
+// isCdCommand 判断这一步是不是自己就在换目录（避免再套一层 cd 前缀）。
+func isCdCommand(cmd string) bool {
+	f := strings.Fields(cmd)
+	return len(f) > 0 && f[0] == "cd"
+}
+
+// typeAndWait 用 bracketed paste 把命令原文贴进可见终端（多行/含括号的内容
+// 不会被逐行执行，也不会被键位解释），回车后等 PROMPT_COMMAND 把退出码写进
+// ARTEX_RC；输出从发送前那一行（提示符）之后切。
+func (r *retestRecorder) typeAndWait(ctx context.Context, command string, timeout time.Duration) (string, int, bool, error) {
+	if r.rcPath == "" {
+		return r.runScript(ctx, command, "", timeout)
+	}
+	seq := r.nextSeq()
+	_ = os.Remove(r.rcPath)
+	anchor := ""
+	beforeLines := 0
+	if before, err := r.snapshotJoined(); err == nil {
+		ls := strings.Split(before, "\n")
+		beforeLines = len(ls)
+		for i := len(ls) - 1; i >= 0; i-- {
+			if strings.TrimSpace(paneLine(ls[i])) != "" {
+				anchor = paneLine(ls[i])
+				break
+			}
+		}
+	}
+	buf := fmt.Sprintf("artex-%d-%d", r.recID, seq)
+	if out, err := exec.Command("tmux", "set-buffer", "-b", buf, "--", command).CombinedOutput(); err != nil {
+		return "", 0, false, fmt.Errorf("写入终端缓冲失败: %s", strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("tmux", "paste-buffer", "-p", "-d", "-b", buf, "-t", r.session).CombinedOutput(); err != nil {
+		return "", 0, false, fmt.Errorf("贴入终端失败: %s", strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("tmux", "send-keys", "-t", r.session, "Enter").CombinedOutput(); err != nil {
+		return "", 0, false, fmt.Errorf("发送回车失败: %s", strings.TrimSpace(string(out)))
+	}
+
+	deadline := time.Now().Add(timeout)
+	var pane string
+	for {
+		if p, err := r.snapshotJoined(); err == nil {
+			pane = p
+		}
+		if b, err := os.ReadFile(r.rcPath); err == nil && strings.TrimSpace(string(b)) != "" {
+			code, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+			if p, err := r.snapshotJoined(); err == nil {
+				pane = p
+			}
+			out := clipAfterAnchor(pane, beforeLines, anchor, command)
+			if len(out) > recMaxOutput {
+				out = out[:recMaxOutput] + "\n…(输出已截断)"
+			}
+			if incExecCountHook != nil {
+				_ = incExecCountHook(r)
+			}
+			return out, code, false, nil
+		}
+		if time.Now().After(deadline) {
+			return clipAfterAnchor(pane, beforeLines, anchor, command), 0, true, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", 0, true, ctx.Err()
+		case <-time.After(recPollEvery):
+		}
+	}
+}
+
+// runScript 是老的执行方式：写临时脚本 + trap 落退出码，画面里是 bash .cmd-N.sh。
+// heredoc / 复合语句 / 会改会话 shell 状态的命令只能走这里。
+func (r *retestRecorder) runScript(ctx context.Context, command, cwd string, timeout time.Duration) (string, int, bool, error) {
+	seq := r.nextSeq()
 
 	base := cmdScriptName(seq, command)
 	script := filepath.Join(r.dir, base)
@@ -1178,6 +1725,10 @@ func (r *retestRecorder) run(ctx context.Context, command, cwd string, timeout t
 	defer os.Remove(rcPath)
 
 	typed := "bash " + base
+	// 录屏终端的 cwd 被 cd 改到别处后，相对路径就找不到脚本了：改用绝对路径。
+	if filepath.Clean(r.paneCwd) != filepath.Clean(r.dir) {
+		typed = "bash " + shellQuote(script)
+	}
 	if out, err := exec.Command("tmux", "send-keys", "-t", r.session, typed, "Enter").CombinedOutput(); err != nil {
 		return "", 0, false, fmt.Errorf("发送命令失败: %s", strings.TrimSpace(string(out)))
 	}
@@ -1212,6 +1763,104 @@ func (r *retestRecorder) run(ctx context.Context, command, cwd string, timeout t
 		case <-time.After(recPollEvery):
 		}
 	}
+}
+
+// snapshotJoined 抓整屏历史并把折行合并成一条逻辑行（-J）。
+// 直敲时靠它定位「发送前那一行」，长命令折几行都不用猜。
+func (r *retestRecorder) snapshotJoined() (string, error) {
+	out, err := exec.Command("tmux", "capture-pane", "-pJ", "-S", "-", "-t", r.session).Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// paneLine 把一行终端文本归一化（去 ANSI、去尾随空格）。
+// capture-pane -J 会给折行补尾随空格，直接逐字节比较会匹配不到。
+func paneLine(s string) string {
+	return strings.TrimRight(recANSI.ReplaceAllString(s, ""), " \t")
+}
+
+// clipAfterAnchor 取发送前最后一行（提示符）之后的内容，
+// 再去掉命令回显与末尾重新画出的提示符。
+// 提示符每行长得一模一样，所以先剥掉末尾那几行提示符，再回退找锚点，
+// 否则会命中命令跑完后新画的提示符、切出空输出。
+func clipAfterAnchor(pane string, beforeLines int, anchor, command string) string {
+	lines := strings.Split(pane, "\n")
+	end := len(lines)
+	for end > 0 {
+		t := paneLine(lines[end-1])
+		if strings.TrimSpace(t) == "" || recPrompt.MatchString(strings.TrimSpace(t)) {
+			end--
+			continue
+		}
+		break
+	}
+	lines = lines[:end]
+
+	start := -1
+	if anchor != "" && beforeLines > 0 && beforeLines <= len(lines) && paneLine(lines[beforeLines-1]) == anchor {
+		start = beforeLines
+	}
+	if start < 0 && anchor != "" {
+		for i := len(lines) - 1; i >= 0; i-- {
+			if paneLine(lines[i]) == anchor {
+				start = i + 1
+				break
+			}
+		}
+	}
+	if start < 0 {
+		// 历史被 5000 行上限挤掉、行号与锚点都漂了：退回按命令回显定位。
+		// 只认「提示符 + 命令」那一行（needle 前面必须有 $ / #），
+		// 并从后往前找最近的：输出里出现同名文本时才不会切错。
+		needle := echoNeedle(command)
+		for i := len(lines) - 1; i >= 0 && needle != ""; i-- {
+			t := paneLine(lines[i])
+			at := strings.Index(t, needle)
+			if at < 0 {
+				continue
+			}
+			if prefix := t[:at]; strings.Contains(prefix, "$ ") || strings.Contains(prefix, "# ") {
+				start = i
+				break
+			}
+		}
+	}
+	if start < 0 || start > len(lines) {
+		start = 0
+		if len(lines) > 200 {
+			start = len(lines) - 200
+		}
+	}
+	return stripEchoAndPrompt(lines[start:], command)
+}
+
+// stripEchoAndPrompt 去掉首行「提示符 + 命令回显」和末尾重新画出的提示符。
+func stripEchoAndPrompt(lines []string, command string) string {
+	if len(lines) > 0 {
+		if strings.Contains(paneLine(lines[0]), echoNeedle(command)) {
+			lines = lines[1:]
+		}
+	}
+	for len(lines) > 0 {
+		last := paneLine(lines[len(lines)-1])
+		if strings.TrimSpace(last) == "" || recPrompt.MatchString(strings.TrimSpace(last)) {
+			lines = lines[:len(lines)-1]
+			continue
+		}
+		break
+	}
+	return strings.TrimRight(recANSI.ReplaceAllString(strings.Join(lines, "\n"), ""), " \t\n")
+}
+
+// echoNeedle 取命令开头一小段，用来认出「这一行是回显不是输出」。
+func echoNeedle(command string) string {
+	c := strings.TrimSpace(command)
+	if r := []rune(c); len(r) > 24 {
+		c = string(r[:24])
+	}
+	return c
 }
 
 // incExecCountHook 由 New 注入：recorder 不持有 DB 句柄，run 里只做计数回调。

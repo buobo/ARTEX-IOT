@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,10 +64,16 @@ func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
 	switch ev.ToolName {
 	case "Bash", "shell_open", "retest_terminal_exec":
 		var in struct {
-			Command string `json:"command"`
+			Command  string   `json:"command"`
+			Commands []string `json:"commands"`
 		}
 		_ = json.Unmarshal(ev.Input, &in)
 		cmd = in.Command
+		// retest_terminal_exec 支持 commands 数组分步：审计与拦截规则必须看到每一步，
+		// 否则把一条命令拆成数组就等于绕过规则。
+		if len(in.Commands) > 0 {
+			cmd = strings.Join(in.Commands, " ; ")
+		}
 	case "shell_send", "retest_terminal_send":
 		var in struct {
 			Text  string `json:"text"`

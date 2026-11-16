@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"iter"
 	"net/http"
 	"net/http/httptest"
@@ -376,16 +377,21 @@ func TestRetestRecorderEndToEnd(t *testing.T) {
 		}
 	}()
 
-	out, code, running, err := rec.run(context.Background(), "echo first; echo second; exit 7", "", 30*time.Second)
+	run, err := rec.run(context.Background(), "echo first; echo second; exit 7", "", 30*time.Second)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if running {
+	if run.Running {
 		t.Fatal("command reported as still running")
 	}
-	if code != 7 {
-		t.Fatalf("exit code = %d, want 7", code)
+	// 含 exit 的命令不能直敲（会把会话 shell 弄死），必须整条走脚本、退出码原样透传。
+	if run.Mode != "script" {
+		t.Fatalf("mode = %q, want script", run.Mode)
 	}
+	if run.Code != 7 {
+		t.Fatalf("exit code = %d, want 7", run.Code)
+	}
+	out := run.Steps[0].Output
 	for _, want := range []string{"first", "second"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output %q missing %q", out, want)
@@ -415,6 +421,123 @@ func TestRetestRecorderEndToEnd(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join("/tmp", ".X"+strings.TrimPrefix(rec.display, ":")+"-lock")); err == nil {
 		t.Fatalf("Xvfb %s lock still present", rec.display)
+	}
+}
+
+// TestRetestRecorderDirectTyping 验证「逐条直敲原命令」：
+// 画面里是命令原文（不是 bash .cmd-N.sh），每条各自拿到输出与退出码，&& 短路生效。
+func TestRetestRecorderDirectTyping(t *testing.T) {
+	for _, b := range []string{"Xvfb", "tmux", "xterm", "ffmpeg"} {
+		if _, err := exec.LookPath(b); err != nil {
+			t.Skipf("missing %s", b)
+		}
+	}
+	dir := t.TempDir()
+	rec := &retestRecorder{convID: 9002, retestID: 1, taskID: 1, recID: 2, app: "terminal", fps: recFPS}
+	if err := rec.start(dir); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	stopped := false
+	defer func() {
+		if !stopped {
+			rec.stop()
+		}
+	}()
+	if rec.rcPath == "" {
+		t.Fatal("rcPath 未设置：直敲模式拿不到退出码")
+	}
+
+	run, err := rec.run(context.Background(), `echo hello-direct; false && echo never; echo "rc=$?"`, "", 40*time.Second)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if run.Mode != "split" {
+		t.Fatalf("mode = %q, want split (steps=%#v)", run.Mode, run.Steps)
+	}
+	// 第 3 条挂在 && 后面、前一条 false 退出 1 → 跳过。
+	if len(run.Steps) != 3 || len(run.Skipped) != 1 || run.Skipped[0] != 3 {
+		t.Fatalf("steps=%#v skipped=%v, want 3 steps 且跳过第 3 条", run.Steps, run.Skipped)
+	}
+	if got := run.Steps[0].Output; got != "hello-direct" {
+		t.Fatalf("step1 output = %q", got)
+	}
+	if run.Steps[1].ExitCode != 1 {
+		t.Fatalf("step2 exit = %d, want 1 (false)", run.Steps[1].ExitCode)
+	}
+	if got := run.Steps[2].Output; got != "rc=1" {
+		t.Fatalf("step3 output = %q, want rc=1", got)
+	}
+
+	pane, err := rec.snapshotJoined()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if !strings.Contains(pane, "echo hello-direct") {
+		t.Fatalf("画面里没有命令原文: %q", pane)
+	}
+	if strings.Contains(pane, "bash .cmd-") {
+		t.Fatalf("画面里出现了脚本调用（应只显示原命令）: %q", pane)
+	}
+
+	// 长命令会折行（124 列）：-J 合并后切片必须仍然完整。
+	longTail := strings.Repeat("0123456789", 20) + " TAIL-MARK"
+	longRun, err := rec.run(context.Background(), "echo "+longTail, "", 40*time.Second)
+	if err != nil {
+		t.Fatalf("run long: %v", err)
+	}
+	if got := longRun.Steps[0].Output; got != longTail {
+		t.Fatalf("折行长命令输出 = %q, want %q", got, longTail)
+	}
+
+	// cwd 与会话目录不同时补一次 cd（第一条命令前）。
+	pwdRun, err := rec.run(context.Background(), "pwd", dir, 40*time.Second)
+	if err != nil {
+		t.Fatalf("run cwd: %v", err)
+	}
+	if got := pwdRun.Steps[0].Output; got != dir {
+		t.Fatalf("cwd 输出 = %q, want %q", got, dir)
+	}
+
+	// 命令自己以 cd 开头时不能再套前缀（真实录制里出现过 «cd X && cd X»）。
+	cdRun, err := rec.run(context.Background(), "cd "+shellQuote(dir)+"; pwd", dir, 40*time.Second)
+	if err != nil {
+		t.Fatalf("run cd-first: %v", err)
+	}
+	if got := cdRun.Steps[0].Command; got != "cd "+shellQuote(dir) {
+		t.Fatalf("第一条命令被套了多余前缀: %q", got)
+	}
+	if got := cdRun.Steps[1].Output; got != dir {
+		t.Fatalf("cd 后 pwd = %q, want %q", got, dir)
+	}
+
+	// heredoc 拆不了 → 整条退回脚本，输出仍要能拿到。
+	hereRun, err := rec.run(context.Background(), "cat <<EOF\nheredoc-line\nEOF", "", 40*time.Second)
+	if err != nil {
+		t.Fatalf("run heredoc: %v", err)
+	}
+	if hereRun.Mode != "script" {
+		t.Fatalf("heredoc mode = %q, want script", hereRun.Mode)
+	}
+	if hereRun.Running {
+		t.Fatal("heredoc 脚本模式超时（脚本没跑起来）")
+	}
+	if !strings.Contains(hereRun.Steps[0].Output, "heredoc-line") {
+		t.Fatalf("heredoc 输出 = %q", hereRun.Steps[0].Output)
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+	_, size, _ := rec.stop()
+	stopped = true
+	if size <= 0 {
+		t.Fatalf("录制文件为空: %s", rec.absPath)
+	}
+	// 人工核对画面时用：ARTEX_TEST_KEEP_VIDEO=/path/x.mp4 把这段录像留一份。
+	if keep := os.Getenv("ARTEX_TEST_KEEP_VIDEO"); keep != "" {
+		if b, err := os.ReadFile(rec.absPath); err == nil {
+			if err := os.WriteFile(keep, b, 0o600); err != nil {
+				t.Fatalf("留一份录像失败: %v", err)
+			}
+		}
 	}
 }
 
@@ -520,7 +643,7 @@ VALUES($1,0,'terminal','pending','recording') RETURNING id`, retestID).Scan(&rec
 	}
 	s.putRecorder(rec)
 
-	if _, _, _, err := rec.run(context.Background(), "echo archive-stop; sleep 1", "", 30*time.Second); err != nil {
+	if _, err := rec.run(context.Background(), "echo archive-stop; sleep 1", "", 30*time.Second); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if err := s.stopTaskRecordings(context.Background(), 0); err != nil {
@@ -548,5 +671,89 @@ VALUES($1,0,'terminal','pending','recording') RETURNING id`, retestID).Scan(&rec
 	}
 	if exec.Command("tmux", "has-session", "-t", rec.session).Run() == nil {
 		t.Fatal("tmux session survived archive seal")
+	}
+}
+
+// TestRetestRecordingDiscardTool 端到端覆盖录像丢弃工具：
+// recording_id 必填、跨会话拒绝、文件真删、人侧列表看不到、evidence 引用被拒。
+func TestRetestRecordingDiscardTool(t *testing.T) {
+	s, fid := newRetestServer(t)
+	pg := s.m.pg
+	ctx := t.Context()
+	r, conv, created, err := pg.CreateFindingRetest(ctx, fid, "")
+	if err != nil || !created || conv == nil {
+		t.Fatalf("create retest: %v created=%v", err, created)
+	}
+	const taskID = int64(0)
+	rec, err := pg.CreateRetestRecording(ctx, r.ID, taskID, "terminal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel := fmt.Sprintf("recordings/%d/%d.mp4", r.ID, rec.ID)
+	if err := pg.SetRetestRecordingLive(ctx, rec.ID, ":99", "sess", rel, 1280, 800, 15); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.FinishRetestRecording(ctx, rec.ID, "completed", 1500, 4096, "sha", ""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pg.Exec(`DELETE FROM finding_retest_recordings WHERE retest_id=$1`, r.ID)
+		_, _ = pg.Exec(`DELETE FROM finding_retests WHERE id=$1`, r.ID)
+	})
+	abs := filepath.Join(s.m.dir, "tasks", strconv.FormatInt(taskID, 10), rel)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte("fake mp4"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var recTool actool.CoreTool
+	for _, tool := range s.findingRetestTools() {
+		if tool.Name() == "retest_recording" {
+			recTool = tool
+		}
+	}
+	if recTool == nil {
+		t.Fatal("缺少 retest_recording 工具")
+	}
+	callCtx := intercept.WithConvID(ctx, conv.ID)
+
+	// recording_id 必填
+	res, err := recTool.Call(callCtx, json.RawMessage(`{"action":"discard","reason":"黑屏"}`), nil)
+	if err != nil || !res.IsError {
+		t.Fatalf("缺 recording_id 应该被拒: %v %+v", err, res)
+	}
+	// 跨会话
+	res, err = recTool.Call(intercept.WithConvID(ctx, conv.ID+987654), json.RawMessage(fmt.Sprintf(`{"action":"discard","recording_id":%d,"reason":"黑屏"}`, rec.ID)), nil)
+	if err != nil || !res.IsError {
+		t.Fatalf("跨会话丢弃应该被拒: %v %+v", err, res)
+	}
+	// 正常丢弃
+	res, err = recTool.Call(callCtx, json.RawMessage(fmt.Sprintf(`{"action":"discard","recording_id":%d,"reason":"黑屏，画面里没有命令"}`, rec.ID)), nil)
+	if err != nil || res.IsError {
+		t.Fatalf("discard 失败: %v %+v", err, res)
+	}
+	if _, statErr := os.Stat(abs); !os.IsNotExist(statErr) {
+		t.Fatalf("录屏文件没被删: %v", statErr)
+	}
+	if byFinding, err := pg.RetestRecordingsForFinding(ctx, fid); err != nil {
+		t.Fatal(err)
+	} else if len(byFinding[r.ID]) != 0 {
+		t.Fatalf("人侧列表仍返回已丢弃录屏: %+v", byFinding[r.ID])
+	}
+	// Agent 的 list 也不该再返回它（工具走的是同一条查询）
+	listRes, err := recTool.Call(callCtx, json.RawMessage(`{"action":"list"}`), nil)
+	if err != nil || listRes.IsError {
+		t.Fatalf("list 失败: %v %+v", err, listRes)
+	}
+	if open, err := pg.RetestRecordingsForDiscard(ctx, conv.ID); err != nil || len(open) != 0 {
+		t.Fatalf("丢弃后 Agent 列表仍返回录屏: %v %d", err, len(open))
+	}
+	// evidence 引用已丢弃录屏 → 拒绝
+	res, err = s.findingRetestTools()[1].Call(callCtx,
+		json.RawMessage(`{"verdict":"reproduced","summary":"ok","evidence":"## 复测录屏\n- 文件：`+rel+`"}`), nil)
+	if err != nil || !res.IsError {
+		t.Fatalf("evidence 引用已丢弃录屏应被拒: %v %+v", err, res)
 	}
 }

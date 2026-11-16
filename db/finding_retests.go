@@ -138,7 +138,9 @@ func (r *FindingRetest) InitialMessage() string {
 2. 录屏内容按最小可复现原则：只保留复现该漏洞必需的关键步骤，不做冗余操作（不要全量扫描、不要重复试错、不要跑与结论无关的侦察）。
 3. 复现命令尽量与漏洞报告中的操作相同或相近（同一条请求、同一条命令、同一组参数），只复现关键点；确有必要偏离时，在 evidence 里写明原因。
 4. 开始复现前，先在同一录屏终端里做一次环境可达性检查（例如 ping、curl -I 或连接目标端口），让视频开头能看出目标环境可达、走的是同一条路径。
-5. 关键节点用 retest_recording(action=mark, note=...) 标记（如"可达性确认""触发溢出""命令回显"），结束时 action=stop，并把返回的 path 与时间点写进 evidence 的「复测录屏」小节。`)
+5. 关键节点用 retest_recording(action=mark, note=...) 标记（如"可达性确认""触发溢出""命令回显"），结束时 action=stop，并把返回的 path 与时间点写进 evidence 的「复测录屏」小节。
+6. 一条命令只做一件事：多步操作直接放进 retest_terminal_exec 的 commands 数组（或一行内用 ; && 连接），工具会逐条敲进终端、逐条上镜，视频里显示的就是命令原文；不要用 heredoc / 子 shell / 后台 & 把整段脚本塞进一条命令，那类命令会整条按脚本执行（画面里只有 bash .cmd-N.sh）。
+7. 录完自己验一遍画面：黑屏 / 步骤跑偏 / 关键动作没在画面里 / 录到无关或敏感内容，就 retest_recording(action=list) 查出 recording_id，再 action=discard(recording_id, reason) 丢掉并重录（单次复测最多丢 5 段）。丢弃的录屏对人侧不可见（行留痕可审计），evidence 与 summary 里不允许再引用它。`)
 	if r.Notes != "" {
 		b.WriteString("\n\n本次复测补充说明：\n" + r.Notes)
 	}
@@ -300,25 +302,32 @@ type FindingRetestRecording struct {
 	DurationMS  int64           `json:"duration_ms"`
 	SizeBytes   int64           `json:"size_bytes"`
 	Error       string          `json:"error"`
+	// 丢弃标记与原因：行保留可审计，但对人侧（接口/播放）不可见，所以不出 JSON。
+	DiscardedAt     *time.Time `json:"-"`
+	DiscardedReason string     `json:"-"`
 	// URL 由 server 填充（/api/finding-retest-recordings/<id>/stream），不落库。
 	URL string `json:"url,omitempty"`
 }
 
 // recordingColsQualified 用于 JOIN 查询（与 recordingCols 顺序一致，避免 id 歧义）。
 const recordingColsQualified = `r.id, r.retest_id, r.task_id, r.app, r.backend, r.display, r.tmux_session, r.path, r.status,
-	r.width, r.height, r.fps, r.exec_count, r.marks, r.sha256, r.started_at, r.finished_at, r.duration_ms, r.size_bytes, r.error`
+	r.width, r.height, r.fps, r.exec_count, r.marks, r.sha256, r.started_at, r.finished_at, r.duration_ms, r.size_bytes, r.error,
+	r.discarded_at, r.discarded_reason`
 
 // recordingCols 只用于**单表**查询。任何 JOIN 都必须用 recordingColsQualified：
 // 两张表都有 id/retest_id，裸列名会让 Postgres 报 42702 ambiguous。
 const recordingCols = `id, retest_id, task_id, app, backend, display, tmux_session, path, status,
-	width, height, fps, exec_count, marks, sha256, started_at, finished_at, duration_ms, size_bytes, error`
+	width, height, fps, exec_count, marks, sha256, started_at, finished_at, duration_ms, size_bytes, error,
+	discarded_at, discarded_reason`
 
 func scanRecording(row interface{ Scan(...any) error }) (*FindingRetestRecording, error) {
 	r := &FindingRetestRecording{}
 	var marks []byte
+	var discardedAt sql.NullTime
 	err := row.Scan(&r.ID, &r.RetestID, &r.TaskID, &r.App, &r.Backend, &r.Display, &r.TmuxSession, &r.Path,
 		&r.Status, &r.Width, &r.Height, &r.FPS, &r.ExecCount, &marks, &r.SHA256,
-		&r.StartedAt, &r.FinishedAt, &r.DurationMS, &r.SizeBytes, &r.Error)
+		&r.StartedAt, &r.FinishedAt, &r.DurationMS, &r.SizeBytes, &r.Error,
+		&discardedAt, &r.DiscardedReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -329,6 +338,10 @@ func scanRecording(row interface{ Scan(...any) error }) (*FindingRetestRecording
 		marks = []byte("[]")
 	}
 	r.Marks = marks
+	if discardedAt.Valid {
+		t := discardedAt.Time
+		r.DiscardedAt = &t
+	}
 	return r, nil
 }
 
@@ -413,11 +426,96 @@ func (d *DB) RetestRecordingByID(ctx context.Context, id int64) (*FindingRetestR
 	return scanRecording(d.QueryRowContext(ctx, `SELECT `+recordingCols+` FROM finding_retest_recordings WHERE id=$1`, id))
 }
 
+// RetestDiscardMax 是单次复测可丢弃的录屏段数上限（防模型反复重录 loop）。
+const RetestDiscardMax = 5
+
+// DiscardRetestRecording 把一段录屏标记为丢弃：行保留（sha256/时长/原因可审计），
+// 人侧查询与播放都看不到它。只允许丢本会话复测的录屏，且必须已经 stop。
+func (d *DB) DiscardRetestRecording(ctx context.Context, conversationID, recID int64, reason string) (*FindingRetestRecording, error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return nil, errors.New("reason 必须说明这段录屏为什么不能用")
+	}
+	rec, err := scanRecording(d.QueryRowContext(ctx, `SELECT `+recordingColsQualified+`
+FROM finding_retest_recordings r JOIN finding_retests t ON t.id=r.retest_id
+WHERE r.id=$1 AND t.conversation_id=$2`, recID, conversationID))
+	if err != nil {
+		return nil, err
+	}
+	if rec == nil {
+		return nil, errors.New("录屏不存在，或不属于本次复测")
+	}
+	if rec.DiscardedAt != nil {
+		return rec, nil // 幂等
+	}
+	switch rec.Status {
+	case "completed", "failed", "interrupted":
+	default:
+		return nil, errors.New("这段录屏还在录制中：先 retest_recording(action=stop) 再丢弃")
+	}
+	var used int
+	if err := d.QueryRowContext(ctx, `SELECT count(*) FROM finding_retest_recordings
+WHERE retest_id=$1 AND discarded_at IS NOT NULL`, rec.RetestID).Scan(&used); err != nil {
+		return nil, err
+	}
+	if used >= RetestDiscardMax {
+		return nil, fmt.Errorf("本次复测最多丢弃 %d 段录屏", RetestDiscardMax)
+	}
+	now := time.Now()
+	if _, err := d.ExecContext(ctx, `UPDATE finding_retest_recordings SET discarded_at=$2, discarded_reason=$3
+WHERE id=$1 AND discarded_at IS NULL`, recID, now, reason); err != nil {
+		return nil, err
+	}
+	rec.DiscardedAt = &now
+	rec.DiscardedReason = reason
+	return rec, nil
+}
+
+// RetestRecordingsForDiscard 列出本次复测仍有效（未丢弃）的录屏，供 Agent 决定丢哪一段。
+func (d *DB) RetestRecordingsForDiscard(ctx context.Context, conversationID int64) ([]*FindingRetestRecording, error) {
+	rows, err := d.QueryContext(ctx, `SELECT `+recordingColsQualified+`
+FROM finding_retest_recordings r JOIN finding_retests t ON t.id=r.retest_id
+WHERE t.conversation_id=$1 AND r.discarded_at IS NULL ORDER BY r.id`, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*FindingRetestRecording{}
+	for rows.Next() {
+		r, err := scanRecording(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// DiscardedRecordingIDs 返回本次复测已丢弃的录屏 id，用于校验 evidence 不再引用它们。
+func (d *DB) DiscardedRecordingIDs(ctx context.Context, conversationID int64) (map[int64]struct{}, error) {
+	rows, err := d.QueryContext(ctx, `SELECT r.id FROM finding_retest_recordings r
+JOIN finding_retests t ON t.id=r.retest_id
+WHERE t.conversation_id=$1 AND r.discarded_at IS NOT NULL`, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]struct{}{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
 // RetestRecordingsForFinding 供复测列表一次性带出历史录屏，避免 N+1。
 func (d *DB) RetestRecordingsForFinding(ctx context.Context, findingID int64) (map[int64][]*FindingRetestRecording, error) {
 	rows, err := d.QueryContext(ctx, `SELECT `+recordingColsQualified+` FROM finding_retest_recordings r
 JOIN finding_retests t ON t.id=r.retest_id
-WHERE t.finding_id=$1 ORDER BY r.id DESC`, findingID)
+WHERE t.finding_id=$1 AND r.discarded_at IS NULL ORDER BY r.id DESC`, findingID)
 	if err != nil {
 		return nil, err
 	}
@@ -431,7 +529,7 @@ func (d *DB) RetestRecordingsForRetests(ctx context.Context, retestIDs []int64) 
 		return map[int64][]*FindingRetestRecording{}, nil
 	}
 	rows, err := d.QueryContext(ctx, `SELECT `+recordingColsQualified+` FROM finding_retest_recordings r
-WHERE r.retest_id = ANY($1::bigint[]) ORDER BY r.id DESC`, retestIDs)
+WHERE r.retest_id = ANY($1::bigint[]) AND r.discarded_at IS NULL ORDER BY r.id DESC`, retestIDs)
 	if err != nil {
 		return nil, err
 	}

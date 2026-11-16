@@ -1340,6 +1340,10 @@ CREATE INDEX IF NOT EXISTS idx_retest_recordings_retest ON finding_retest_record
 CREATE UNIQUE INDEX IF NOT EXISTS idx_retest_recordings_active ON finding_retest_recordings(retest_id)
     WHERE status IN ('starting','recording','stopping');
 
+-- 录屏丢弃：行保留（留 sha256/时长/原因可审计），人侧查询与播放都看不到。
+ALTER TABLE finding_retest_recordings ADD COLUMN IF NOT EXISTS discarded_at TIMESTAMPTZ;
+ALTER TABLE finding_retest_recordings ADD COLUMN IF NOT EXISTS discarded_reason TEXT NOT NULL DEFAULT '';
+
 
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS evidence_version BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_evidence_version BIGINT NOT NULL DEFAULT 0;

@@ -240,3 +240,93 @@ func TestRetestFixedTriageOnlyAfterSuccessfulCompletion(t *testing.T) {
 		})
 	}
 }
+
+// TestDiscardRetestRecording 覆盖录屏丢弃：reason 必填、只能丢本会话、行留痕、
+// 人侧两种列表都看不到、Agent 列表不含、已丢弃集合正确、幂等、超过上限被拒。
+func TestDiscardRetestRecording(t *testing.T) {
+	d, fid := retestDB(t)
+	ctx := t.Context()
+	r, conv, created, err := d.CreateFindingRetest(ctx, fid, "")
+	if err != nil || !created || conv == nil {
+		t.Fatalf("create retest: %v created=%v", err, created)
+	}
+	t.Cleanup(func() {
+		_, _ = d.Exec(`DELETE FROM finding_retest_recordings WHERE retest_id=$1`, r.ID)
+		_, _ = d.Exec(`DELETE FROM finding_retests WHERE id=$1`, r.ID)
+	})
+	convID := conv.ID
+
+	mk := func() *FindingRetestRecording {
+		rec, err := d.CreateRetestRecording(ctx, r.ID, 0, "terminal")
+		if err != nil {
+			t.Fatalf("create recording: %v", err)
+		}
+		if err := d.SetRetestRecordingLive(ctx, rec.ID, ":99", "sess", "recordings/1/x.mp4", 1280, 800, 15); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.FinishRetestRecording(ctx, rec.ID, "completed", 1000, 2048, "sha", ""); err != nil {
+			t.Fatal(err)
+		}
+		rec.Status = "completed"
+		return rec
+	}
+
+	rec := mk()
+	if _, err := d.DiscardRetestRecording(ctx, convID, rec.ID, "   "); err == nil {
+		t.Fatal("空 reason 应该被拒")
+	}
+	if _, err := d.DiscardRetestRecording(ctx, convID+987654, rec.ID, "黑屏"); err == nil {
+		t.Fatal("跨会话丢弃应该被拒")
+	}
+
+	got, err := d.DiscardRetestRecording(ctx, convID, rec.ID, "黑屏，画面里没有命令")
+	if err != nil {
+		t.Fatalf("discard: %v", err)
+	}
+	if got.DiscardedAt == nil || !strings.Contains(got.DiscardedReason, "黑屏") {
+		t.Fatalf("丢弃标记没落库: %+v", got)
+	}
+	// 行还在（可审计）
+	var rows int
+	if err := d.QueryRow(`SELECT count(*) FROM finding_retest_recordings WHERE id=$1 AND sha256='sha'`, rec.ID).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("丢行而不是留痕: rows=%d err=%v", rows, err)
+	}
+	if again, err := d.DiscardRetestRecording(ctx, convID, rec.ID, "再丢一次"); err != nil || again.DiscardedAt == nil {
+		t.Fatalf("重复丢弃应幂等: %v", err)
+	}
+
+	byFinding, err := d.RetestRecordingsForFinding(ctx, fid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byFinding[r.ID]) != 0 {
+		t.Fatalf("已丢弃的录屏不该出现在漏洞维度列表: %+v", byFinding[r.ID])
+	}
+	byRetest, err := d.RetestRecordingsForRetests(ctx, []int64{r.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byRetest[r.ID]) != 0 {
+		t.Fatalf("已丢弃的录屏不该出现在复测维度列表: %+v", byRetest[r.ID])
+	}
+	if open, err := d.RetestRecordingsForDiscard(ctx, convID); err != nil || len(open) != 0 {
+		t.Fatalf("Agent 列表不该含已丢弃录屏: %v %d", err, len(open))
+	}
+	set, err := d.DiscardedRecordingIDs(ctx, convID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := set[rec.ID]; !ok {
+		t.Fatal("已丢弃集合缺少这条")
+	}
+
+	// 上限：已有 1 段，再丢到 RetestDiscardMax 段后再丢就报错。
+	for i := 1; i < RetestDiscardMax; i++ {
+		if _, err := d.DiscardRetestRecording(ctx, convID, mk().ID, "重录"); err != nil {
+			t.Fatalf("第 %d 段丢弃失败: %v", i+1, err)
+		}
+	}
+	if _, err := d.DiscardRetestRecording(ctx, convID, mk().ID, "超限"); err == nil {
+		t.Fatalf("超过 %d 段应被拒", RetestDiscardMax)
+	}
+}

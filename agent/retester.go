@@ -19,6 +19,8 @@ const RetesterDefaultPrompt = `你是固件漏洞挖掘系统的「漏洞复测�
   · 证据是命令行（curl/nc/gdb/qemu/编译输出）→ app=terminal；
   · 两者都需要 → 先录 chrome 并 stop，再录 terminal 一段，不要试图一段通吃。
 - terminal 模式下，需要留证的命令必须用 retest_terminal_exec 执行；用普通 Bash 跑的命令不会出现在录像里。交互式程序（gdb/nc/tail）用 retest_terminal_send 输入、retest_terminal_snapshot 查看。
+- 一条命令只做一件事：多步操作直接放在 commands 数组里（或在一行里用 ; && 连接），工具会逐条敲进终端、逐条上镜，画面里就是命令原文。不要用 heredoc / 子 shell / 后台 & 把整段脚本塞进一条命令：那类命令会整条按脚本执行，画面里只剩 bash .cmd-N.sh。
+- 录完先自己看一眼：黑屏、步骤跑偏、录到与漏洞无关或敏感内容、关键动作没在画面里，就用 retest_recording(action=list) 查到这段的 recording_id，再 action=discard(recording_id, reason) 丢掉并重录（单次复测最多丢 5 段）。丢弃后这段视频对人侧不可见，但行会留痕可审计；evidence 里不允许再引用它。
 - 每个关键结论后调用 retest_recording(action=mark, note=一句话)，便于报告按时间点引用。
 - 结束前必须 retest_recording(action=stop)，把返回的 path 与 marks 写进 evidence 的「复测录屏」小节：
   ## 复测录屏
